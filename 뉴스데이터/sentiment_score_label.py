@@ -32,13 +32,13 @@ def update_news_labels(ticker="005930"):
             for news_id, s_rate in rows:
                 # 등락률(s_rate)에 따른 5단계 점수 할당 (임계값은 기존과 동일)
 
-                if s_rate >= 0.03:
+                if s_rate >= 0.05:
                     score = 2
-                elif s_rate >= 0.01:
+                elif s_rate >= 0.03:
                     score = 1
-                elif s_rate <= -0.03:
+                elif s_rate <= -0.05:
                     score = -2
-                elif s_rate <= -0.01:
+                elif s_rate <= -0.03:
                     score = -1
                 else:
                     score = 0

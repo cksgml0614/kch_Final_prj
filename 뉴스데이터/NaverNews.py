@@ -84,10 +84,9 @@ def collect_and_store_news(ticker):
             print(f"ℹ️ {stock_info['name']}: 오늘 새로 올라온 관련 뉴스가 없습니다.")
             return
 
-        insert_query = """
-                       INSERT INTO daily_news (ticker, date, title, summary)
-                       VALUES (%s, %s, %s, %s)
-                       ON CONFLICT DO NOTHING; \
+        insert_query = """INSERT INTO daily_news (ticker, date, title, summary)
+                          VALUES (%s, %s, %s, %s)
+                          ON CONFLICT (ticker, date, title, summary) DO NOTHING; \
                        """
 
         with get_db_connection() as conn:

@@ -13,11 +13,12 @@ CREATE TABLE IF NOT EXISTS daily_stock_prices (
 -- 뉴스 데이터 테이블 (BigKinds 및 Naver API 통합용)
 CREATE TABLE IF NOT EXISTS daily_news (
     id SERIAL PRIMARY KEY,
-    ticker VARCHAR(10), -- 종목코드
-    date DATE,          -- 뉴스 날짜
-    title TEXT,         -- 뉴스 제목
-    summary TEXT,      -- 뉴스 요약본
-    sentiment_score FLOAT DEFAULT NULL -- 나중에 감성분석으로 채울 예정
+    ticker VARCHAR(10),  -- 종목코드
+    date DATE,           -- 뉴스 날짜
+    title TEXT,          -- 뉴스 제목
+    summary TEXT,        -- 뉴스 요약본
+    sentiment_score FLOAT DEFAULT NULL, -- 나중에 감성분석으로 채울 예정
+    CONSTRAINT uq_news_ticker_date_title_summary UNIQUE (ticker, date, title, summary)
 );
 -- 날짜별로 뉴스를 검색하는 경우가 많으므로 인덱스 추가 (성능 최적화)
 CREATE INDEX IF NOT EXISTS idx_news_date ON daily_news(date);

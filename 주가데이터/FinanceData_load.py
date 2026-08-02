@@ -45,6 +45,7 @@ def update_stock_data(ticker):
                 print(f"📍 {ticker}: 새로 추가할 데이터가 없습니다 (주말/휴장일 등).")
                 return "스킵 (신규 데이터 없음)"
 
+
             # 3. 데이터 가공 및 적재 (기존 로직 동일)
             df = df.reset_index()
             df['ticker'] = ticker

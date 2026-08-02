@@ -8,3 +8,11 @@ DROP TABLE IF EXISTS market_indicators CASCADE;
 -- DROP INDEX IF EXISTS idx_news_date;
 -- DROP INDEX IF EXISTS idx_news_ticker;
 -- DROP INDEX IF EXISTS idx_indicators_date;
+
+
+
+SELECT sentiment_score, COUNT(*)
+FROM daily_news
+WHERE sentiment_score IS NOT NULL
+GROUP BY sentiment_score
+ORDER BY sentiment_score;
