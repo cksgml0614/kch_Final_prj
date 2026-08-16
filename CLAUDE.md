@@ -9,13 +9,13 @@
 | 트랙 | 지시서 | 상태 |
 |---|---|---|
 | **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md` | Task A 완료, 판정 승인됨. **Task B 보류 중** |
-| **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | G-0~G-3 완료. **G-4 착수 대기** |
+| **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | **G-0~G-4 전체 완료** |
 
-**다음 할 일: Task G-4** (`시장지표/feature_loader.py` 작성, 누수 없는 피처 조회 함수)
+**다음 갈림길**: Task G가 끝나 두 방향이 열렸다 — (a) Transformer 트랙 착수(ablation baseline, `feature_loader.py` 사용) 또는 (b) 뉴스/감성 Task B 재개. **아직 사람이 정하지 않았으니 임의로 착수하지 않는다.**
 
 ⚠️ 뉴스/감성 트랙은 명시적 지시 없이 재개하지 않는다. Task A 보고서 말미에 "Task B로 넘어가겠습니다"라는 대기 문구가 있으나, 현재는 주가/거시 트랙을 우선하기로 결정했다.
 
-`market_indicators`에 총 9개 지표 적재 완료: KOSPI/KOSDAQ/USD_KRW(G-2, FDR, 14,072행) + 기준금리·국고채3년·국고채10년·CPI·M2·선행지수순환변동치(G-3, ECOS, 24,883행). 반도체 수출금액지수는 종목 특화 지표라 공통 테이블 설계 원칙과 맞지 않아 제외.
+`market_indicators`에 총 9개 지표, 38,955행(=14,072+24,883) 적재 완료: KOSPI/KOSDAQ/USD_KRW(G-2, FDR, 14,072행) + 기준금리·국고채3년·국고채10년·CPI·M2·선행지수순환변동치(G-3, ECOS, 24,883행). 반도체 수출금액지수는 종목 특화 지표라 공통 테이블 설계 원칙과 맞지 않아 제외. `시장지표/feature_loader.py`(G-4)로 누수 없는 피처 조회 가능 — `get_features(ticker, start_date, end_date)`가 종목 OHLCV + 지표 9개를 `published_date < 거래일` 조건으로 병합해 반환.
 
 ---
 
@@ -191,7 +191,7 @@ kch_Final_prj/
 │   ├── market_index_load.py   # G-2: KOSPI/KOSDAQ/USD_KRW 적재 ✅ 완료
 │   ├── ecos_load.py           # G-3: ECOS 거시지표 6종 적재 ✅ 완료
 │   ├── db_utils.py            # G-2/G-3 공통 upsert 로직 (indicator_meta/market_indicators)
-│   └── feature_loader.py      # G-4: 누수 없는 피처 조회 (신규 생성 예정)
+│   └── feature_loader.py      # G-4: 누수 없는 피처 조회 ✅ 완료
 ├── 뉴스데이터/
 │   ├── NaverNews.py           # ⚠️ DB 기여 0행, 폐기 예정 (쓰래기통 이동)
 │   ├── NaverNewsCrawl.py      # ⚠️ Task B에서 NaverFinanceNews.py로 대체 예정
@@ -325,16 +325,16 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 
 ## 로드맵
 
-### 주가/거시 트랙 (Task G) — 진행 중
+### 주가/거시 트랙 (Task G) — ✅ 전체 완료
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | G-0 | 스키마 확인 | ✅ 완료 |
 | G-1 | 스키마 설계 + 마이그레이션 + 제약 검증 | ✅ 완료 |
 | G-2 | `시장지표/market_index_load.py`, KOSPI/KOSDAQ/USD_KRW 적재 | ✅ 완료 (14,072행) |
 | G-3 | ECOS 지표 코드 조회 → 적재 (기준금리·국고채3·10년·CPI·M2·선행지수) | ✅ 완료 (24,883행) |
-| **G-4** | **`feature_loader.py` — 누수 없는 피처 조회 + 검증** | **← 다음** |
+| G-4 | `feature_loader.py` — 누수 없는 피처 조회 + 검증 | ✅ 완료 |
 
-G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수익률 라벨링(Task E)이 열린다.
+G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수익률 라벨링(Task E)이 열린다. G-4 완료로 Transformer ablation baseline 착수에 필요한 피처 조회 함수도 준비됐다.
 
 ### 뉴스/감성 트랙 (Task A~F) — 보류
 | 단계 | 내용 | 상태 |
@@ -348,8 +348,8 @@ G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수
 
 **Task B 착수 전 확인 필수**: 네이버 금융 종목뉴스 페이지의 과거 조회 가능 기간 (005930 기준 2020/2022/2023년 접근 테스트)
 
-### Transformer 트랙 — 미착수
-G-4 완료 후 착수. **감성 피처 없이 주가 + 거시지표만으로 학습한 결과가 ablation baseline이 된다.** 이 baseline 없이는 "뉴스 감성 추가로 개선되었는가"를 증명할 수 없으므로, 감성 트랙보다 먼저 만들어두는 것이 합리적이다.
+### Transformer 트랙 — 미착수 (G-4 완료로 착수 가능, 사람 지시 대기)
+**감성 피처 없이 주가 + 거시지표만으로 학습한 결과가 ablation baseline이 된다.** 이 baseline 없이는 "뉴스 감성 추가로 개선되었는가"를 증명할 수 없으므로, 감성 트랙보다 먼저 만들어두는 것이 합리적이다.
 
 ### 이후
 스케줄러/크론 자동화, 추론(서빙) 코드, 컨테이너화(Docker → Kubernetes, 최후순위)
