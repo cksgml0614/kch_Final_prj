@@ -13,6 +13,7 @@ import FinanceDataReader as fdr
 import pandas as pd
 
 from db_manager import get_db_connection
+from 시장지표.db_utils import get_last_date, upsert_indicator_meta, upsert_market_indicators
 
 # alias(indicator_code) -> FDR 심볼. 임시 매핑 방식(TASK_G_market_indicators_적재.md G-2 참고).
 # indicator_meta 스키마에 source_symbol 컬럼이 없어 로더 내부 딕셔너리로만 관리한다.
@@ -38,28 +39,6 @@ INDICATOR_META = {
 }
 
 
-def upsert_indicator_meta(cur):
-    """indicator_meta를 alias 3건으로 upsert. market_indicators 적재보다 먼저 실행해야 한다 (FK)."""
-    query = """
-        INSERT INTO indicator_meta (indicator_code, name, source, frequency, unit, note)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (indicator_code) DO UPDATE
-            SET name = EXCLUDED.name,
-                source = EXCLUDED.source,
-                frequency = EXCLUDED.frequency,
-                unit = EXCLUDED.unit,
-                note = EXCLUDED.note
-    """
-    for code, meta in INDICATOR_META.items():
-        cur.execute(query, (code, meta["name"], meta["source"], meta["frequency"], meta["unit"], meta["note"]))
-
-
-def get_last_date(cur, indicator_code):
-    """DB에서 해당 지표의 가장 최신 date를 가져온다."""
-    cur.execute("SELECT MAX(date) FROM market_indicators WHERE indicator_code = %s", (indicator_code,))
-    return cur.fetchone()[0]
-
-
 def fetch_indicator_data(indicator_code, start_date=None):
     """FDR에서 alias에 대응하는 심볼 데이터를 조회해 적재용 튜플 리스트로 가공한다.
     DB에 쓰지 않는 순수 조회 함수 — 체크포인트 확인용으로 단독 호출 가능."""
@@ -79,31 +58,6 @@ def fetch_indicator_data(indicator_code, start_date=None):
         (indicator_code, row["Date"].date(), round(float(row["Close"]), 4), row["Date"].date())
         for _, row in df.iterrows()
     ]
-
-
-def upsert_market_indicators(cur, records):
-    """G-1 계약: IS DISTINCT FROM + RETURNING으로 신규/개정 건수를 구분한다."""
-    query = """
-        INSERT INTO market_indicators (indicator_code, date, value, published_date)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (indicator_code, date) DO UPDATE
-            SET value = EXCLUDED.value,
-                published_date = EXCLUDED.published_date
-            WHERE market_indicators.value IS DISTINCT FROM EXCLUDED.value
-        RETURNING (xmax <> 0) AS was_update
-    """
-    inserted = 0
-    updated = 0
-    for rec in records:
-        cur.execute(query, rec)
-        result = cur.fetchone()
-        if result is None:
-            continue  # 값이 동일해 WHERE 절에 걸려 스킵된 기존 행
-        if result[0]:
-            updated += 1
-        else:
-            inserted += 1
-    return inserted, updated
 
 
 def update_indicator(cur, indicator_code):
@@ -163,7 +117,7 @@ if __name__ == "__main__":
             raise SystemExit("DB 연결 실패")
 
         with conn.cursor() as cur:
-            upsert_indicator_meta(cur)
+            upsert_indicator_meta(cur, INDICATOR_META)
 
             results = {}
             for code in INDICATOR_MAP:
