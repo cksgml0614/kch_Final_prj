@@ -9,13 +9,13 @@
 | 트랙 | 지시서 | 상태 |
 |---|---|---|
 | **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md` | Task A 완료, 판정 승인됨. **Task B 보류 중** |
-| **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | G-0, G-1 완료. **G-2 착수 대기** |
+| **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | G-0~G-3 완료. **G-4 착수 대기** |
 
-**다음 할 일: Task G-2** (`시장지표/market_index_load.py` 작성, KS11/KQ11 적재)
+**다음 할 일: Task G-4** (`시장지표/feature_loader.py` 작성, 누수 없는 피처 조회 함수)
 
 ⚠️ 뉴스/감성 트랙은 명시적 지시 없이 재개하지 않는다. Task A 보고서 말미에 "Task B로 넘어가겠습니다"라는 대기 문구가 있으나, 현재는 주가/거시 트랙을 우선하기로 결정했다.
 
-⚠️ **블로커**: `.env`에 `ECOS_API_KEY` 없음. G-2는 키 없이 가능하지만 G-3은 발급이 선행되어야 함. 한국은행 ECOS 오픈API에서 발급.
+`market_indicators`에 총 9개 지표 적재 완료: KOSPI/KOSDAQ/USD_KRW(G-2, FDR, 14,072행) + 기준금리·국고채3년·국고채10년·CPI·M2·선행지수순환변동치(G-3, ECOS, 24,883행). 반도체 수출금액지수는 종목 특화 지표라 공통 테이블 설계 원칙과 맞지 않아 제외.
 
 ---
 
@@ -187,10 +187,11 @@ kch_Final_prj/
 │                                      # (001은 Task B의 news 스키마용으로 예약, 미작성)
 ├── 주가데이터/
 │   └── FinanceData_load.py    # FinanceDataReader로 OHLCV 증분 수집
-├── 시장지표/                   # (Task G에서 신규 생성 예정)
-│   ├── market_index_load.py   # G-2: KS11/KQ11 적재
-│   ├── ecos_load.py           # G-3: ECOS 거시지표 적재
-│   └── feature_loader.py      # G-4: 누수 없는 피처 조회
+├── 시장지표/
+│   ├── market_index_load.py   # G-2: KOSPI/KOSDAQ/USD_KRW 적재 ✅ 완료
+│   ├── ecos_load.py           # G-3: ECOS 거시지표 6종 적재 ✅ 완료
+│   ├── db_utils.py            # G-2/G-3 공통 upsert 로직 (indicator_meta/market_indicators)
+│   └── feature_loader.py      # G-4: 누수 없는 피처 조회 (신규 생성 예정)
 ├── 뉴스데이터/
 │   ├── NaverNews.py           # ⚠️ DB 기여 0행, 폐기 예정 (쓰래기통 이동)
 │   ├── NaverNewsCrawl.py      # ⚠️ Task B에서 NaverFinanceNews.py로 대체 예정
@@ -314,7 +315,6 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 ---
 
 ## 알려진 이슈 / 정리 필요 항목
-- `.env`에 `ECOS_API_KEY` 없음 — **G-3 블로커**
 - `requirements.txt`에 `psycopg`와 `psycopg-binary` 중복 — 정리 검토
 - `docker-compose.yml` DB 비밀번호 하드코딩 → `.env` 참조로 전환 필요
 - `market_indicators.unit` DEPRECATED — 적재 시 NULL로 두고 `indicator_meta.unit` 사용
@@ -330,11 +330,11 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 |---|---|---|
 | G-0 | 스키마 확인 | ✅ 완료 |
 | G-1 | 스키마 설계 + 마이그레이션 + 제약 검증 | ✅ 완료 |
-| **G-2** | **`시장지표/market_index_load.py`, KS11/KQ11 적재** | **← 다음** |
-| G-3 | ECOS 지표 코드 조회 → 적재 (API 키 필요) | 대기 |
-| G-4 | `feature_loader.py` — 누수 없는 피처 조회 + 검증 | 대기 |
+| G-2 | `시장지표/market_index_load.py`, KOSPI/KOSDAQ/USD_KRW 적재 | ✅ 완료 (14,072행) |
+| G-3 | ECOS 지표 코드 조회 → 적재 (기준금리·국고채3·10년·CPI·M2·선행지수) | ✅ 완료 (24,883행) |
+| **G-4** | **`feature_loader.py` — 누수 없는 피처 조회 + 검증** | **← 다음** |
 
-G-2 완료 시 KOSPI 등락률이 확보되어 초과수익률 라벨링(Task E)이 열린다.
+G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수익률 라벨링(Task E)이 열린다.
 
 ### 뉴스/감성 트랙 (Task A~F) — 보류
 | 단계 | 내용 | 상태 |
