@@ -19,3 +19,6 @@ __pycache__/
 
 # KoBERT 학습 체크포인트/학습곡선 (대용량 바이너리, 로컬에서 생성)
 감성분석/checkpoints/
+
+# Task T 진단/학습 산출물 (히트맵 등 이미지, 로컬에서 생성)
+가격예측/checkpoints/
