@@ -1,3 +1,7 @@
+# 주가_공통.py
+# 주가_초기적재.py / 주가_일일수집.py가 대등하게 참조하는 공용 로직(2026-08-23, 뉴스 트랙의
+# 뉴스_공통.py 패턴과 통일). 두 파일 모두 이 파일만 import하고 서로를 참조하지 않는다.
+
 import FinanceDataReader as fdr
 from datetime import timedelta, date
 from db_manager import get_db_connection
@@ -16,37 +20,45 @@ def get_last_date(cur, ticker):
     return result
 
 
-def update_stock_data(ticker):
-    with get_db_connection() as conn:  # 중앙 매니저에게 연결을 요청
+def _needs_initial_load(ticker):
+    with get_db_connection() as conn:
+        if not conn:
+            raise RuntimeError("DB 연결 실패")
+        with conn.cursor() as cur:
+            return get_last_date(cur, ticker) is None
+
+
+def update_stock_data(ticker, start_date_override=None):
+    """
+    종목 1건 수집+적재. start_date_override가 주어지면(초기적재용) last_date 유무와 무관하게
+    그 날짜부터 수집한다. 없으면 기존 동작(증분: last_date+1, 최초 실행: 스킵)을 따른다.
+    """
+    with get_db_connection() as conn:
         if not conn:
             return "실패 (DB 연결 없음)"
         with conn.cursor() as cur:
-            # 1. 마지막으로 저장된 날짜 확인
             last_date = get_last_date(cur, ticker)
 
-            if last_date:
-                # 데이터가 있다면 마지막 날짜 '다음 날'부터 수집
+            if start_date_override:
+                start_date = start_date_override
+                print(f"🆕 {ticker}: 초기적재 지정 시작일 {start_date}부터 전체 적재를 시작합니다.")
+            elif last_date:
                 start_date = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
                 print(f"🔄 {ticker}: {last_date}까지 데이터가 있네요. {start_date}부터 업데이트를 시작합니다.")
             else:
-                # 데이터가 아예 없다면 2020년부터 전체 수집
-                start_date = '2020-01-01'
-                print(f"🆕 {ticker}: 저장된 데이터가 없습니다. {start_date}부터 전체 적재를 시작합니다.")
+                print(f"⚠️ {ticker}: 저장된 데이터가 없습니다 — 일일수집 대상 아님. 주가_초기적재.py를 먼저 실행하세요.")
+                return "스킵 (초기적재 필요)"
 
-            # 오늘 날짜와 비교해서 이미 최신이면 종료
             if last_date == date.today():
                 print(f"✅ {ticker}: 이미 최신 데이터입니다.")
                 return "스킵 (이미 최신)"
 
-            # 2. 필요한 만큼만 데이터 수집
             df = fdr.DataReader(ticker, start_date)
 
             if df.empty:
                 print(f"📍 {ticker}: 새로 추가할 데이터가 없습니다 (주말/휴장일 등).")
                 return "스킵 (신규 데이터 없음)"
 
-
-            # 3. 데이터 가공 및 적재 (기존 로직 동일)
             df = df.reset_index()
             df['ticker'] = ticker
             df = df.fillna(0)
@@ -65,17 +77,3 @@ def update_stock_data(ticker):
             cur.executemany(insert_query, data_list)
             print(f"🚀 {ticker}: {len(data_list)}건의 새로운 데이터 적재 완료!")
             return f"완료 ({len(data_list)}건)"
-
-
-if __name__ == "__main__":
-    results = {}
-    for ticker in TICKERS:
-        try:
-            results[ticker] = update_stock_data(ticker)
-        except Exception as e:
-            print(f"❌ {ticker}: 업데이트 실패: {e}")
-            results[ticker] = f"실패 ({e})"
-
-    print("\n=== 처리 결과 요약 ===")
-    for ticker, status in results.items():
-        print(f"{ticker}: {status}")
