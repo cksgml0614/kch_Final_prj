@@ -18,3 +18,4 @@ class Config:
     # API 설정
     NAVER_ID = os.getenv("NAVER_CLIENT_ID")
     NAVER_SECRET = os.getenv("NAVER_CLIENT_SECRET")
+    ECOS_API_KEY = os.getenv("ECOS_API_KEY")
