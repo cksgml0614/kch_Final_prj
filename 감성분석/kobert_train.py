@@ -14,7 +14,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from kobert_dataset import (
+from 감성분석.kobert_dataset import (
     MODEL_NAME,
     LABEL_MAP,
     load_labeled_news,
