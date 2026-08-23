@@ -22,3 +22,6 @@ __pycache__/
 
 # Task T 진단/학습 산출물 (히트맵 등 이미지, 로컬에서 생성)
 가격예측/checkpoints/
+
+# search_backfill 진행 체크포인트 (재개용 상태 파일, 로컬에서 생성)
+뉴스데이터/checkpoints/
