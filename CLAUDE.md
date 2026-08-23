@@ -179,12 +179,10 @@ kch_Final_prj/
 ├── requirements.txt
 ├── TASK_개정판_데이터_재구축.md      # 뉴스/감성 트랙 지시서 (Task A~F)
 ├── TASK_G_market_indicators_적재.md  # 주가/거시 트랙 지시서 (Task G)
-├── Database/
-│   ├── create_tables.sql  # daily_stock_prices, daily_news, market_indicators
-│   ├── init_table.sql     # 전체 테이블 DROP (초기화용, 주의)
-│   └── migrations/
-│       └── 002_market_indicators.sql  # ✅ 적용 완료
-│                                      # (001은 Task B의 news 스키마용으로 예약, 미작성)
+├── Database/              # 2026-08-23 도메인별 폴더로 재구성 (옛 create_tables.sql/init_table.sql/migrations/ 삭제)
+│   ├── 뉴스/               # 테이블_생성.sql(daily_news) / 데이터_삭제.sql / 테이블_삭제.sql
+│   ├── 주가/               # 테이블_생성.sql(daily_stock_prices) / 데이터_삭제.sql / 테이블_삭제.sql
+│   └── 시장지표/            # 테이블_생성.sql(indicator_meta→market_indicators, FK 순서) / 데이터_삭제.sql / 테이블_삭제.sql
 ├── 주가데이터/
 │   └── FinanceData_load.py    # FinanceDataReader로 OHLCV 증분 수집
 ├── 시장지표/
@@ -210,14 +208,26 @@ kch_Final_prj/
 
 ## DB 스키마
 
-### daily_stock_prices `(ticker, date)` PK
+2026-08-23부터 `Database/{도메인}/테이블_생성.sql`이 "지금 스키마"의 유일한 정본이다(운영 DB를
+`information_schema`/`pg_constraint`/`pg_indexes`로 직접 조회해 실측 검증 완료 — 격리된 임시
+스키마에 재생성해 컬럼/제약/인덱스 단위까지 100% 일치 확인). 아래는 그 요약이며, 상세 타입/제약은
+해당 SQL 파일을 참고할 것. 옛 `Database/create_tables.sql`/`init_table.sql`/`migrations/`는
+삭제됨(이 SQL 파일들로 대체).
+
+**부가 발견**: DB에 `daily_news_backup` 테이블(마이그레이션 이전 구 6컬럼 스키마 스냅샷, 5,278행,
+CLAUDE.md/코드 어디에도 문서화 안 됨)이 있었음 — FK/인덱스 없음 확인 후 사람 승인으로 삭제됨
+(2026-08-23).
+
+### daily_stock_prices `(ticker, date)` PK — `Database/주가/테이블_생성.sql`
 OHLCV + change_rate. 2020-01-02 ~ 2026-07-31, 거래일 1,615일. 005930/000660 각 1,615행
 
-### daily_news `(id)`
-ticker, date, title, summary, sentiment_score(nullable)
-- **Task B에서 추가 예정**: `published_at`(발행 시각), `target_date`(예측 대상 거래일), `source`, `press`, `article_url`(UNIQUE), `excess_label`
+### daily_news `(id)` — `Database/뉴스/테이블_생성.sql`
+`ticker, date, title, summary, sentiment_score`(구 5-tier 라벨, 폐기 대상, nullable) +
+`published_at, target_date, source, press, article_url`(migrations/001·003이 반영된 상태,
+2026-08-23 기준 이미 라이브 — "추가 예정" 아님). `target_date`는 Task D 완료 전이라 현재 전부 NULL.
+`UNIQUE(ticker, article_url) WHERE article_url IS NOT NULL`로 종목별 기사 중복 방지.
 
-### market_indicators `(indicator_code, date)` PK — ✅ 스키마 확정, 0행
+### market_indicators `(indicator_code, date)` PK — `Database/시장지표/테이블_생성.sql`
 
 ```
 indicator_code varchar(32) NOT NULL   -- FK -> indicator_meta
@@ -227,7 +237,7 @@ unit           varchar(20)            -- ⚠️ DEPRECATED, indicator_meta.unit 
 published_date date        NOT NULL   -- 실제 공표일
 ```
 
-### indicator_meta `(indicator_code)` PK — ✅ 신규 생성, 0행
+### indicator_meta `(indicator_code)` PK — `Database/시장지표/테이블_생성.sql`
 
 ```
 indicator_code varchar(32) PK
@@ -314,6 +324,164 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 
 ---
 
+## 파이프라인 실행 순서 (전체 .py 파일 감사, 2026-08-23)
+
+프로젝트 내 모든 `.py` 파일(30개, `.venv` 제외)을 대상으로 한 감사 결과. 목적별로 실행 순서와
+상태를 정리한다. 상태 분류: **핵심 파이프라인**(현재 설계에 실제로 쓰이는 흐름) /
+**실험·진단용**(일회성 분석·비교, 재학습 파이프라인 아님) / **폐기 후보**(대체됨·미사용).
+
+### 인프라 (전 트랙 공통)
+
+| 파일 | 역할 | 상태 |
+|---|---|---|
+| `config.py` | `.env` 로드, `DB_URL`/`NAVER_*`/`ECOS_API_KEY` 제공 | 핵심 |
+| `db_manager.py` | `get_db_connection()` — 사실상 전 파일이 의존 | 핵심 (의존: `config`) |
+| `constants.py` | Task T 전용 스트레스 구간 상수(`STRESS_PERIOD_START/END`, 하드코딩, 자동 재탐지 금지 설계) | 핵심 |
+
+### 트랙 1 — 주가/거시 (Task G, 전체 완료 ✅)
+
+2026-08-23 구조 정리로 초기적재/일일수집이 파일 단위로 분리됨(같은 날 재작업: 처음엔 초기적재가
+일일수집 함수를 직접 import하는 종속 구조였다가, 뉴스 트랙의 `뉴스_공통.py` 패턴에 맞춰
+`주가_공통.py`/`지표_공통.py`를 두 파일이 대등하게 참조하는 구조로 다시 정리함 — 초기적재와
+일일수집은 서로를 import하지 않는다). 날짜 상수는 `constants.py`(`STOCK_INITIAL_LOAD_START`)로
+중앙화 — 시장지표 로더는 "고정 시작일" 개념 자체가 없어(전체 기간 조회가 기본 동작) 상수화
+대상에서 제외했다(사람 확인 완료).
+
+| 순서 | 파일 | 역할 | 의존성 |
+|---|---|---|---|
+| 1 | `주가데이터/주가_공통.py` | `TICKERS`, `update_stock_data()`(핵심 fetch+upsert) 등 공용 로직 | `db_manager` |
+| 1a | `주가데이터/주가_초기적재.py` | 데이터 없는 종목만 `constants.STOCK_INITIAL_LOAD_START`부터 전체 적재 | `constants`, `주가데이터.주가_공통` |
+| 1b | `주가데이터/주가_일일수집.py` | 종목별 DB 최신일+1부터 오늘까지 증분 수집 | `주가데이터.주가_공통` |
+| 2 | `시장지표/db_utils.py` | upsert 공용 로직 | 없음 (다른 모듈이 가져다 씀) |
+| 3 | `시장지표/지표_공통.py` | FDR(`load_fdr_indicators`)·ECOS(`load_ecos_indicators`) 함수. 두 섹션 독립 예외처리 — 한쪽 실패해도 다른 쪽 계속 진행 | `config`, `db_manager`, `시장지표.db_utils` |
+| 3a | `시장지표/지표_초기적재.py` | FDR+ECOS 중 아직 한 번도 적재 안 된 지표만 초기적재(`only_uninitialized=True`) | `db_manager`, `시장지표.지표_공통` |
+| 3b | `시장지표/지표_일일수집.py` | FDR+ECOS 증분 적재(`only_uninitialized=False`) | `db_manager`, `시장지표.지표_공통` |
+| 4 | `시장지표/feature_loader.py` | 누수 없는 피처 조회(`get_features`) — 트랙 2 전체가 이 함수 하나에 의존 | `db_manager` |
+
+**옛 파일 삭제 완료(2026-08-23)**: `주가데이터/FinanceData_load.py`(→ 주가_초기적재/일일수집으로 분리),
+`시장지표/market_index_load.py`(→ 지표_초기적재/일일수집의 FDR 섹션으로 분리),
+`시장지표/ecos_load.py`(→ 지표_초기적재/일일수집의 ECOS 섹션으로 분리). 삭제 전 grep으로 실제 import 의존
+없음을 확인했다(서로를 참조하던 것 외 다른 파일에서의 import 없음, 주석 언급만 존재).
+
+### 트랙 2 — Transformer 가격예측 (Task T-1, 완료 ✅ — "무작위 수준" 확정, 트랙 1 재개 근거로 연결됨)
+
+`가격예측/` 13개 파일 전부 실제로 쓰였음(폐기 후보 없음). `TASK_T_transformer_baseline.md`의
+진단 순서와 정확히 대응한다.
+
+**핵심 파이프라인:**
+
+| 순서 | 파일 | 역할 | 의존성 |
+|---|---|---|---|
+| 1 | `가격예측/dataset_builder.py` | 레이블(익일수익률)+기본피처 계산. `build_base_dataset`(v1)/`build_base_dataset_v2`(레벨→비율 변환) | `시장지표.feature_loader` |
+| 2 | `가격예측/momentum_feature.py` | lag 적용 초과수익률(z-score) 모멘텀 피처 | `db_manager`, `시장지표.feature_loader` |
+| 3 | `가격예측/split_dataset.py` | base+momentum merge, 정상레짐/스트레스 분리, 70/15/15 분할(v1/v2 겸용) | `constants`, `가격예측.dataset_builder`, `가격예측.momentum_feature` |
+| 4 | `가격예측/model.py` | `TransformerRegressor` 정의 | 없음 |
+| 4 | `가격예측/sequence_dataset.py` | lookback 시퀀스 변환, `FeatureScaler` (4와 병렬) | 없음 |
+| 5 | `가격예측/train.py` | v1 베이스라인 학습 + **test 1회 평가**(체크포인트4). ⚠️ `train_common.py`를 안 쓰고 자체 헬퍼(`directional_accuracy` 등) 보유 | `constants`, `가격예측.model`, `가격예측.sequence_dataset`, `가격예측.split_dataset` |
+| 6 | `가격예측/train_common.py` | v2 계열 공용 학습/평가 유틸(`train_transformer`, `evaluate_predictions` 등) | `가격예측.model` |
+| 7 | `가격예측/train_v2.py` | v2 재설계 피처로 재학습(val만, test는 트랙1 결합 시점까지 보류) | `constants`, `가격예측.sequence_dataset`, `가격예측.split_dataset`, `가격예측.train_common` |
+
+**진단 체인 (실험·진단용, val만 사용, test 미사용 — 순서대로):**
+
+| 순서 | 파일 | 역할 | 의존성 |
+|---|---|---|---|
+| 진단1 | `가격예측/diagnose_baseline.py` | 비정상성(train/test 가격 레벨 괴리)·다중공선성 진단, 상관관계 히트맵 | `constants`, `가격예측.sequence_dataset`, `가격예측.split_dataset`, **`가격예측.train`**(train_common 아님) |
+| 진단2 | `가격예측/compare_v2_variants.py` | 선형회귀 vs Transformer 소형 vs 기존 3-way 비교 | `constants`, `가격예측.sequence_dataset`, `가격예측.split_dataset`, `가격예측.train_common` |
+| 진단3 | `가격예측/diagnose_down_class.py` | 하락 클래스 precision/recall/PR curve, 게이트 기준(precision +2%p, recall≥0.5) 확정 | 위와 동일 + `가격예측.train_common` |
+| 진단4 | `가격예측/seed_stability_check.py` | 7시드 재현성 — "소형 TF가 baseline 돌파"가 우연이었음을 반증 | `constants`, **`가격예측.diagnose_down_class`**, `가격예측.sequence_dataset`, `가격예측.split_dataset`, `가격예측.train_common` |
+| 진단5(최종) | `가격예측/pr_curve_vs_random.py` | PR curve vs 무작위 sanity check — **신호 부재 최종 확정** | `constants`, `가격예측.sequence_dataset`, `가격예측.split_dataset`, `가격예측.train_common` |
+
+**결론**: 가격+거시지표 단독으로는 익일 방향성이 무작위/baseline과 구분 안 됨 (RMSE/MAE는 v2에서
+개선). 스트레스 구간 홀드아웃 평가(체크포인트5)는 **미착수** — 정상 레짐에서부터 신호 부재가
+확정돼 우선순위 밀림, 재개 여부 사람 결정 대기.
+
+**별도 도구 (파이프라인과 의도적으로 분리):**
+
+| 파일 | 역할 | 상태 |
+|---|---|---|
+| `analysis/detect_stress_period.py` | 스트레스 구간 변곡점 탐지(이동평균 |등락률| 기반). `constants.py`의 상수를 사람이 수동 확정할 때만 재실행 | 일회성 도구. **자동 재탐지 금지**가 설계 원칙 — 학습 파이프라인은 이 스크립트를 호출하지 않고 `constants.py` 상수만 읽음 (의존: `db_manager`) |
+
+### 트랙 3 — 뉴스/감성 (Task A~F, Task B 방향 이번 세션에 재개)
+
+2026-08-23 구조 정리로 `NaverSearchBackfill.py`가 공통/최초적재/일일수집 3개 파일로 분리됨.
+날짜 상수는 `constants.py`(`NEWS_BACKFILL_START`/`NEWS_BACKFILL_END`, 2023-08-23~2026-08-23
+고정값)로 중앙화. 뉴스_일일수집.py는 이번에 신규 정의된 개념(다른 로더와 같은 "DB 최신일+1 ~
+오늘" 패턴) — 공백이 14일을 넘으면 자동 캐치업하지 않고 최초적재 사용을 안내한다. 14일 기준은
+2026-08-23 실측(조기종료 휴리스틱 적용 후 일평균 19.47초/일, 14일≈4.55분 — 무인 job 예산으로
+적절)으로 근거를 확정함(사람 승인, 상세는 `뉴스_일일수집.py`의 `MAX_CATCHUP_DAYS` 주석 참고).
+
+| 파일 | 역할 | 상태 |
+|---|---|---|
+| `뉴스데이터/뉴스_공통.py` | search.naver.com 크롤링 공용 상수·함수(`crawl_day`, `fetch_search_page`, `passes_quality_filter`, `upsert_articles`, `clean_title`/`clean_press` 등) | **핵심.** `clean_title`/`clean_press`/`upsert_articles`는 `NaverFinanceNews.py`에서 이관 — 살아있는 코드가 폐기 파일에 의존하던 역방향 구조를 바로잡음. 의존: `db_manager` 없음(순수 크롤링/텍스트 유틸) |
+| `뉴스데이터/뉴스_최초적재.py` | 명시적 날짜범위(기본 `NEWS_BACKFILL_START`~`END`) 대량 백필, 체크포인트 기반 재개 | **핵심(현재 승인된 유일한 백필 소스, 2026-08-23 전면 백필 승인)**. 의존: `constants`, `db_manager`, `뉴스데이터.뉴스_공통` |
+| `뉴스데이터/뉴스_일일수집.py` | 종목별 DB 최신 수집일(`source='search_backfill'` 기준)+1 ~ 오늘 캐치업. 공백 14일 초과 시 자동 캐치업 안 하고 경고 | **핵심(신규, 아직 스케줄러 연결 전 — 로드맵 "이후" 단계에서 자동화 예정)**. 의존: `db_manager`, `뉴스데이터.뉴스_공통` |
+**삭제 완료(2026-08-23)**: `NaverFinanceNews.py`(finance.naver.com 종목뉴스, `source='finance_crawl'`
+— 페이지네이션 약 1주일 한계로 백필 부적합해 폐기, `clean_title`/`clean_press`/`upsert_articles`는
+`뉴스_공통.py`로 이관 완료), `NaverSearchBackfill.py`(위 3개 파일로 분리된 원본), `NaverNews.py`
+(DB 기여 0행), `NaverNewsCrawl.py`(뉴스_공통/최초적재/일일수집으로 대체 완료), `sentiment_score_label.py`
+(CLAUDE.md D-1이 폐기한 구 5-tier 절대임계값 라벨 체계 그 자체 — **Task E, 초과수익률+롤링표준화
+구현 전까지 대체 라벨 소스가 없다는 점에 주의**). 삭제 전 grep으로 다른 파일의 실제 import 의존
+없음을 확인했다.
+| `감성분석/kobert_dataset.py` | `daily_news` 로더+split+Dataset | 핵심이나 **현재 `sentiment_score`(폐기 대상 라벨) 컬럼에 의존** — Task E 완료 전엔 실질 사용 불가. 의존: `db_manager` |
+| `감성분석/baseline_tfidf.py` | TF-IDF+로지스틱회귀 진단 베이스라인 | 실험·진단용(Task A에서 1회 사용). 의존: `감성분석.kobert_dataset` |
+| `감성분석/kobert_train.py` | KoBERT 파인튜닝 | ⚠️ **재실행 금지**(데이터 재구축 전까지, CLAUDE.md 기 명시). 의존: `감성분석.kobert_dataset` — import 방식을 `from 감성분석.kobert_dataset import ...`로 수정 완료(2026-08-23, 다른 파일들과 관례 통일). `import 감성분석.kobert_train`으로 ImportError 없음 확인(단 `__main__` 블록은 재학습을 바로 시작하므로 재학습 금지 원칙에 따라 실제 실행으로는 검증 안 함) |
+
+### 기타
+
+| 파일 | 역할 | 상태 |
+|---|---|---|
+| `쓰래기통/Bigkinds.py` | BigKinds CSV 일괄 적재 | 폐기 후보(기 확정, 격리 완료) |
+
+### 감성 통합 실험의 스코프 (2026-08-23 명시)
+
+**감성 피처 통합 실험은 뉴스 커버리지(`NEWS_BACKFILL_START`~`NEWS_BACKFILL_END`,
+2023-08-23~2026-08-23, 약 3년)로 제한되며, 이는 기존 T-1(가격+거시지표 전용, 2020~2026 전체)
+학습 범위와 다르다 — 서로 다른 서브 실험으로 명확히 구분한다.** 향후 "가격+거시 vs 가격+거시+뉴스"
+최종 비교(T-1 문서의 test 평가 보류 사유 참고)를 할 때, 두 모델의 학습/평가 구간을 뉴스 커버리지
+범위로 맞출지 아니면 T-1 원 구간을 유지하고 뉴스 쪽만 3년치로 제한된 서브셋 비교를 할지는
+그 시점에 사람이 결정한다.
+
+### 이번 감사로 드러난 사항 — 처리 현황 (2026-08-23)
+
+- ✅ `NaverFinanceNews.py` 폐기 확정 — 위 표에 반영 완료
+- ✅ `kobert_train.py`의 bare import(`from kobert_dataset import`)를 `from 감성분석.kobert_dataset import`로 수정. `import 감성분석.kobert_train`으로 ImportError 없음 확인(단, `__main__` 블록은 재학습을 즉시 시작하므로 재학습 금지 원칙에 따라 실제 학습 실행으로는 검증하지 않음 — import 단계만 확인)
+- ⏸️ **"프로젝트 구조" 트리(`analysis/`, `가격예측/` 미반영) 갱신은 보류로 확정(2026-08-23, 사람 결정).**
+- ✅ **날짜 상수 중앙화 + 초기적재/일일수집 파일 분리 완료(2026-08-23)** — `constants.py`에
+  `NEWS_BACKFILL_START/END`, `STOCK_INITIAL_LOAD_START` 추가. 주가/시장지표/뉴스 세 트랙 모두
+  "초기적재"와 "일일수집"을 별 파일로 분리(뉴스_일일수집.py는 신규 개념). 옛 파일 8개
+  (`FinanceData_load.py`, `market_index_load.py`, `ecos_load.py`, `NaverSearchBackfill.py`,
+  `NaverFinanceNews.py`, `NaverNews.py`, `NaverNewsCrawl.py`, `sentiment_score_label.py`)는
+  grep으로 다른 파일의 실제 import 의존이 없음을 확인한 뒤 삭제 완료(2026-08-23). 전 신규 파일
+  import 검증 완료(실제 데이터 적재 실행은 안 함).
+- ✅ **주가/시장지표 재작업: 진짜 기능적 분리로 통일(2026-08-23)** — 처음엔 `주가_초기적재.py`가
+  `주가_일일수집.py`의 함수를 직접 import하는 종속 구조였는데(이름만 분리, 실제로는 계층 구조),
+  뉴스 트랙의 `뉴스_공통.py` 패턴에 맞춰 `주가_공통.py`/`지표_공통.py`를 신설하고 초기적재/일일수집
+  둘 다 공통 파일만 참조하도록 재작업. 초기적재↔일일수집 상호 import 없음을 grep으로 교차 확인.
+  백필 속도 개선(조기종료 휴리스틱, 서버 필터 확인)은 이 구조 정리 이후 별도 진행 예정.
+- ✅ **테스트 누적 데이터 정리 + 백필 속도 개선 완료(2026-08-23)**
+  - `daily_news_backup`(구 스키마 스냅샷, 5,278행) 삭제, `daily_news.source='search_backfill'`
+    (그동안 소스비교/1개월/2023-09 검증 등으로 누적된 1,099행) 삭제 — legacy/finance_crawl은 그대로
+    유지. 체크포인트 파일도 함께 삭제해 DB와 일관성 확보.
+  - 언론사 서버사이드 필터(`news_office_checked`/`office_type`/`office_category`) 실측 확인 —
+    **작동 안 함**(파라미터를 채워 요청해도 결과가 필터링되지 않음, 죽은 기능으로 판단). 클라이언트
+    측 필터(품질 필터)에 계속 의존.
+  - `crawl_day()`에 조기 종료 휴리스틱 추가: 연속 5페이지 또는 누적 50건 후보가 필터 통과 0건이면
+    그 날짜를 조기 종료(`early_stopped` 플래그). 구현 중 `degraded`(응답 이상 의심) 판정이 이 정상
+    조기종료 케이스까지 오분류하던 버그를 함께 고쳐 `page_errors`가 실제로 있을 때만 `degraded`가
+    걸리도록 조건을 좁힘.
+  - 1주일 실측(005930, 2026-08-17~08-23, 조기종료 적용 후): **136.3초, 일평균 19.47초**. 3년
+    전체(`NEWS_BACKFILL_START`~`END`, 1,096일) 예상 약 5.9시간.
+  - **확정(2026-08-23, 사람 결정)**: `NEWS_BACKFILL_START`는 3년(2023-08-23~2026-08-23) 그대로
+    유지. 애초에 세웠던 "30분~1시간 예산" 기준은 철회 — 5.9시간은 사람이 지켜봐야 하는 시간이 아니라
+    체크포인트 기반 중단/재개가 이미 검증된 백그라운드 작업이므로 문제 없다고 판단. 기간을
+    3~6개월로 줄이면 val/test 커버리지가 손상되므로 원래 목표(뉴스 커버리지로 val+test 전체 커버)를
+    지키는 쪽 선택. **실제 3년 전체 백필은 사람이 여러 세션에 나눠 직접 실행 예정**
+    (`python -m 뉴스데이터.뉴스_최초적재 --tickers 005930 --start 2023-08-23 --end 2026-08-23`,
+    체크포인트 기본 경로 `뉴스데이터/checkpoints/search_backfill_progress.csv`).
+  - `MAX_CATCHUP_DAYS=14`(뉴스_일일수집.py) 확정 — 근거는 위 실측(14일×19.47초≈4.55분).
+
+---
+
 ## 알려진 이슈 / 정리 필요 항목
 - `requirements.txt`에 `psycopg`와 `psycopg-binary` 중복 — 정리 검토
 - `docker-compose.yml` DB 비밀번호 하드코딩 → `.env` 참조로 전환 필요
@@ -336,17 +504,47 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 
 G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수익률 라벨링(Task E)이 열린다. G-4 완료로 Transformer ablation baseline 착수에 필요한 피처 조회 함수도 준비됐다.
 
-### 뉴스/감성 트랙 (Task A~F) — 보류
+### 뉴스/감성 트랙 (Task A~F) — Task B 방향 재개, 백필 진행 중
+
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | A | 원인 확정 진단 | ✅ 완료, 판정 승인 |
-| B | 수집기 교체(네이버 금융 종목뉴스), 발행 시각 확보 | 보류 |
-| C | 전면 재수집. 변동성 필터 제거, 섹터 분산 5~8종목 (목표 고유 조합 2,000+) | 보류 |
-| D | 이벤트 윈도우 재정렬 (X=장 시작 전 기사, Y=당일 등락률) | 보류 |
+| B | 수집기 교체 → search.naver.com 날짜범위 크롤러(`뉴스_최초적재.py`/`뉴스_일일수집.py`/`뉴스_공통.py`)로 확정(2026-08-23, finance.naver.com은 페이지네이션 한계로 폐기). 발행 "시각"은 이 소스로 확보 불가 — Task D가 안 B(완화)로 대체 확정됨 | ✅ 방향 확정, **전면 백필 실행 중** (아래 참고) |
+| C | 전면 재수집. 종목은 당분간 005930 단일(2026-08-23 사람 결정, SK하이닉스 드랍). 섹터 분산 확장은 이후 재검토 | 진행 중(B의 백필과 사실상 통합) |
+| D | 이벤트 윈도우 재정렬 — **안 B(완화): D-1 09:00~D 09:00 24시간 윈도우로 확정**(2026-08-23, search_backfill이 시각 정보 없음) | 확정, **착수는 백필 완료 후**(아래 참고) |
 | E | 초과수익률 라벨링 + 롤링 표준화 | 보류 |
 | F | 조합 비교 실험 (윈도우 × 라벨) | 보류 |
 
-**Task B 착수 전 확인 필수**: 네이버 금융 종목뉴스 페이지의 과거 조회 가능 기간 (005930 기준 2020/2022/2023년 접근 테스트)
+#### 뉴스 백필 진행 상황 (2026-08-23 세션 종료 시점)
+
+**실행 중.** `python -m 뉴스데이터.뉴스_최초적재 --tickers 005930 --start 2023-08-23 --end 2026-08-23`을
+사람이 여러 세션에 나눠 직접 실행 중. 체크포인트(`뉴스데이터/checkpoints/search_backfill_progress.csv`,
+git 미추적) 기준 스냅샷:
+- 완료: 2023-08-23 ~ 2024-05-05 (약 257일 / 전체 1,097일 ≈ **23.4%**) — 계속 갱신되는 값이므로
+  다음 세션 시작 시 체크포인트 파일로 재확인할 것
+- 여기까지 일평균 신규 삽입 약 10.6건/일(중앙값 10건)
+
+**다음 세션 시작 시 할 일**:
+1. 체크포인트 파일(`뉴스데이터/checkpoints/search_backfill_progress.csv`)로 실제 진행률 재확인
+   (마지막 완료 날짜, 전체 대비 %)
+2. 백필이 멈춰 있다면(연속 2일 차단 등으로 스스로 중단됐을 수 있음) **다른 크롤러 프로세스가
+   실행 중이 아닌지 먼저 확인**한 뒤, 같은 명령으로 재개:
+   `python -m 뉴스데이터.뉴스_최초적재 --tickers 005930 --start 2023-08-23 --end 2026-08-23`
+   (체크포인트에 없는 날짜부터 자동으로 이어짐)
+3. 차단(🛑)이 자주 뜬다면 `뉴스데이터/뉴스_공통.py`의 `REQUEST_DELAY_RANGE`(현재 2.0~4.0초)를
+   늘리는 것을 고려할 것
+
+**백필 완료 후 QA 필요 사항**:
+- **"403은 있었지만 kept>0라서 완료 처리된 날짜" 별도 점검** — `degraded` 판정은 `kept==0`일
+  때만 걸리므로, 그 날 일부 페이지가 403이었지만 다른 페이지에서 몇 건 건졌다면 정상 완료로
+  체크포인트에 기록된다. 이런 날은 **실제로는 그 날 관련 기사 일부를 놓쳤을 가능성**이 있다 —
+  체크포인트에는 403 여부가 기록되지 않으므로, 완료 후 전체 실행 로그(있다면)에서 이런 날짜를
+  추출해 재검증이 필요한지 판단할 것
+- 완료 후 일평균 신규 건수를 2026-07/2023-09 검증치(중앙값 15~18건)와 비교 — 지금까지
+  구간(중앙값 10건)이 계속 낮게 나오면 조기종료 휴리스틱이 너무 공격적인 건 아닌지 재검토
+
+**Task B 재수집 완료 후 확인 필수 (기존, Task B 착수 전 조건에서 이관)**: 네이버 금융 종목뉴스
+페이지의 과거 조회 가능 기간은 이미 실측 완료(약 4~7일, 부적합 확정) — 이 조건은 해소됨.
 
 ### Transformer 트랙 — 미착수 (G-4 완료로 착수 가능, 사람 지시 대기)
 **감성 피처 없이 주가 + 거시지표만으로 학습한 결과가 ablation baseline이 된다.** 이 baseline 없이는 "뉴스 감성 추가로 개선되었는가"를 증명할 수 없으므로, 감성 트랙보다 먼저 만들어두는 것이 합리적이다.
@@ -378,8 +576,10 @@ G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수
 - DB 접속 정보·API 키는 `.env`에서만 관리. 코드/compose 하드코딩 금지
 - `docker-compose.yml` 환경변수는 `${VAR}` 형식으로 `.env` 참조
 - `requirements.txt`는 `pip freeze`로 최신 유지
-- `init_table.sql` 실행 시 전체 테이블 DROP — 반드시 확인 후 실행
-- **스키마 변경은 `ALTER TABLE`로 하고 `Database/migrations/`에 SQL 파일로 남긴다. 기존 테이블을 DROP하지 않는다**
+- `Database/{도메인}/테이블_삭제.sql` 실행 시 해당 도메인 테이블 DROP — 반드시 확인 후 실행
+- **스키마 변경은 운영 DB에 `ALTER TABLE`로 적용하고, 같은 내용을 `Database/{도메인}/테이블_생성.sql`에도
+  반영해 그 파일이 항상 "지금 스키마"를 그대로 재현하도록 유지한다(2026-08-23부터, 옛
+  `Database/migrations/` 방식 폐지). 변경 사유는 커밋 메시지에 남긴다. 기존 테이블을 DROP하지 않는다**
 - **기존 컬럼 값을 파괴적으로 덮어쓰지 않는다. 새 라벨·새 시각은 새 컬럼에 추가해 비교 가능하게 둔다**
 - 모든 스크립트는 프로젝트 루트에서 `python -m <패키지>.<모듈>` 형태로 실행 가능해야 한다
 - **모든 성능 비교 baseline은 해당 split의 실제 최빈 클래스 기준** (현재 test 31.8% / macro F1 0.0965)
