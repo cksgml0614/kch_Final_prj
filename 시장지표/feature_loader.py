@@ -85,6 +85,32 @@ def _asof_join(trading_dates, indicator_df):
     return merged.set_index("date")["value"].reindex(trading_dates)
 
 
+def get_indicator_level_series(indicator_code, end_date):
+    """지표의 원 레벨(level) 시계열을 date(기준일) 오름차순으로 반환한다.
+
+    get_features()의 asof 조인은 "예측 시점 D에서 D 이전에 이미 공표된 값"만 붙이는 누수 방지
+    로직이라, 일별 지표(published_date == date)라도 D 자신의 값이 아니라 D-1 값이 매칭된다.
+    이 함수는 그 조인을 거치지 않고 지표 자체의 날짜별 원값이 필요할 때 쓴다 — 예: Task E가
+    KOSPI 자체의 일별 등락률(day D의 종가 대비 D의 변화량, 예측 피처가 아니라 이미 확정된
+    사실)을 계산할 때. 새 DB 조회를 만들지 않고 기존 _load_indicator_series를 재사용한다.
+
+    반환: DataFrame(columns=[date, value]), date 오름차순.
+    """
+    with get_db_connection() as conn:
+        if not conn:
+            raise RuntimeError("DB 연결 실패")
+        with conn.cursor() as cur:
+            df = _load_indicator_series(cur, indicator_code, end_date)
+    if df.empty:
+        return pd.DataFrame(columns=["date", "value"])
+    return (
+        df[["ref_date", "value"]]
+        .rename(columns={"ref_date": "date"})
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+
 def get_features(ticker, start_date, end_date):
     """미래 정보 누수 없이 종목 OHLCV + 시장지표 9종을 결합한 피처 행렬을 반환한다.
 
