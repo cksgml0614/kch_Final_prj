@@ -8,17 +8,25 @@
 
 | 트랙 | 지시서 | 상태 |
 |---|---|---|
-| **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md`(A~D) + `TASK_EF_라벨링_비교실험.md`(E~F, 2026-08-29 분리) | Task A 완료, 판정 승인됨. **Task B 완료 — 전면 백필 완료(2023-08-23~2026-08-28) + QA 검증·클러스터 확장 재크롤링·갭 구간 표본 재크롤링까지 전부 완료(`source='search_backfill'` 최종 14,392행)** |
+| **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md`(A~D) + `TASK_EF_라벨링_비교실험.md`(E~F, 2026-08-29 분리) | Task A 완료, 판정 승인됨. Task B 완료 — 전면 백필 완료(2023-08-23~2026-08-28) + QA 검증·클러스터 확장 재크롤링·갭 구간 표본 재크롤링까지 전부 완료(`source='search_backfill'` 최종 14,392행). **Task E 완료 — 임계값·윈도우 확정(상세: `결과_TaskE_라벨링.md`)** |
 | **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | **G-0~G-4 전체 완료** |
 
-**현재 상태(2026-08-30)**: Task G 완료 후 열렸던 두 갈래(Transformer 착수 / 뉴스·감성 Task B 재개) 모두
+**현재 상태(2026-09-01)**: Task G 완료 후 열렸던 두 갈래(Transformer 착수 / 뉴스·감성 Task B 재개) 모두
 착수됐다. **Task T-1(Transformer ablation baseline)은 완료돼 "가격+거시지표만으로는 익일 방향성이
 무작위 수준과 구분 안 됨"으로 확정**됐다(상세는 "파이프라인 실행 순서 > 트랙 2" 참고). **뉴스/감성
 Task B는 전면 백필 완료 후 QA 검증(53일 재크롤링) + 클러스터 확장 재크롤링(91일) + 갭 구간
 표본 재크롤링(47일, 부분 확인)까지 모두 마쳤다** — `source='search_backfill'` 14,077 → 최종
 **14,392행**. QA에서 드러난 구조적 누락은 2024-02와 2024-07~08에 국한된 것으로 판단됐다(갭
 구간 표본 검증 결과 3년 전체로 일반화되지 않음이 재확인됨). 상세는 로드맵 절의 "뉴스 백필 완료
-+ QA 결과" 참고. Task E(라벨 생성)의 착수 조건(백필 완료)은 충족됐다.
++ QA 결과" 참고. **Task E(라벨 생성)도 완료됐다** — `daily_labels`(z_score 4,902행) 적재, 윈도우
+20/60/120 전부·방향 5/3-class 전부·변동성 \|z\|>1.0으로 임계값 확정. 1차 실험의 분포 이동
+문제(train 중립 50.4%→test 극단 31.8%)가 해소됐음을 확인했다. 상세 수치는 `결과_TaskE_라벨링.md`,
+확정 사항 요약은 D-2 참고. **Task F 게이팅·검증도 완료됐다**(2026-09-01~09-02) — 뉴스 라벨
+매칭에서 당일 매칭 누수를 발견해 D+1 거래일 매칭으로 수정했으나(Task D "안 B"의 실제 구현),
+셔플 테스트·클래스 사전분포 무작위 예측기로 재검증한 결과 익일(h=1) 라벨은 신호가 없었다(p전부
+≥0.258). 주간 단위 누적 라벨(h=3/5/10)로 재설계해도 결론은 같았다(p전부 ≥0.387) — **뉴스
+텍스트와 초과수익률 사이에 검출 가능한 관계 없음, KR-FinBERT 투입 보류**로 확정. 상세는 로드맵
+"Task F 게이팅·검증·horizon 확장 실험" 및 `결과_TaskF_게이팅검증.md` 참고.
 
 `market_indicators`에 총 9개 지표, 38,955행(=14,072+24,883) 적재 완료: KOSPI/KOSDAQ/USD_KRW(G-2, FDR, 14,072행) + 기준금리·국고채3년·국고채10년·CPI·M2·선행지수순환변동치(G-3, ECOS, 24,883행). 반도체 수출금액지수는 종목 특화 지표라 공통 테이블 설계 원칙과 맞지 않아 제외. `시장지표/feature_loader.py`(G-4)로 누수 없는 피처 조회 가능 — `get_features(ticker, start_date, end_date)`가 종목 OHLCV + 지표 9개를 `published_date < 거래일` 조건으로 병합해 반환.
 
@@ -135,6 +143,21 @@ label           = z_t에 고정 임계값 적용
 - 임계값 후보: 3-class는 z ±0.5, 5-class는 z ±0.5/±1.5 — **최종 결정은 z 분포 출력 후 사람이 한다**
 - 윈도우 N은 20/60/120을 비교해 클래스 분포 안정성 보고
 
+**✅ 2026-08-30 확정(Task E 실행 결과 기반, 2026-08-31 구현·검증)**: 윈도우 N=20/60/120
+**전부 사용** — 세 윈도우의 z 분포·라벨 분포 차이가 **±1%p 이내**로 미미해 사전에 하나로 좁힐
+근거가 없었다. Task F에서 윈도우 3종을 그대로 비교 축으로 유지해 모델 성능으로 최종 판단한다.
+방향 5-class(z ±0.5/±1.5)와 3-class(z ±0.5) **둘 다 사용**. 변동성 2-class는 **\|z\| > 1.0**
+채택 — `>0.5`는 고변동 비율이 58~61%로 다수 클래스가 되어 변별력이 약하고, `>1.5`는 12% 안팎으로
+줄어 표본이 지나치게 작다. `>1.0`은 정상/고변동이 대략 70/30으로 갈려 두 극단의 중간에서 가장
+실용적인 균형을 보였다.
+
+⚠️ **5-class 극단 클래스(-2) 표본 부족 주의**: train 5.1~5.8%, val 0.9~1.8%(윈도우별)로 표본이
+극히 적다. 3-class와 함께 계속 사용하되, Task F에서 이 클래스의 precision/recall이 낮게 나오거나
+5-class 전체 성능이 저조해도 **"모델 한계"로 먼저 결론짓지 말고 "표본 부족"을 우선 의심할 것** —
+특히 val 기준 게이팅·early stopping 지표를 볼 때 이 점을 감안해야 한다.
+
+상세 근거·전체 분포표는 `결과_TaskE_라벨링.md` 참고.
+
 ### D-3. 학습 기간 — 전체 기간 사용 (2026-08-30 개정, 옛 "정상 레짐/스트레스 2분할" 폐기)
 
 기존 방침(정상 레짐 2023-09~2026-03을 주 실험에, 스트레스 2026-04~2026-07을 별도 케이스
@@ -155,6 +178,12 @@ label           = z_t에 고정 임계값 적용
 
 **단, D-8의 split별 레짐 특성 3종 보고는 그대로 유지한다** — test 구간이 스트레스 기간을
 포함한다는 사실이 숫자로 드러나야 결과 해석이 가능하다.
+
+**✅ 위 흡수 효과가 Task E 실행으로 정량 확인됨(2026-08-31)**: split별 D-8 레짐 특성에서
+**KOSPI 자체의 평균 변동성은 train→test 구간에서 약 3.7배**(0.867%→3.188%) 뛰지만, **초과수익률의
+평균 변동은 약 1.7배 증가에 그친다**(0.993%→1.684%). 시장 전체가 흔들린 폭의 상당 부분이
+초과수익률 계산에서 이미 상쇄된다는 뜻 — "롤링 z-score가 레짐 변화를 흡수한다"는 위 논거가
+가설이 아니라 실측으로 뒷받침됨. 전체 표는 `결과_TaskE_라벨링.md` [4] 참고.
 
 ⚠️ 이 개정은 **뉴스/감성 트랙(Task E/F) 한정**이다. `constants.py`의 `STRESS_PERIOD_START/END`는
 애초에 Task T(가격+거시지표 트랜스포머 베이스라인) 전용 상수로 명시돼 있었고, 이번 개정과
@@ -232,11 +261,14 @@ kch_Final_prj/
 ├── requirements.txt
 ├── TASK_개정판_데이터_재구축.md      # 뉴스/감성 트랙 지시서 (Task A~D, 완료 아카이브)
 ├── TASK_EF_라벨링_비교실험.md        # 뉴스/감성 트랙 지시서 (Task E~F, 2026-08-29 분리)
+├── 결과_TaskE_라벨링.md              # Task E 실행 결과 상세 수치 (2026-08-31, CLAUDE.md는 요약·참조만)
+├── 결과_TaskF_게이팅검증.md          # Task F 게이팅·검증·horizon 확장 실행 결과 (2026-09-02, CLAUDE.md는 요약·참조만)
 ├── TASK_G_market_indicators_적재.md  # 주가/거시 트랙 지시서 (Task G)
 ├── Database/              # 2026-08-23 도메인별 폴더로 재구성 (옛 create_tables.sql/init_table.sql/migrations/ 삭제)
 │   ├── 뉴스/               # 테이블_생성.sql(daily_news) / 데이터_삭제.sql / 테이블_삭제.sql
 │   ├── 주가/               # 테이블_생성.sql(daily_stock_prices) / 데이터_삭제.sql / 테이블_삭제.sql
-│   └── 시장지표/            # 테이블_생성.sql(indicator_meta→market_indicators, FK 순서) / 데이터_삭제.sql / 테이블_삭제.sql
+│   ├── 시장지표/            # 테이블_생성.sql(indicator_meta→market_indicators, FK 순서) / 데이터_삭제.sql / 테이블_삭제.sql
+│   └── 라벨/               # 테이블_생성.sql(daily_labels, horizon_h PK 포함) / 데이터_삭제.sql / 테이블_삭제.sql (2026-08-30 신설)
 ├── 주가데이터/
 │   └── FinanceData_load.py    # FinanceDataReader로 OHLCV 증분 수집
 ├── 시장지표/
@@ -249,11 +281,18 @@ kch_Final_prj/
 │   ├── NaverNewsCrawl.py      # ⚠️ Task B에서 NaverFinanceNews.py로 대체 예정
 │   ├── NaverFinanceNews.py    # (Task B에서 신규 생성 예정)
 │   └── sentiment_score_label.py  # 주가 등락률 기반 라벨 생성 (텍스트 분석 아님)
+├── 라벨/                  # Task E: daily_labels 적재·보고 (2026-08-31 신설)
+│   ├── 라벨_공통.py       # z-score 계산 + 라벨 파생 함수 + 조회/split 유틸
+│   ├── 라벨_생성.py       # daily_labels UPSERT (윈도우 x horizon)
+│   └── 라벨_보고.py       # Task E 정지 지점 보고
 ├── 감성분석/
-│   ├── kobert_dataset.py  # daily_news(라벨 有) -> KoBERT Dataset/DataLoader
-│   ├── kobert_train.py    # 부분 freeze 파인튜닝 + early stopping
-│   ├── baseline_tfidf.py  # TF-IDF + 로지스틱 회귀 baseline + 데이터 진단 지표
-│   └── checkpoints/       # best_model.pt, training_history.png (git 미추적)
+│   ├── kobert_dataset.py       # daily_news(라벨 有) -> KoBERT Dataset/DataLoader
+│   ├── kobert_train.py         # 부분 freeze 파인튜닝 + early stopping
+│   ├── baseline_tfidf.py       # TF-IDF + 로지스틱 회귀 baseline + 데이터 진단 지표
+│   ├── taskf_gating.py         # Task F 게이팅(h=1) — 라벨 3종 x 윈도우 3종
+│   ├── taskf_validate.py       # taskf_gating.py 결과 검증(셔플/사전분포/부트스트랩)
+│   ├── taskf_gating_horizon.py # Task F 게이팅+검증(h=3/5/10, N=60 고정)
+│   └── checkpoints/            # best_model.pt, training_history.png (git 미추적)
 └── 쓰래기통/
     └── Bigkinds.py         # 레거시. BigKinds CSV 일괄 적재, 미사용
 ```
@@ -299,7 +338,7 @@ BigKinds(빅카인즈) CSV/Excel 일괄 적재 전용 — `daily_news`와 완전
 2023-08-23~2026-08-29, 전량 005930 고정. `daily_news`(search_backfill 등)와 어떻게 통합·비교할지는
 아직 미결 — Task A~F 어느 단계에도 아직 편입되지 않은 독립 데이터 소스다.
 
-### daily_labels `(ticker, date, window_n)` PK — `Database/라벨/테이블_생성.sql` (2026-08-30 설계 확정, ⚠️ 아직 미생성)
+### daily_labels `(ticker, date, window_n, horizon_h)` PK — `Database/라벨/테이블_생성.sql` (2026-08-30 설계 확정, 2026-08-31 생성·적재, 2026-09-02 horizon_h 추가)
 
 Task E 라벨을 뉴스 테이블(`daily_news`/`daily_news_bigkinds`)에 컬럼으로 추가하지 않고 별도
 테이블로 분리하기로 결정(2026-08-30, `TASK_EF_라벨링_비교실험.md` 실행 전 검토). 라벨은
@@ -309,24 +348,33 @@ Task E 라벨을 뉴스 테이블(`daily_news`/`daily_news_bigkinds`)에 컬럼�
 
 ```
 ticker         varchar     NOT NULL   -- PK
-date           date        NOT NULL   -- PK, 거래일 기준
+date           date        NOT NULL   -- PK, 거래일 기준(앵커일 t)
 window_n       integer     NOT NULL   -- PK, sigma 계산 윈도우(20/60/120 중 하나)
-excess_return  numeric                -- 종목 change_rate − KOSPI change_rate
-sigma          numeric                -- 직전 window_n거래일 excess_return 표준편차(t 시점 미포함)
+horizon_h      integer     NOT NULL   -- PK, 누적 수익률 기간(거래일). 1=익일(기존), 3/5/10=n거래일 누적(2026-09-02 추가)
+excess_return  numeric                -- t부터 horizon_h거래일(t..t+h-1) 누적 (종목-KOSPI) change_rate 합. h=1이면 당일 값과 동일
+sigma          numeric                -- 직전 window_n개 앵커일의 동일 horizon_h 누적값 표준편차(t 시점 미포함)
 z_score        numeric                -- excess_return / sigma
 ```
 
 - **`z_score`만 저장하고 라벨(방향 5-class/3-class, 변동성 2-class)은 저장하지 않는다** — 조회
   시 임계값을 적용해 파생한다. 임계값을 바꿔도 재계산이 필요 없고, 여러 임계값 조합을 자유롭게
   실험할 수 있다
-- `window_n`을 PK에 포함해 20/60/120을 한 테이블에 함께 보관
+- `window_n`/`horizon_h`를 PK에 포함해 윈도우 3종 x horizon 4종(1/3/5/10)을 한 테이블에 함께 보관
 - 학습 시 `daily_news`/`daily_news_bigkinds`와 `(ticker, date)`로 조인한다. 뉴스 테이블에는
   라벨 컬럼을 추가하지 않는다. 기존 `daily_news.sentiment_score`(구 5-tier 라벨)는 D-1에 따라
   보존만 하며 이 신규 라벨과는 무관하다
 - `Database/뉴스/` 등 기존 컨벤션대로 `Database/라벨/` 하위에 `테이블_생성.sql`/
-  `데이터_삭제.sql`/`테이블_삭제.sql` 3종을 **Task E 구현 시** 작성한다 — 이 절 작성 시점
-  기준 아직 만들어지지 않았고 설계만 확정된 상태다. 상세는 `TASK_EF_라벨링_비교실험.md`의
-  "라벨 저장 방식" 절 참고
+  `데이터_삭제.sql`/`테이블_삭제.sql` 3종 작성 완료, 운영 DB에도 생성 완료(2026-08-31)
+- 005930 x 윈도우 3종(20/60/120), 2020-01-02~2026-08-28 가격 이력 전체 대상으로 계산해
+  4,902행 적재 완료(`라벨/라벨_생성.py`). `TRAIN_PERIOD` 구간 내 NULL 0건 확인(버퍼로 흡수)
+- **2026-09-02 `horizon_h` 컬럼 추가**(ALTER TABLE로 운영 DB 적용, PK를 `(ticker, date,
+  window_n)`에서 `(ticker, date, window_n, horizon_h)`로 확장) — 기존 h=1 행 4,902개는 값
+  변경 없이 보존(재계산 결과가 기존 값과 완전히 동일함을 UPSERT의 `IS DISTINCT FROM`으로
+  실측 확인). h=3/5/10 신규 14,706행 추가, 총 19,608행. 별도 테이블이 아니라 컬럼 추가를
+  택한 이유: `window_n`을 이미 같은 테이블 PK에 포함시켜 다루던 기존 패턴과의 일관성
+- z 분포·라벨 분포·split별 비교·확정된 임계값/윈도우는 `결과_TaskE_라벨링.md`, Task F
+  게이팅·검증·horizon 실험 결과는 `결과_TaskF_게이팅검증.md` 참고 — 상세 표는 그 문서들이
+  정본이며 여기서는 중복 기재하지 않는다
 
 ### market_indicators `(indicator_code, date)` PK — `Database/시장지표/테이블_생성.sql`
 
@@ -549,9 +597,21 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 (CLAUDE.md D-1이 폐기한 구 5-tier 절대임계값 라벨 체계 그 자체 — **Task E, 초과수익률+롤링표준화
 구현 전까지 대체 라벨 소스가 없다는 점에 주의**). 삭제 전 grep으로 다른 파일의 실제 import 의존
 없음을 확인했다.
-| `감성분석/kobert_dataset.py` | `daily_news`/`daily_news_bigkinds` 공용 로더(`load_labeled_news`)+split+Dataset | 2026-08-30 확장: `table_name`/`label_column` 파라미터 추가로 두 테이블을 같은 파이프라인으로 로드 가능(상세는 아래 "각 스크립트 상세 동작" 참고). 여전히 **기본값은 `sentiment_score`(폐기 대상 라벨)** — Task E가 신규 라벨 컬럼을 만들기 전까지는 기본 호출로 실질 사용 불가. 의존: `db_manager` |
+
+**라벨(Task E, `daily_labels` 적재/보고)**:
+
+| 파일 | 역할 | 상태 |
+|---|---|---|
+| `라벨/라벨_공통.py` | z-score 계산(`compute_z_scores` h=1 전용, `compute_multi_horizon_z_scores` h=1/3/5/10 공용) + 라벨 파생 함수(`label_direction_5class` 등, 조회 시점 전용) + `daily_labels` 조회/split 유틸(`load_labels`, `split_dates_by_ratio`) | **핵심.** 라벨_생성.py/라벨_보고.py/감성분석의 taskf_*.py가 공유. `compute_z_scores`는 라벨_보고.py의 레짐 특성 계산(원 change_rate 필요)이 계속 참조해 그대로 남겨둠 — 신규 코드는 `compute_multi_horizon_z_scores` 사용. 의존: `constants`, `db_manager`, `시장지표.feature_loader` |
+| `라벨/라벨_생성.py` | `daily_labels` 적재 — 윈도우 20/60/120 x horizon 1/3/5/10 계산 후 UPSERT | 실행 완료(2026-09-02, 19,608행, 기존 h=1 4,902행은 값 변경 없이 보존). 재실행 안전(멱등, IS DISTINCT FROM). 의존: `constants`, `db_manager`, `라벨.라벨_공통` |
+| `라벨/라벨_보고.py` | Task E 정지 지점 보고(z 분포/라벨 분포/split별 비교/D-8 레짐 특성) — h=1(익일) 전용 | 실행 완료(2026-08-31). 상세 결과는 `결과_TaskE_라벨링.md`. 의존: `constants`, `db_manager`, `라벨.라벨_공통` |
+
+| `감성분석/kobert_dataset.py` | `daily_news`/`daily_news_bigkinds` 공용 로더(`load_labeled_news`)+split+Dataset | 2026-08-30 확장: `table_name`/`label_column` 파라미터 추가로 두 테이블을 같은 파이프라인으로 로드 가능(상세는 아래 "각 스크립트 상세 동작" 참고). 2026-09-01 `source` 필터 파라미터 추가(`daily_news.source` 값으로 필터, Task F가 `search_backfill`만 쓰기 위해 사용). 여전히 **기본값은 `sentiment_score`(폐기 대상 라벨)** — Task E가 신규 라벨 컬럼을 만들기 전까지는 기본 호출로 실질 사용 불가. 의존: `db_manager` |
 | `감성분석/baseline_tfidf.py` | TF-IDF+로지스틱회귀 진단 베이스라인 | 실험·진단용(Task A에서 1회 사용). 의존: `감성분석.kobert_dataset` |
 | `감성분석/kobert_train.py` | KoBERT 파인튜닝 | ⚠️ **재실행 금지**(데이터 재구축 전까지, CLAUDE.md 기 명시). 의존: `감성분석.kobert_dataset` — import 방식을 `from 감성분석.kobert_dataset import ...`로 수정 완료(2026-08-23, 다른 파일들과 관례 통일). `import 감성분석.kobert_train`으로 ImportError 없음 확인(단 `__main__` 블록은 재학습을 바로 시작하므로 재학습 금지 원칙에 따라 실제 실행으로는 검증 안 함) |
+| `감성분석/taskf_gating.py` | Task F 게이팅(h=1, 익일) — 라벨 3종 x 윈도우 3종 = 9개 조합 TF-IDF(char_wb 2-4gram)+로지스틱회귀. 뉴스-라벨 매칭(D보다 뒤인 첫 거래일, `allow_exact_matches=False`) | 실행 완료(2026-09-01, 당일 매칭 누수 발견·수정 반영). 결과만으로는 신호 착시였음이 이후 taskf_validate.py로 드러남 — 상세는 `결과_TaskF_게이팅검증.md`. 의존: `constants`, `감성분석.kobert_dataset`, `라벨.라벨_공통` |
+| `감성분석/taskf_validate.py` | taskf_gating.py(h=1) 결과 검증 — 레이블 셔플(30회)/시드-부트스트랩 대체/사전분포 무작위 예측기(200회)/표본크기 | 실행 완료(2026-09-01) — 검증 대상 3개 조합 전부 셔플 분포와 통계적으로 구분 안 됨(신호 미검출). 의존: `constants`, `감성분석.taskf_gating` |
+| `감성분석/taskf_gating_horizon.py` | Task F 게이팅+검증 통합(h=3/5/10, 윈도우 N=60 고정) — 블록 셔플(누적 윈도우 상관 보존) + 사전분포 무작위 예측기를 게이팅과 함께 즉시 실행 | 실행 완료(2026-09-02) — 9개 조합 전부 신호 미검출, horizon을 늘려도 개선 경향 없음. 의존: `constants`, `감성분석.kobert_dataset`, `감성분석.taskf_gating`, `라벨.라벨_공통` |
 
 **QA/검증용 별도 도구 (일회성, 파이프라인 아님)**: `recrawl_suspect_dates.py`(53일)/
 `recrawl_cluster_expand.py`(91일)/`recrawl_gap_mar_jun.py`(47일, 부분)로 3차에 걸쳐 진행됐다.
@@ -650,9 +710,9 @@ G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수
 | A | 원인 확정 진단 | ✅ 완료, 판정 승인 |
 | B | 수집기 교체 → search.naver.com 날짜범위 크롤러(`뉴스_최초적재.py`/`뉴스_일일수집.py`/`뉴스_공통.py`)로 확정(2026-08-23, finance.naver.com은 페이지네이션 한계로 폐기). 발행 "시각"은 이 소스로 확보 불가 — Task D가 안 B(완화)로 대체 확정됨 | ✅ **전면 백필 완료 + QA 검증·클러스터 확장 재크롤링·갭 구간 표본 재크롤링 전부 완료** (아래 참고, 최종 14,392행) |
 | C | 전면 재수집. 종목은 당분간 005930 단일(2026-08-23 사람 결정, SK하이닉스 드랍). 섹터 분산 확장은 이후 재검토 | 진행 중(B의 백필과 사실상 통합) |
-| D | 이벤트 윈도우 재정렬 — **안 B(완화): D-1 09:00~D 09:00 24시간 윈도우로 확정**(2026-08-23, search_backfill이 시각 정보 없음) | 확정, **착수는 백필 완료 후**(아래 참고) |
-| E | 라벨 생성 — D-2 롤링 z-score, 방향(5/3-class)·변동성(2-class) 라벨. 별도 테이블 `daily_labels`에 z_score만 저장(2026-08-30 설계 확정, 위 DB 스키마 절 참고). 상세는 `TASK_EF_라벨링_비교실험.md` 참고(2026-08-30 실행 전 검토 반영) | 보류(백필 완료 후 착수, 착수 조건은 충족됨) |
-| F | 비교 실험 — KR-FinBERT(KoBERT 아님), 데이터소스 교차평가(크롤링/빅카인즈) 포함. 상세는 `TASK_EF_라벨링_비교실험.md` 참고 | 보류 |
+| D | 이벤트 윈도우 재정렬 — **안 B(완화): D-1 09:00~D 09:00 24시간 윈도우로 확정**(2026-08-23, search_backfill이 시각 정보 없음) | ✅ **실제 구현 완료(2026-09-01)** — `daily_news.target_date` 컬럼을 채우는 방식이 아니라 Task F 쿼리 시점에 `merge_asof`로 즉석 조인하는 방식으로 구현됨. 상세는 아래 "Task F 게이팅·검증·horizon 확장 실험" 참고 |
+| E | 라벨 생성 — D-2 롤링 z-score, 방향(5/3-class)·변동성(2-class) 라벨. `daily_labels`에 z_score만 저장(2026-08-30 설계 확정, 위 DB 스키마 절 참고). 2026-09-02 `horizon_h` 컬럼 추가로 익일(h=1) 외 h=3/5/10 누적 라벨도 지원. 상세는 `TASK_EF_라벨링_비교실험.md` 참고 | ✅ **완료** — 임계값·윈도우 확정(2026-08-31) + horizon 확장(2026-09-02). 실행 결과·상세 표는 `결과_TaskE_라벨링.md` 참고 |
+| F | 비교 실험 — KR-FinBERT(KoBERT 아님), 데이터소스 교차평가(크롤링/빅카인즈) 포함. 상세는 `TASK_EF_라벨링_비교실험.md` 참고 | ✅ **게이팅·검증 완료(2026-09-01~09-02)** — 익일(h=1)·주간(h=3/5/10) 라벨 전부 셔플/사전분포 검증에서 신호 미검출(p전부≥0.258). **KR-FinBERT 투입 보류로 확정.** 상세는 아래 및 `결과_TaskF_게이팅검증.md` 참고 |
 
 #### 뉴스 백필 완료 + QA 결과 (2026-08-30, 클러스터 확장 재크롤링·갭 구간 표본 재크롤링까지 전부 완료)
 
@@ -738,6 +798,53 @@ finance_crawl(1,200)+search_backfill(14,077, 재크롤링 전) 합계이며 학�
 
 **Task B 재수집 완료 후 확인 필수 (기존, Task B 착수 전 조건에서 이관)**: 네이버 금융 종목뉴스
 페이지의 과거 조회 가능 기간은 이미 실측 완료(약 4~7일, 부적합 확정) — 이 조건은 해소됨.
+
+#### Task F 게이팅·검증·horizon 확장 실험 (2026-09-01~09-02, 상세는 `결과_TaskF_게이팅검증.md`)
+
+**요약**: 게이팅(TF-IDF+로지스틱회귀)을 익일(h=1) 라벨로 먼저 실행했고, 실행 직후 뉴스-라벨
+매칭에서 당일 매칭 누수를 발견해 수정했다. 수정 후에도 9개 조합 전부 baseline을 유의하게
+상회해 "보였으나", **셔플 테스트·클래스 사전분포 무작위 예측기로 재검증한 결과 그 "우위"가
+전부 평가 방식의 착시였음이 드러났다.** "익일 예측이라 신호가 약했을 수 있다"는 가설로
+h=3/5/10(주간 단위 누적 초과수익률)까지 확장해 재실험했지만 결론은 동일했다. **KR-FinBERT
+투입은 근거가 없어 보류한다.**
+
+**① 뉴스 라벨 매칭 누수 (2026-09-01)**: `pd.merge_asof(direction="forward")`의 기본값
+`allow_exact_matches=True` 때문에 거래일에 발행된 뉴스가 **그날 자신의 라벨**에 매칭되고
+있었다 — 시각 정보가 없어 장중 발행인지 장 마감 후 사후 서술인지 구분할 수 없으므로 명백한
+누수다. `allow_exact_matches=False`로 "D보다 엄격히 뒤인 첫 거래일"에만 매칭하도록 수정
+(Task D "안 B"의 실제 구현 — `daily_news.target_date` 컬럼을 채우는 방식이 아니라 조회
+시점에 즉석 조인하는 방식, `TASK_EF_라벨링_비교실험.md` "뉴스 라벨 매칭 규칙" 참고). 수정으로
+9개 조합의 baseline 대비 격차(Δtest)가 4~41% 줄었다 — **시점 정렬 없이는 성능이 최대 41%
+과대평가될 수 있다**는 것이 실측 수치로 확인됐다.
+
+**② 셔플·사전분포 검증 (2026-09-01)**: 누수 수정 후 남은 "9개 전부 baseline 상회"가 진짜
+신호인지 (a) train 라벨만 무작위로 섞고 재학습(30회) (b) 클래스 사전분포를 따르는 무작위
+예측기(200회)와 비교했다. 결과: 실제 Δtest가 셔플 분포 95% 구간 **안**에 있었고(3개 조합 중
+2개는 셔플 평균보다도 낮음), 실제 macro F1이 사전분포 무작위 예측기의 기대값과 거의 같거나
+낮았다. **다수결 baseline을 상회하는 것은 신호의 증거가 아니다** — `class_weight='balanced'`
++ 고차원 희소 TF-IDF 조합은 라벨이 무작위여도 macro F1이 다수결 baseline을 기계적으로
+상회하는 경향이 있다(균형 잡힌 예측을 보상하는 지표 특성 + 고차원 노이즈 적합). **⚠️ 앞으로 이
+파이프라인 계열로 신호 유무를 판정할 때는 반드시 클래스 사전분포 무작위 예측기와 비교할 것**
+— 다수결 baseline 비교만으로는 착시에 빠질 수 있다.
+
+(부수 발견: `LogisticRegression(solver='lbfgs')`는 결정론적이라 `random_state`만 바꾸는 시드
+안정성 점검은 무의미했다 — train 부트스트랩 재추출로 대체했고, 결과는 안정적이었다. 즉
+"안정적으로 재현되는 착시"였다는 뜻이다.)
+
+**③ Horizon 확장 실험 (2026-09-02)**: "익일 예측이라 노이즈 대비 신호가 약했을 수 있다"는
+가설로, 라벨을 h거래일(3/5/10) 누적 초과수익률로 재설계했다(`daily_labels`에 `horizon_h`
+컬럼 추가, PK를 `(ticker, date, window_n, horizon_h)`로 확장 — 기존 h=1 데이터는 값 변경
+없이 보존, 위 DB 스키마 절 참고). 윈도우 N=60 고정, 라벨 3종 x horizon 3종 = 9개 조합으로
+게이팅+검증(**블록 셔플** — 겹치는 누적 윈도우 때문에 생기는 인접 표본 상관을 보존한 채
+텍스트-라벨 대응만 끊음)을 함께 실행했다. **결론은 동일했다**(p=0.387~0.903, 전부 유의하지
+않음, horizon을 늘려도 신호 대 노이즈 비가 개선되는 경향 없음) — **"익일이라 안 됐다"는
+가설은 기각됐다.**
+
+**종합 결론**: 현재 데이터(005930 단일 종목, 약 3년, test 111거래일) 범위에서는 뉴스 텍스트와
+초과수익률 사이에 이 파이프라인으로 검출 가능한 관계가 없다. Task T-1이 "가격+거시지표만으로는
+무작위 수준과 구분 안 됨"으로 확정했던 것과 같은 성격의 결론이 뉴스/감성 트랙에서도 확인됐다.
+**KR-FinBERT 투입 근거 없음 — 보류.** 다음 방향 후보(종목/기간 확장, 데이터소스 교차검증, 문제
+재정의 등)는 `결과_TaskF_게이팅검증.md` [5]에 선택지로만 정리했다 — 결정은 아직 하지 않았다.
 
 ### 이후
 스케줄러/크론 자동화, 추론(서빙) 코드, 컨테이너화(Docker → Kubernetes, 최후순위)
