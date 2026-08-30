@@ -74,6 +74,16 @@ CONSECUTIVE_BLOCKED_DAYS_LIMIT = 2  # 연속 며칠이 통째로 차단되면 �
 EARLY_STOP_PAGES = 5
 EARLY_STOP_CANDIDATES = 50
 
+# 2026-08-29 예방적 쿨다운: 위 CONSECUTIVE_FAILURE_LIMIT/BACKOFF_SECONDS는 이미 403이 시작된
+# "뒤"에 반응하는 회로차단기다. 이건 그 전에 미리 한 번씩 쉬어서 차단 자체를 덜 유발하려는
+# 예방 조치이며 기존 로직을 대체하지 않고 그대로 얹는다. run_backfill_resumable처럼 여러
+# 날짜에 걸쳐 도는 실행 전체 기간 동안 누적되어야 의미가 있으므로 하루 단위가 아니라 모듈
+# 전역 카운터(_fetch_call_count)로 추적한다.
+PREVENTIVE_COOLDOWN_EVERY = 80
+PREVENTIVE_COOLDOWN_RANGE = (90.0, 120.0)
+
+_fetch_call_count = 0
+
 _PATH_IDS_RE = re.compile(r"/mnews/article/(\d+)/(\d+)")
 _UI_LABEL_CLASS = "fender-ui_0cb57fb2"  # "새 창 열림" 같은 접근성 라벨용 span의 클래스
 
@@ -150,6 +160,24 @@ def fetch_search_page(stock_name, target_date, start):
     return items
 
 
+def _track_fetch_call():
+    """
+    fetch_search_page 호출 직전에 불러 누적 카운터를 올리고, PREVENTIVE_COOLDOWN_EVERY회에
+    도달하면 한 번 길게 쉬고 카운터를 리셋한다. 모듈 전역 상태라 run_backfill_resumable이
+    날짜를 넘어가며 crawl_day를 반복 호출해도 하루 단위로 끊기지 않고 누적된다.
+    """
+    global _fetch_call_count
+    _fetch_call_count += 1
+    if _fetch_call_count >= PREVENTIVE_COOLDOWN_EVERY:
+        cooldown = random.uniform(*PREVENTIVE_COOLDOWN_RANGE)
+        print(
+            f"      🧊 예방적 쿨다운: 누적 요청 {_fetch_call_count}회 — {cooldown:.1f}초 대기 후 재개",
+            flush=True,
+        )
+        time.sleep(cooldown)
+        _fetch_call_count = 0
+
+
 def passes_quality_filter(title, press, stock_name):
     """(a) 종목명이 제목에 실제 포함, (b) 언론사 화이트리스트. 둘 다 통과해야 채택."""
     if stock_name not in title:
@@ -205,6 +233,7 @@ def crawl_day(ticker, target_date):
     while start <= MAX_START_PER_DAY:
         pages_fetched += 1
         try:
+            _track_fetch_call()
             items = fetch_search_page(stock_name, target_date, start)
         except Exception as e:
             page_errors.append({"start": start, "error": str(e)})
