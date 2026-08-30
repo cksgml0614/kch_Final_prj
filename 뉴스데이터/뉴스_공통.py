@@ -26,6 +26,8 @@ from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
+from constants import STOCK_NAMES
+
 SOURCE_NAME = "search_backfill"
 # 2026-08-23 실측: 0.7~2.0s 간격에서도 요청이 누적되면 일정 개수를 넘는 시점부터 403이 시작되고,
 # 개별 요청은 그 와중에도 성공한다(짧은 창 기반 요청 빈도 제한으로 추정). 간격을 늘려 트리거 빈도를 낮춘다.
@@ -43,16 +45,8 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# 종목코드 -> 검색어(회사명). 파라미터화 유지 목적 — 현재 활성 종목은 005930뿐이다(사람 결정, 2026-08-23).
-STOCK_NAMES = {
-    "005930": "삼성전자",
-    "000660": "SK하이닉스",  # 비활성 — 수집 대상 아님(자리표시자로만 유지)
-    "005380": "현대차",
-    "051910": "LG화학",
-    "105560": "KB금융",
-    "207940": "삼성바이오로직스",
-    "035420": "NAVER",
-}
+# 종목코드 -> 검색어(회사명)는 constants.STOCK_NAMES로 중앙화(2026-08-30) — 활성 여부는
+# constants.ACTIVE_TICKERS 참고. 현재 활성 종목은 005930뿐이다(사람 결정, 2026-08-23).
 
 # 언론사 화이트리스트 — 경제/증권 전문지 위주. NaverFinanceNews.py 스모크 테스트와 본 모듈 조사에서
 # 실제로 관측된 언론사를 기준으로 시작한 목록이며, 커버리지에 직접 영향을 주므로 필요시 사람이 검토·확장할 것.

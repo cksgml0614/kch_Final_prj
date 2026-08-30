@@ -12,6 +12,7 @@
 
 from datetime import date, datetime, timedelta
 
+from constants import ACTIVE_TICKERS
 from db_manager import get_db_connection
 from 뉴스데이터.뉴스_공통 import SOURCE_NAME, crawl_day, upsert_articles
 
@@ -24,7 +25,6 @@ from 뉴스데이터.뉴스_공통 import SOURCE_NAME, crawl_day, upsert_article
 # (예: 10분 예산이면 약 30일).
 MAX_CATCHUP_DAYS = 14
 
-ACTIVE_TICKERS = ["005930"]  # 현재 활성 종목만(2026-08-23 사람 결정, STOCK_NAMES 전체가 아님)
 
 
 def get_last_collected_date(cur, ticker):

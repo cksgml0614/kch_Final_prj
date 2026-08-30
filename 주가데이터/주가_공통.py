@@ -4,12 +4,10 @@
 
 import FinanceDataReader as fdr
 from datetime import timedelta, date
+from constants import ACTIVE_TICKERS
 from db_manager import get_db_connection
 
-TICKERS = [
-    '005930',  # 삼성전자
-    '000660',  # SK하이닉스
-]
+TICKERS = ACTIVE_TICKERS  # 종목 마스터는 constants.py로 중앙화(2026-08-30). 이름은 하위 호환 유지
 
 
 def get_last_date(cur, ticker):

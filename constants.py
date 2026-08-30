@@ -22,3 +22,32 @@ NEWS_BACKFILL_END = "2026-08-23"
 
 # 주가 초기적재 시작일 (기존 주가데이터/FinanceData_load.py의 '2020-01-01' 하드코딩에서 이관, 2026-08-23)
 STOCK_INITIAL_LOAD_START = "2020-01-01"
+
+# 종목 마스터 (2026-08-30 중앙화). 이전에는 주가데이터/주가_공통.py의 TICKERS, 뉴스데이터/
+# 뉴스_공통.py의 STOCK_NAMES, 뉴스데이터/뉴스_일일수집.py의 ACTIVE_TICKERS가 각자 따로
+# 관리되고 있었다 — SK하이닉스(000660) 활성 여부가 주가 쪽은 주석 처리, 뉴스 쪽은 "비활성"
+# 주석만으로 서로 다르게 표현돼 있었던 게 그 결과. 여기 한 곳에서만 관리한다.
+#
+# 비활성 종목도 코드는 유지한다(CLAUDE.md 기존 방침, Task C 종목 확장 원칙) — 나중에 활성화할
+# 때 회사명을 다시 조사할 필요 없이 active만 True로 바꾸면 된다.
+from collections import namedtuple
+
+Stock = namedtuple("Stock", ["ticker", "name", "active"])
+
+STOCKS = [
+    Stock("005930", "삼성전자", True),
+    Stock("000660", "SK하이닉스", False),        # 자리표시자 유지, Task C 재검토 전까지 비활성
+    Stock("005380", "현대차", False),             # Task C 섹터 분산 확장 후보
+    Stock("051910", "LG화학", False),             # Task C 섹터 분산 확장 후보
+    Stock("105560", "KB금융", False),             # Task C 섹터 분산 확장 후보
+    Stock("207940", "삼성바이오로직스", False),    # Task C 섹터 분산 확장 후보
+    Stock("035420", "NAVER", False),              # Task C 섹터 분산 확장 후보
+]
+
+# 뉴스 크롤러: 종목코드 -> 검색어(회사명) 매핑 (비활성 포함 전체 — 크롤러가 검색어를 알아야
+# 하는 종목이 활성 종목만은 아니므로: 예를 들어 재크롤링/검증 도구가 비활성 종목을 임시로
+# 조회할 수도 있다)
+STOCK_NAMES = {s.ticker: s.name for s in STOCKS}
+
+# 활성 종목코드만 (주가 로더처럼 "무엇을 수집할지"만 필요한 쪽에서 사용)
+ACTIVE_TICKERS = [s.ticker for s in STOCKS if s.active]

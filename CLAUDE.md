@@ -8,13 +8,17 @@
 
 | 트랙 | 지시서 | 상태 |
 |---|---|---|
-| **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md`(A~D) + `TASK_EF_라벨링_비교실험.md`(E~F, 2026-08-29 분리) | Task A 완료, 판정 승인됨. **Task B 재개 — 전면 백필 진행 중(77.1%, 2026-08-29 기준)** |
+| **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md`(A~D) + `TASK_EF_라벨링_비교실험.md`(E~F, 2026-08-29 분리) | Task A 완료, 판정 승인됨. **Task B 완료 — 전면 백필 완료(2023-08-23~2026-08-28) + QA 검증·클러스터 확장 재크롤링·갭 구간 표본 재크롤링까지 전부 완료(`source='search_backfill'` 최종 14,392행)** |
 | **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | **G-0~G-4 전체 완료** |
 
-**현재 상태(2026-08-29)**: Task G 완료 후 열렸던 두 갈래(Transformer 착수 / 뉴스·감성 Task B 재개) 모두
+**현재 상태(2026-08-30)**: Task G 완료 후 열렸던 두 갈래(Transformer 착수 / 뉴스·감성 Task B 재개) 모두
 착수됐다. **Task T-1(Transformer ablation baseline)은 완료돼 "가격+거시지표만으로는 익일 방향성이
 무작위 수준과 구분 안 됨"으로 확정**됐다(상세는 "파이프라인 실행 순서 > 트랙 2" 참고). **뉴스/감성
-Task B도 재개돼 전면 백필이 진행 중**이다(체크포인트 기준 77.1%, 상세는 로드맵 절 참고).
+Task B는 전면 백필 완료 후 QA 검증(53일 재크롤링) + 클러스터 확장 재크롤링(91일) + 갭 구간
+표본 재크롤링(47일, 부분 확인)까지 모두 마쳤다** — `source='search_backfill'` 14,077 → 최종
+**14,392행**. QA에서 드러난 구조적 누락은 2024-02와 2024-07~08에 국한된 것으로 판단됐다(갭
+구간 표본 검증 결과 3년 전체로 일반화되지 않음이 재확인됨). 상세는 로드맵 절의 "뉴스 백필 완료
++ QA 결과" 참고. Task E(라벨 생성)의 착수 조건(백필 완료)은 충족됐다.
 
 `market_indicators`에 총 9개 지표, 38,955행(=14,072+24,883) 적재 완료: KOSPI/KOSDAQ/USD_KRW(G-2, FDR, 14,072행) + 기준금리·국고채3년·국고채10년·CPI·M2·선행지수순환변동치(G-3, ECOS, 24,883행). 반도체 수출금액지수는 종목 특화 지표라 공통 테이블 설계 원칙과 맞지 않아 제외. `시장지표/feature_loader.py`(G-4)로 누수 없는 피처 조회 가능 — `get_features(ticker, start_date, end_date)`가 종목 OHLCV + 지표 9개를 `published_date < 거래일` 조건으로 병합해 반환.
 
@@ -188,6 +192,13 @@ DB 기여 0행, 당일 뉴스만 수집해 스케줄러 없이 동작 불가, �
 데이터 확보 비용이 크게 줄어든다. 상세 실험 설계(데이터소스 교차 평가 등)는
 `TASK_EF_라벨링_비교실험.md` 참고.
 
+⚠️ **2026-08-30 데이터 규모 정정**: `daily_news` 학습 가용량은 `source='search_backfill'`만
+집계해야 한다(QA·클러스터 확장·갭 구간 재크롤링까지 완료한 최종값 **14,392건**) — 이전 세션
+대화에서 언급된 "25,895건"은 `daily_news` 전체(legacy 10,618 + finance_crawl 1,200 +
+search_backfill 14,077, 재크롤링 전 기준)의 합계였고 학습 정본 규모가 아니다.
+`daily_news_bigkinds`(20,053건, 위 스키마 절 참고)가 이보다 약 1.4배 많다 — 위 (b) 대체 가능성
+검증의 중요도가 그만큼 올라간다: 검증에 성공하면 학습 데이터를 약 40% 더 확보할 수 있다.
+
 ---
 
 ## 프로젝트 구조
@@ -325,12 +336,14 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 상세 동작 설명은 제거됨 — 각 파일 한 줄 요약은 아래 "파이프라인 실행 순서" 섹션의 "삭제 완료" 목록 참고.)
 
 **kobert_dataset.py**
-- `load_labeled_news(ticker=None)`: `sentiment_score IS NOT NULL` 행만 date 오름차순 로드, `LABEL_MAP = {-2:0,-1:1,0:2,1:3,2:4}`
+- `load_labeled_news(ticker=None, table_name='daily_news', label_column='sentiment_score')` (2026-08-30 확장, 기존 호출부 하위 호환): `daily_news`/`daily_news_bigkinds` 공통 컬럼(`ticker,date,title,summary,press,article_url,target_date`)+`label_column`을 date 오름차순 로드
+  - `table_name`은 화이트리스트(`{'daily_news','daily_news_bigkinds'}`), `label_column`은 안전한 식별자 정규식(`^[a-zA-Z_][a-zA-Z0-9_]*$`)으로 검증 후 SQL에 사용 — 둘 다 `%s` 파라미터화가 안 되는 식별자라 직접 검증 필요(SQL 인젝션 방지)
+  - `label_column=None`이면 라벨 필터(`IS NOT NULL`) 없이 전체 로드 — 라벨이 아직 없는 소스(`daily_news_bigkinds`)를 Task E 착수 전 텍스트만 확인할 때 사용
+  - `label_column='sentiment_score'`(기본값)일 때만 `LABEL_MAP = {-2:0,-1:1,0:2,1:3,2:4}`로 매핑한 `label` 컬럼을 추가. 그 외 라벨 컬럼(Task E 신규 라벨 등)은 매핑 스킴이 아직 정해지지 않았으므로 raw 값 그대로 반환 — 스킴을 미리 지어내지 않음
 - `split_by_ratio()`: 셔플 없이 날짜 순서대로 70/15/15
 - `compute_class_weights()`: 빈도 역수 weight tensor
 - `NewsDataset`: title+summary를 sentence-pair 토크나이징
 - 토크나이저 `AutoTokenizer.from_pretrained('skt/kobert-base-v1')` — sentencepiece 에러 없이 정상(`monologg/kobert` 불필요). 단 XLNetTokenizer 기반이라 `return_token_type_ids=True` 명시 필요, 세그먼트 id가 0/1/2로 나오는데 `type_vocab_size=2`라 `clamp(max=1)`로 방어
-- **Task F 예정 변경**: `label_column` 파라미터 추가해 `sentiment_score`/`excess_label` 선택 가능하게
 
 **baseline_tfidf.py**
 - `kobert_dataset.py`의 로더/분할을 재사용해 동일 조건 TF-IDF + 로지스틱 회귀
@@ -359,7 +372,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 |---|---|---|
 | `config.py` | `.env` 로드, `DB_URL`/`NAVER_*`/`ECOS_API_KEY` 제공 | 핵심 |
 | `db_manager.py` | `get_db_connection()` — 사실상 전 파일이 의존 | 핵심 (의존: `config`) |
-| `constants.py` | Task T 전용 스트레스 구간 상수(`STRESS_PERIOD_START/END`, 하드코딩, 자동 재탐지 금지 설계) | 핵심 |
+| `constants.py` | Task T 스트레스 구간 상수 + 날짜 상수(`NEWS_BACKFILL_START/END`, `STOCK_INITIAL_LOAD_START`) + **종목 마스터**(`STOCKS`/`STOCK_NAMES`/`ACTIVE_TICKERS`, `namedtuple` 기반, 2026-08-30 중앙화 — 이전엔 `주가_공통.py`/`뉴스_공통.py`/`뉴스_일일수집.py` 세 곳에 흩어져 있었음) | 핵심 |
 
 ### 트랙 1 — 주가/거시 (Task G, 전체 완료 ✅)
 
@@ -372,7 +385,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 
 | 순서 | 파일 | 역할 | 의존성 |
 |---|---|---|---|
-| 1 | `주가데이터/주가_공통.py` | `TICKERS`, `update_stock_data()`(핵심 fetch+upsert) 등 공용 로직 | `db_manager` |
+| 1 | `주가데이터/주가_공통.py` | `TICKERS`(2026-08-30부터 `constants.ACTIVE_TICKERS` 참조), `update_stock_data()`(핵심 fetch+upsert) 등 공용 로직 | `constants`, `db_manager` |
 | 1a | `주가데이터/주가_초기적재.py` | 데이터 없는 종목만 `constants.STOCK_INITIAL_LOAD_START`부터 전체 적재 | `constants`, `주가데이터.주가_공통` |
 | 1b | `주가데이터/주가_일일수집.py` | 종목별 DB 최신일+1부터 오늘까지 증분 수집 | `주가데이터.주가_공통` |
 | 2 | `시장지표/db_utils.py` | upsert 공용 로직 | 없음 (다른 모듈이 가져다 씀) |
@@ -436,9 +449,9 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 
 | 파일 | 역할 | 상태 |
 |---|---|---|
-| `뉴스데이터/뉴스_공통.py` | search.naver.com 크롤링 공용 상수·함수(`crawl_day`, `fetch_search_page`, `passes_quality_filter`, `upsert_articles`, `clean_title`/`clean_press` 등) | **핵심.** `clean_title`/`clean_press`/`upsert_articles`는 `NaverFinanceNews.py`에서 이관 — 살아있는 코드가 폐기 파일에 의존하던 역방향 구조를 바로잡음. 2026-08-29: 예방적 쿨다운 추가 — `fetch_search_page` 누적 호출이 80회에 도달할 때마다 90~120초 대기(`PREVENTIVE_COOLDOWN_EVERY`/`_RANGE`), 기존 회로차단기(`CONSECUTIVE_FAILURE_LIMIT`/`BACKOFF_SECONDS`)와는 별개로 얹은 사전 예방 조치. 모듈 전역 카운터라 `run_backfill_resumable`이 날짜를 넘나들며 호출해도 하루 단위로 끊기지 않고 누적됨. 의존: `db_manager` 없음(순수 크롤링/텍스트 유틸) |
-| `뉴스데이터/뉴스_최초적재.py` | 명시적 날짜범위(기본 `NEWS_BACKFILL_START`~`END`) 대량 백필, 체크포인트 기반 재개 | **핵심(현재 승인된 유일한 백필 소스, 2026-08-23 전면 백필 승인)**. 의존: `constants`, `db_manager`, `뉴스데이터.뉴스_공통` |
-| `뉴스데이터/뉴스_일일수집.py` | 종목별 DB 최신 수집일(`source='search_backfill'` 기준)+1 ~ 오늘 캐치업. 공백 14일 초과 시 자동 캐치업 안 하고 경고 | **핵심(신규, 아직 스케줄러 연결 전 — 로드맵 "이후" 단계에서 자동화 예정)**. 의존: `db_manager`, `뉴스데이터.뉴스_공통` |
+| `뉴스데이터/뉴스_공통.py` | search.naver.com 크롤링 공용 상수·함수(`crawl_day`, `fetch_search_page`, `passes_quality_filter`, `upsert_articles`, `clean_title`/`clean_press` 등) | **핵심.** `clean_title`/`clean_press`/`upsert_articles`는 `NaverFinanceNews.py`에서 이관 — 살아있는 코드가 폐기 파일에 의존하던 역방향 구조를 바로잡음. 2026-08-29: 예방적 쿨다운 추가 — `fetch_search_page` 누적 호출이 80회에 도달할 때마다 90~120초 대기(`PREVENTIVE_COOLDOWN_EVERY`/`_RANGE`), 기존 회로차단기(`CONSECUTIVE_FAILURE_LIMIT`/`BACKOFF_SECONDS`)와는 별개로 얹은 사전 예방 조치. 모듈 전역 카운터라 `run_backfill_resumable`이 날짜를 넘나들며 호출해도 하루 단위로 끊기지 않고 누적됨. 2026-08-30: `STOCK_NAMES`(종목코드→회사명)를 `constants.STOCKS`에서 파생하도록 변경 — 이전엔 이 파일에 로컬 하드코딩돼 있었음. 의존: `constants`(신규, 종목 마스터). `db_manager`는 여전히 미의존(순수 크롤링/텍스트 유틸) |
+| `뉴스데이터/뉴스_최초적재.py` | 명시적 날짜범위(기본 `NEWS_BACKFILL_START`~`END`) 대량 백필, 체크포인트 기반 재개 | **핵심(현재 승인된 유일한 백필 소스, 2026-08-23 전면 백필 승인, 2026-08-30 완료)**. 의존: `constants`, `db_manager`, `뉴스데이터.뉴스_공통` |
+| `뉴스데이터/뉴스_일일수집.py` | 종목별 DB 최신 수집일(`source='search_backfill'` 기준)+1 ~ 오늘 캐치업. 공백 14일 초과 시 자동 캐치업 안 하고 경고. `ACTIVE_TICKERS`는 2026-08-30부터 `constants.ACTIVE_TICKERS` 참조(이전엔 이 파일에 로컬 하드코딩) | **핵심(신규, 아직 스케줄러 연결 전 — 로드맵 "이후" 단계에서 자동화 예정)**. 의존: `constants`, `db_manager`, `뉴스데이터.뉴스_공통` |
 **삭제 완료(2026-08-23)**: `NaverFinanceNews.py`(finance.naver.com 종목뉴스, `source='finance_crawl'`
 — 페이지네이션 약 1주일 한계로 백필 부적합해 폐기, `clean_title`/`clean_press`/`upsert_articles`는
 `뉴스_공통.py`로 이관 완료), `NaverSearchBackfill.py`(위 3개 파일로 분리된 원본), `NaverNews.py`
@@ -448,9 +461,15 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 (CLAUDE.md D-1이 폐기한 구 5-tier 절대임계값 라벨 체계 그 자체 — **Task E, 초과수익률+롤링표준화
 구현 전까지 대체 라벨 소스가 없다는 점에 주의**). 삭제 전 grep으로 다른 파일의 실제 import 의존
 없음을 확인했다.
-| `감성분석/kobert_dataset.py` | `daily_news` 로더+split+Dataset | 핵심이나 **현재 `sentiment_score`(폐기 대상 라벨) 컬럼에 의존** — Task E 완료 전엔 실질 사용 불가. 의존: `db_manager` |
+| `감성분석/kobert_dataset.py` | `daily_news`/`daily_news_bigkinds` 공용 로더(`load_labeled_news`)+split+Dataset | 2026-08-30 확장: `table_name`/`label_column` 파라미터 추가로 두 테이블을 같은 파이프라인으로 로드 가능(상세는 아래 "각 스크립트 상세 동작" 참고). 여전히 **기본값은 `sentiment_score`(폐기 대상 라벨)** — Task E가 신규 라벨 컬럼을 만들기 전까지는 기본 호출로 실질 사용 불가. 의존: `db_manager` |
 | `감성분석/baseline_tfidf.py` | TF-IDF+로지스틱회귀 진단 베이스라인 | 실험·진단용(Task A에서 1회 사용). 의존: `감성분석.kobert_dataset` |
 | `감성분석/kobert_train.py` | KoBERT 파인튜닝 | ⚠️ **재실행 금지**(데이터 재구축 전까지, CLAUDE.md 기 명시). 의존: `감성분석.kobert_dataset` — import 방식을 `from 감성분석.kobert_dataset import ...`로 수정 완료(2026-08-23, 다른 파일들과 관례 통일). `import 감성분석.kobert_train`으로 ImportError 없음 확인(단 `__main__` 블록은 재학습을 바로 시작하므로 재학습 금지 원칙에 따라 실제 실행으로는 검증 안 함) |
+
+**QA/검증용 별도 도구 (일회성, 파이프라인 아님)**: `recrawl_suspect_dates.py`(53일)/
+`recrawl_cluster_expand.py`(91일)/`recrawl_gap_mar_jun.py`(47일, 부분)로 3차에 걸쳐 진행됐다.
+결과가 로드맵의 "뉴스 백필 완료 + QA 결과" 절에 전부 기록된 뒤 세 스크립트 모두 삭제됨
+(2026-08-30) — 연속 날짜 범위 재크롤링에 별도 스크립트를 새로 만들지 않는다는 원칙도 그 절에
+함께 기록돼 있다.
 
 ### 트랙 3 부가 — BigKinds 데이터 소스 (2026-08-29 신규, Task A~F 체계 미편입)
 
@@ -462,15 +481,8 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 |---|---|---|
 | `빅카인즈/빅카인즈_적재.py` | `빅카인즈_뉴스/`(gitignore됨) 폴더의 BigKinds CSV/Excel 일괄 적재 → `daily_news_bigkinds` | 최초 적재 완료(20,053행, 2026-08-29). `뉴스 식별자` dtype 버그 수정 반영됨(위 DB 스키마 절 참고). 의존: `db_manager` |
 
-옛 `쓰래기통/Bigkinds.py`(daily_news 대상, CSV 전용, 레거시)를 사람이 되살려 참고했지만 재사용하지
-않고 새로 작성했다 — 테이블도 별도, 컬럼도 더 풍부하다(본문 전체·URL·카테고리 등). `쓰래기통/Bigkinds.py`
-자체는 여전히 미사용 상태로 `쓰래기통/`에 남아 있다.
-
-### 기타
-
-| 파일 | 역할 | 상태 |
-|---|---|---|
-| `쓰래기통/Bigkinds.py` | BigKinds CSV 일괄 적재(daily_news 대상, 레거시) | 폐기 후보(기 확정, 격리 완료). 2026-08-29 참고용으로 복원됐으나 재사용 안 함 — 위 `빅카인즈/빅카인즈_적재.py` 참고 |
+옛 `쓰래기통/Bigkinds.py`(daily_news 대상, CSV 전용, 레거시)는 참고용으로 복원했다가 재사용하지
+않고 새로 작성했으며, 이후 삭제함(2026-08-30).
 
 ### 감성 통합 실험의 스코프 (2026-08-23 명시)
 
@@ -542,46 +554,98 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 
 G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수익률 라벨링(Task E)이 열린다. G-4 완료로 Transformer ablation baseline 착수에 필요한 피처 조회 함수도 준비됐다.
 
-### 뉴스/감성 트랙 (Task A~F) — Task B 방향 재개, 백필 진행 중
+### 뉴스/감성 트랙 (Task A~F) — Task B 완료(백필+QA), Task E 착수 대기
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | A | 원인 확정 진단 | ✅ 완료, 판정 승인 |
-| B | 수집기 교체 → search.naver.com 날짜범위 크롤러(`뉴스_최초적재.py`/`뉴스_일일수집.py`/`뉴스_공통.py`)로 확정(2026-08-23, finance.naver.com은 페이지네이션 한계로 폐기). 발행 "시각"은 이 소스로 확보 불가 — Task D가 안 B(완화)로 대체 확정됨 | ✅ 방향 확정, **전면 백필 실행 중** (아래 참고) |
+| B | 수집기 교체 → search.naver.com 날짜범위 크롤러(`뉴스_최초적재.py`/`뉴스_일일수집.py`/`뉴스_공통.py`)로 확정(2026-08-23, finance.naver.com은 페이지네이션 한계로 폐기). 발행 "시각"은 이 소스로 확보 불가 — Task D가 안 B(완화)로 대체 확정됨 | ✅ **전면 백필 완료 + QA 검증·클러스터 확장 재크롤링·갭 구간 표본 재크롤링 전부 완료** (아래 참고, 최종 14,392행) |
 | C | 전면 재수집. 종목은 당분간 005930 단일(2026-08-23 사람 결정, SK하이닉스 드랍). 섹터 분산 확장은 이후 재검토 | 진행 중(B의 백필과 사실상 통합) |
 | D | 이벤트 윈도우 재정렬 — **안 B(완화): D-1 09:00~D 09:00 24시간 윈도우로 확정**(2026-08-23, search_backfill이 시각 정보 없음) | 확정, **착수는 백필 완료 후**(아래 참고) |
 | E | 라벨 생성 — D-2 롤링 z-score, 방향(5/3-class)·변동성(2-class) 라벨. 상세는 `TASK_EF_라벨링_비교실험.md` 참고(2026-08-29 재작성) | 보류(백필 완료 후 착수) |
 | F | 비교 실험 — KR-FinBERT(KoBERT 아님), 데이터소스 교차평가(크롤링/빅카인즈) 포함. 상세는 `TASK_EF_라벨링_비교실험.md` 참고 | 보류 |
 
-#### 뉴스 백필 진행 상황 (2026-08-29 갱신)
+#### 뉴스 백필 완료 + QA 결과 (2026-08-30, 클러스터 확장 재크롤링·갭 구간 표본 재크롤링까지 전부 완료)
 
-**실행 중.** `python -m 뉴스데이터.뉴스_최초적재 --tickers 005930 --start 2023-08-23 --end 2026-08-23`을
-사람이 여러 세션에 나눠 직접 실행 중(2026-08-29 세션 동안에도 백그라운드로 계속 진행됨 — python
-프로세스 실행 확인됨). 체크포인트(`뉴스데이터/checkpoints/search_backfill_progress.csv`, git 미추적)
-기준 스냅샷:
-- 완료: 2023-08-23 ~ 2025-12-15 (846일 / 전체 1,097일 ≈ **77.1%**, 남은 251일) — 계속 갱신되는
-  값이므로 다음 세션 시작 시 체크포인트 파일로 재확인할 것
-- 2026-08-29: `뉴스데이터/뉴스_공통.py`에 예방적 쿨다운 추가(위 파이프라인 표 참고) — 403 유발
-  자체를 줄이려는 조치. 일평균 신규 삽입 건수가 개선됐는지는 아직 재검증 안 함
+**전면 백필 완료.** `python -m 뉴스데이터.뉴스_최초적재 --tickers 005930 --start 2023-08-23 --end 2026-08-23`
+실행 완료, `source='search_backfill'` 기준 2023-08-23~2026-08-28 전 기간 수집됨(체크포인트
+`뉴스데이터/checkpoints/search_backfill_progress.csv`, git 미추적). QA 시점 14,077행 → 1차
+재크롤링(53일) 후 14,219행 → 2차 클러스터 확장 재크롤링(91일) 후 14,350행 → 3차 갭 구간 표본
+재크롤링(47일) 후 **최종 14,392행**(총 +315건).
 
-**다음 세션 시작 시 할 일**:
-1. 체크포인트 파일(`뉴스데이터/checkpoints/search_backfill_progress.csv`)로 실제 진행률 재확인
-   (마지막 완료 날짜, 전체 대비 %)
-2. 백필이 멈춰 있다면(연속 2일 차단 등으로 스스로 중단됐을 수 있음) **다른 크롤러 프로세스가
-   실행 중이 아닌지 먼저 확인**한 뒤, 같은 명령으로 재개:
-   `python -m 뉴스데이터.뉴스_최초적재 --tickers 005930 --start 2023-08-23 --end 2026-08-23`
-   (체크포인트에 없는 날짜부터 자동으로 이어짐)
-3. 차단(🛑)이 자주 뜬다면 `뉴스데이터/뉴스_공통.py`의 `REQUEST_DELAY_RANGE`(현재 2.0~4.0초)를
-   늘리는 것을 고려할 것
+**날짜별 수집 건수 분포** (수집 기록 있는 날짜 1,022일 기준): 평균 13.77 / **중앙값 11** / Q1 7 /
+Q3 17 / 최대 92. ⚠️ **정정**: 이전에 "2026-07/2023-09 중앙값 15~18건"으로 적었던 참고치가
+부정확했다 — 실측 결과 **2026-07은 17건**이 맞지만 **2023-09는 11건**이다.
 
-**백필 완료 후 QA 필요 사항**:
-- **"403은 있었지만 kept>0라서 완료 처리된 날짜" 별도 점검** — `degraded` 판정은 `kept==0`일
-  때만 걸리므로, 그 날 일부 페이지가 403이었지만 다른 페이지에서 몇 건 건졌다면 정상 완료로
-  체크포인트에 기록된다. 이런 날은 **실제로는 그 날 관련 기사 일부를 놓쳤을 가능성**이 있다 —
-  체크포인트에는 403 여부가 기록되지 않으므로, 완료 후 전체 실행 로그(있다면)에서 이런 날짜를
-  추출해 재검증이 필요한지 판단할 것
-- 완료 후 일평균 신규 건수를 2026-07/2023-09 검증치(중앙값 15~18건)와 비교 — 지금까지
-  구간(중앙값 10건)이 계속 낮게 나오면 조기종료 휴리스틱이 너무 공격적인 건 아닌지 재검토
+**언론사 필터 정상 작동 확인**: `source='search_backfill'` 고유 언론사 23개 = `PRESS_WHITELIST`
+23개와 정확히 일치, 화이트리스트 밖 press 값 0건.
+
+**빅카인즈(`daily_news_bigkinds`)와의 일별 건수 상관계수**: 0.729 (같은 기간, 언론사 화이트리스트가
+서로 달라 완전히 일치하지는 않음 — 해석 시 감안).
+
+**1차 — 의심 날짜 재크롤링 (완료)**: ±7일 롤링 중앙값 대비 50% 이하로 낮았던 거래일 53개를
+`analysis/recrawl_suspect_dates.py`로 재수집(별도 체크포인트, `search_backfill_progress.csv`는
+미변경). **11개 날짜에서 +142건 신규 발견** — 그중 **2024-07-09~2024-08-01 클러스터 6일에서
++116건(전체 신규의 82%)이 집중**됐다(2024-02-07/02-16도 +21건으로 유사 패턴).
+
+**2차 — 클러스터 확장 재크롤링 (완료)**: 위 두 클러스터의 인접 날짜까지 확장한
+2024-02-01~02-29 + 2024-07-01~08-31(총 91일)을 `analysis/recrawl_cluster_expand.py`로 재검증.
+**+131건 추가 발견**, `blocked`/`degraded` 0건(`page_errors`도 2024-07-05 1건 제외 전부 0).
+
+| 구간 | 일수 | 신규 발견일 | 신규 건수 |
+|---|---|---|---|
+| 2024-02 | 29 | 10일 (34%) | 31건 |
+| 2024-07 | 31 | 11일 (35%) | 84건 |
+| 2024-08 | 31 | 11일 (35%) | 16건 |
+
+가장 큰 발견은 2024-07-31(+19), 2024-07-14(+19), 2024-07-08(+16) — **6일(각 ≥6건)이 131건 중
+78건(60%)을 차지하며 전부 7월**. 8월은 잔여치(16건, 대부분 +1~2)만 남아 8월 들어 문제가 빠르게
+해소됐음을 시사한다.
+
+⚠️ **확정 사항(가설 아님)**: 두 재크롤링 모두 `page_errors=0`(2024-07-05 1건 제외)이었는데도
+대량 누락이 있었다. 즉 **403이 명시적으로 뜨지 않으면서 응답 내용만 비정상인 경우가 실재**하며,
+현재 `degraded` 판정 로직(`page_errors`가 반드시 함께 있어야 트리거)으로는 이런 사각지대를 잡지
+못한다는 것이 실측으로 확인됐다 — `뉴스데이터/뉴스_공통.py`의 `crawl_day()` 주석에 이미 가설로
+적혀 있던 패턴("완전 차단은 아니지만 요청 빈도 제한이 걸린 상태의 응답이 구조는 파싱되지만
+내용이 정상이 아니었던 것")의 실증 사례다.
+
+**3차 — 갭 구간(2024-03~06) 표본 재크롤링 (부분 확인 후 중단, 2026-08-30)**: 2024-02와
+2024-07~08 두 클러스터 사이 미확인 구간이 "지속된 문제"인지 "독립된 두 사건"인지 판단하기 위해
+2024-03-01~2024-06-30(총 122일 계획)을 재검증 시작. **2024-03-01~2024-04-16(47일, 계획의
+약 39%) 완료 시점에서 중단** — `blocked`/`degraded` 0건, 신규 21일/47일, **신규 42건**
+(일평균 0.89건). 상위: 2024-03-13(+12), 2024-03-12(+6), 2024-03-27(+3) — 12~13일 이틀에
+18건(전체의 43%)이 몰린 것을 빼면 나머지는 대부분 +1~2건의 잔여치 수준. 클러스터 구간(2024-02
+평균 1.07건/일, 2024-07 평균 2.71건/일)과 비교해 **뚜렷하게 낮은 강도**로 판단해, 사람 판단으로
+나머지 75일 재검증의 실익이 낮다고 보고 중단했다(2026-08-30). 사용 스크립트는
+`analysis/recrawl_gap_mar_jun.py`였으며, 결과 반영 후 삭제됨(아래 "재크롤링 스크립트 정리" 참고).
+
+**범위 판정 — 2024-02/2024-07~08은 조용한 누락이 집중된 구간으로 확정, 3년 전체로
+일반화하지 않음**: 1차 재크롤링(53일)은 이미 2023-08~2026-08 전 기간에서 통계적 이상치로 뽑힌
+표본이었는데, 이 두 클러스터 밖에서는 유의한 신규 발견이 없었다(2026-05-14 +1건 제외). 클러스터
+내부에서도 7월(84건) → 8월(16건)로 강도가 빠르게 감쇠하는 패턴, 요일 편중 없음(월~일 고르게
+분포)을 종합하면 **2024년 2월과 특히 7월 초~중순에 일시적으로 존재했다가 8월에 해소된 국지적
+문제**로 판단한다. 3차 갭 구간 표본(2024-03-01~04-16, 47일)에서는 발견 강도가 클러스터 구간의
+약 1/3 수준으로 현저히 낮게 나와, **두 클러스터 사이 기간에 같은 수준의 문제가 지속됐을 가능성은
+낮다**고 판단한다. 다만 이는 3~6월 전 구간(122일) 완전 검증이 아니라 앞쪽 47일 표본 기준이다 —
+재검증 커버리지는 총 **144일(1·2차) + 47일(3차) = 191일 / 1,097일(약 17%)**. "다른 곳에 전혀
+없다"는 증명은 아니며, 필요하면 미확인 잔여 구간(2024-04-17~06-30)을 다음 검증 후보로 고려할 것.
+
+재크롤링 후에도 건수가 낮은 11개 날짜(≤2건, 1차 재크롤링 기준)는 **원시 후보(candidates_total)
+51~95건이 정상 수집됐으나 필터 통과만 적었던 경우**로, 크롤링 실패가 아니라 **실제 저조일로
+판정**한다. `2026-07-29`(2026년 코스피 폭락 다음날)가 여기 포함되는데, 이는 "그 폭락이 뉴스가
+아니라 레버리지 ETF 강제청산 등 수급 요인이었다"는 기존 분석(위 "2026년 시장 레짐" 절)과
+정합한다.
+
+⚠️ **데이터 규모 정정**: 학습에 쓸 실제 크롤링 데이터는 `daily_news` 전체가 아니라
+`source='search_backfill'`만이다(최종 14,392건). "daily_news 25,895건"은 legacy(10,618)+
+finance_crawl(1,200)+search_backfill(14,077, 재크롤링 전) 합계이며 학습 정본 규모가 아니다.
+상세는 D-10 참고.
+
+**재크롤링 스크립트 정리 원칙(2026-08-30)**: `recrawl_suspect_dates.py`/`recrawl_cluster_expand.py`/
+`recrawl_gap_mar_jun.py`는 결과가 이 절에 기록된 뒤 모두 삭제됐다. **연속된 날짜 범위 재크롤링은
+새 스크립트를 만들지 말고 기존 `뉴스_최초적재.py`를 `--start`/`--end`/`--checkpoint` 인자로
+실행할 것** — 별도 스크립트가 정당한 경우는 "여러 곳에 흩어진 날짜 목록"처럼 연속 범위로 표현
+불가능한 대상일 때뿐이다.
 
 **Task B 재수집 완료 후 확인 필수 (기존, Task B 착수 전 조건에서 이관)**: 네이버 금융 종목뉴스
 페이지의 과거 조회 가능 기간은 이미 실측 완료(약 4~7일, 부적합 확정) — 이 조건은 해소됨.
@@ -599,6 +663,12 @@ G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수
 
 후보: 005930 삼성전자 / 005380 현대차 / 051910 LG화학 / 105560 KB금융 / 207940 삼성바이오로직스 / 035420 NAVER
 (000660은 코드 유지, **비활성** — 수집 대상 제외)
+
+**2026-08-30**: 위 종목 목록(코드/회사명/활성 여부)이 `constants.py`의 `STOCKS`(namedtuple 기반)로
+중앙화됐다. 이전엔 `주가데이터/주가_공통.py`의 `TICKERS`, `뉴스데이터/뉴스_공통.py`의
+`STOCK_NAMES`, `뉴스데이터/뉴스_일일수집.py`의 `ACTIVE_TICKERS`가 각자 따로 관리되고 있었다.
+위 후보 5종목은 모두 `active=False`로 이미 등록돼 있어, 실제 확장 시엔 해당 종목의 `active`만
+`True`로 바꾸면 된다.
 
 ---
 

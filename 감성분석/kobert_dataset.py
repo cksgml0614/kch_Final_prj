@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -8,24 +10,57 @@ from db_manager import get_db_connection
 MODEL_NAME = "skt/kobert-base-v1"
 LABEL_MAP = {-2: 0, -1: 1, 0: 2, 1: 3, 2: 4}
 
+# table_name/label_column은 SQL 식별자라 %s로 파라미터화할 수 없다(psycopg는 값만 이스케이프
+# 가능) — 직접 문자열로 끼워넣는 대신 화이트리스트/정규식으로 검증한 뒤 사용한다
+# (TASK_EF_라벨링_비교실험.md "공통 설계 원칙": 데이터 소스 하드코딩 금지).
+ALLOWED_TABLES = {"daily_news", "daily_news_bigkinds"}
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
-def load_labeled_news(ticker=None):
-    """sentiment_score가 채워진 뉴스를 (ticker, date, title, summary, sentiment_score, label)로 반환"""
+# daily_news/daily_news_bigkinds 공통 컬럼만 반환한다. daily_news는 sentiment_score(폐기
+# 대상 라벨)를, daily_news_bigkinds는 keywords/category/bigkinds_id를 따로 갖는 등 스키마가
+# 다르므로, 소스를 바꿔 끼워도 다운스트림(baseline_tfidf.py, kobert_train.py)이 항상 같은
+# 컬럼 집합을 받도록 통일했다 — Task F 데이터소스 교차 평가(예: 빅카인즈로 학습해 크롤링으로
+# 평가)가 성립하려면 컬럼 구조가 소스에 따라 달라지면 안 된다. 테이블 전용 컬럼이 필요하면
+# 호출부에서 별도 조회할 것.
+COMMON_COLUMNS = ["ticker", "date", "title", "summary", "press", "article_url", "target_date"]
+
+
+def load_labeled_news(ticker=None, table_name="daily_news", label_column="sentiment_score"):
+    """
+    table_name(daily_news / daily_news_bigkinds)에서 공통 컬럼 + label_column을 로드한다.
+
+    - label_column=None: 라벨 필터(IS NOT NULL) 없이 전체를 로드한다. daily_news_bigkinds처럼
+      아직 라벨이 없는 소스에서 Task E 착수 전에 텍스트만 먼저 확인할 때 쓴다.
+    - label_column="sentiment_score"(기본값, 기존 호출부 하위 호환): 기존과 동일하게
+      LABEL_MAP으로 매핑한 "label" 컬럼을 추가로 채운다.
+    - 그 외 label_column(Task E에서 추가될 신규 라벨 등): 스킴이 아직 정해지지 않았으므로
+      "label" 컬럼을 자동 생성하지 않고 raw 값 그대로 둔다 — 매핑은 호출부가 결정한다.
+    """
+    if table_name not in ALLOWED_TABLES:
+        raise ValueError(f"허용되지 않은 table_name: {table_name!r} (허용: {sorted(ALLOWED_TABLES)})")
+    if label_column is not None and not _SAFE_IDENTIFIER_RE.match(label_column):
+        raise ValueError(f"허용되지 않은 label_column: {label_column!r}")
+
+    select_columns = list(COMMON_COLUMNS)
+    if label_column is not None:
+        select_columns.append(label_column)
+
     conn = get_db_connection()
-    columns = ["ticker", "date", "title", "summary", "sentiment_score"]
+    empty_columns = select_columns + (["label"] if label_column == "sentiment_score" else [])
     if not conn:
-        return pd.DataFrame(columns=columns + ["label"])
+        return pd.DataFrame(columns=empty_columns)
 
     try:
-        query = """
-                SELECT ticker, date, title, summary, sentiment_score
-                FROM daily_news
-                WHERE sentiment_score IS NOT NULL
-                """
+        query = f"SELECT {', '.join(select_columns)} FROM {table_name}"
+        conditions = []
         params = []
+        if label_column is not None:
+            conditions.append(f"{label_column} IS NOT NULL")
         if ticker is not None:
-            query += " AND ticker = %s"
+            conditions.append("ticker = %s")
             params.append(ticker)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY date ASC"
 
         with conn.cursor() as cur:
@@ -34,7 +69,8 @@ def load_labeled_news(ticker=None):
             colnames = [desc[0] for desc in cur.description]
 
         df = pd.DataFrame(rows, columns=colnames)
-        df["label"] = df["sentiment_score"].astype(int).map(LABEL_MAP)
+        if label_column == "sentiment_score":
+            df["label"] = df["sentiment_score"].astype(int).map(LABEL_MAP)
         return df
     finally:
         conn.close()
