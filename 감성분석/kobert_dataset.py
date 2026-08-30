@@ -25,16 +25,21 @@ _SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 COMMON_COLUMNS = ["ticker", "date", "title", "summary", "press", "article_url", "target_date"]
 
 
-def load_labeled_news(ticker=None, table_name="daily_news", label_column="sentiment_score"):
+def load_labeled_news(ticker=None, table_name="daily_news", label_column="sentiment_score", source=None):
     """
     table_name(daily_news / daily_news_bigkinds)에서 공통 컬럼 + label_column을 로드한다.
 
     - label_column=None: 라벨 필터(IS NOT NULL) 없이 전체를 로드한다. daily_news_bigkinds처럼
-      아직 라벨이 없는 소스에서 Task E 착수 전에 텍스트만 먼저 확인할 때 쓴다.
+      아직 라벨이 없는 소스에서 Task E 착수 전에 텍스트만 먼저 확인할 때, 혹은 Task F처럼 라벨을
+      daily_labels에서 별도로 조인해 붙일 때 쓴다.
     - label_column="sentiment_score"(기본값, 기존 호출부 하위 호환): 기존과 동일하게
       LABEL_MAP으로 매핑한 "label" 컬럼을 추가로 채운다.
     - 그 외 label_column(Task E에서 추가될 신규 라벨 등): 스킴이 아직 정해지지 않았으므로
       "label" 컬럼을 자동 생성하지 않고 raw 값 그대로 둔다 — 매핑은 호출부가 결정한다.
+    - source: daily_news.source 값으로 필터(예: 'search_backfill'). None이면 전 소스(legacy/
+      finance_crawl/search_backfill 등) 통합 — D-10에 따라 학습 정본은 'search_backfill'만이므로
+      Task F 이후 호출부는 명시적으로 지정할 것. 값 파라미터라 %s로 안전하게 바인딩된다(테이블/
+      컬럼명과 달리 식별자 검증 불필요).
     """
     if table_name not in ALLOWED_TABLES:
         raise ValueError(f"허용되지 않은 table_name: {table_name!r} (허용: {sorted(ALLOWED_TABLES)})")
@@ -59,6 +64,9 @@ def load_labeled_news(ticker=None, table_name="daily_news", label_column="sentim
         if ticker is not None:
             conditions.append("ticker = %s")
             params.append(ticker)
+        if source is not None:
+            conditions.append("source = %s")
+            params.append(source)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY date ASC"
