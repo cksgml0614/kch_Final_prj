@@ -25,3 +25,6 @@ __pycache__/
 
 # search_backfill 진행 체크포인트 (재개용 상태 파일, 로컬에서 생성)
 뉴스데이터/checkpoints/
+
+# BigKinds 원본 CSV (대용량 데이터 파일, 로컬에서 직접 배치)
+빅카인즈_뉴스/
