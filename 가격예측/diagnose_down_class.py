@@ -2,6 +2,9 @@
 # A(선형회귀)/B(소형 Transformer)/C(기존 Transformer), 전부 v2 피처. val만 사용, test 미사용.
 # compare_v2_variants.py와 동일한 데이터/학습 설정을 재현해 예측값을 얻은 뒤,
 # "하락"(actual target < 0)을 양성 클래스로 놓고 confusion matrix/PR curve를 계산한다.
+#
+# 2026-09-06: confusion_at_threshold()는 train_common.py로 이관했다(자동화 파이프라인의
+# 배포 게이트가 재사용 — 일회성 진단 스크립트를 import하지 않도록). 이 파일은 값 변경 없음.
 
 import sys
 
@@ -20,7 +23,12 @@ from sklearn.metrics import precision_recall_curve
 from constants import STRESS_PERIOD_START
 from 가격예측.sequence_dataset import FeatureScaler, build_sequences, split_sequences_by_date
 from 가격예측.split_dataset import build_merged_dataset_v2, split_normal_regime
-from 가격예측.train_common import evaluate_predictions, majority_baseline_accuracy, train_transformer
+from 가격예측.train_common import (
+    confusion_at_threshold,
+    evaluate_predictions,
+    majority_baseline_accuracy,
+    train_transformer,
+)
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -39,27 +47,6 @@ MAX_EPOCHS = 60
 PATIENCE = 8
 
 OUT_DIR = "가격예측/checkpoints"
-
-
-def confusion_at_threshold(preds, actuals, threshold=0.0):
-    """'하락'(actual<0)을 양성 클래스로: pred < threshold면 '하락 예측'."""
-    pred_down = preds < threshold
-    actual_down = actuals < 0
-
-    TP = int(np.sum(pred_down & actual_down))
-    FP = int(np.sum(pred_down & ~actual_down))
-    FN = int(np.sum(~pred_down & actual_down))
-    TN = int(np.sum(~pred_down & ~actual_down))
-
-    precision = TP / (TP + FP) if (TP + FP) > 0 else float("nan")
-    recall = TP / (TP + FN) if (TP + FN) > 0 else float("nan")
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else float("nan")
-    beta = 2
-    f2 = ((1 + beta**2) * precision * recall / (beta**2 * precision + recall)
-          if (precision + recall) > 0 else float("nan"))
-
-    return {"TP": TP, "FP": FP, "FN": FN, "TN": TN,
-            "precision": precision, "recall": recall, "f1": f1, "f2": f2}
 
 
 def find_precision_cliff(precision, recall, min_recall=0.1):

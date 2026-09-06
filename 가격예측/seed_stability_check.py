@@ -5,6 +5,10 @@
 #   - precision이 val 하락 비율(baseline) 대비 +2%p 이상이어야 F2 비교 대상으로 인정 (게이트)
 #   - recall 최소선 0.5
 #   - 게이트를 통과하는 시드 비율로 "이전 턴의 B 결과(52.09% 방향성정확도)가 우연이었는지"를 본다
+#
+# 2026-09-06: confusion_at_threshold() import 출처를 diagnose_down_class.py -> train_common.py로
+# 변경(이관 원본, 값 변경 없음). 이 파일의 게이트 판정 로직은 train_common.passes_deployment_gate()로
+# 그대로 대체 가능하지만(수치 동일), 이미 완료된 진단 기록이라 이 파일 자체는 건드리지 않았다.
 
 import sys
 
@@ -12,10 +16,15 @@ import numpy as np
 import torch
 
 from constants import STRESS_PERIOD_START
-from 가격예측.diagnose_down_class import confusion_at_threshold
 from 가격예측.sequence_dataset import FeatureScaler, build_sequences, split_sequences_by_date
 from 가격예측.split_dataset import build_merged_dataset_v2, split_normal_regime
-from 가격예측.train_common import directional_accuracy, evaluate_predictions, majority_baseline_accuracy, train_transformer
+from 가격예측.train_common import (
+    confusion_at_threshold,
+    directional_accuracy,
+    evaluate_predictions,
+    majority_baseline_accuracy,
+    train_transformer,
+)
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

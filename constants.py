@@ -26,14 +26,19 @@ SPLIT_RATIOS = (0.70, 0.15, 0.15)
 # 종목 마스터. 배경은 CLAUDE.md 참조.
 Stock = namedtuple("Stock", ["ticker", "name", "active"])
 
+# 2026-09-06: Task T 다종목 pooled 모델 착수 — 기존 섹터 분산 후보 5종목 활성화 + 신규 2종목
+# (034730 현대건설/건설, 015760 한국전력/에너지) 추가해 총 8종목 활성화. 000660(SK하이닉스)은
+# 계속 비활성 유지(Task C 사람 결정 그대로).
 STOCKS = [
     Stock("005930", "삼성전자", True),
     Stock("000660", "SK하이닉스", False),        # 자리표시자 유지, Task C 재검토 전까지 비활성
-    Stock("005380", "현대차", False),             # Task C 섹터 분산 확장 후보
-    Stock("051910", "LG화학", False),             # Task C 섹터 분산 확장 후보
-    Stock("105560", "KB금융", False),             # Task C 섹터 분산 확장 후보
-    Stock("207940", "삼성바이오로직스", False),    # Task C 섹터 분산 확장 후보
-    Stock("035420", "NAVER", False),              # Task C 섹터 분산 확장 후보
+    Stock("005380", "현대차", True),              # 2026-09-06 활성화(Task T pooled 모델)
+    Stock("051910", "LG화학", True),              # 2026-09-06 활성화(Task T pooled 모델)
+    Stock("105560", "KB금융", True),              # 2026-09-06 활성화(Task T pooled 모델)
+    Stock("207940", "삼성바이오로직스", True),     # 2026-09-06 활성화(Task T pooled 모델)
+    Stock("035420", "NAVER", True),               # 2026-09-06 활성화(Task T pooled 모델)
+    Stock("034730", "현대건설", True),             # 2026-09-06 신규 추가(건설 섹터, Task T pooled 모델)
+    Stock("015760", "한국전력", True),             # 2026-09-06 신규 추가(에너지/전력 섹터, Task T pooled 모델)
 ]
 
 # 뉴스 크롤러: 종목코드 -> 검색어(회사명) 매핑 (비활성 포함 전체)

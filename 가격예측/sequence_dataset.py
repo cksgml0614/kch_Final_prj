@@ -65,3 +65,19 @@ class FeatureScaler:
 
     def fit_transform(self, X):
         return self.fit(X).transform(X)
+
+    def save(self, path):
+        """fit된 mean_/std_를 디스크에 저장한다(2026-09-06, Task T 자동화 착수) — 서빙
+        시점에 학습 당시 표준화 기준을 그대로 재사용해야 한다(매 실행마다 새로 fit하면
+        안 됨). npz 하나로 두 배열을 함께 저장."""
+        if self.mean_ is None or self.std_ is None:
+            raise RuntimeError("fit되지 않은 FeatureScaler는 저장할 수 없음")
+        np.savez(path, mean=self.mean_, std=self.std_)
+
+    @classmethod
+    def load(cls, path):
+        data = np.load(path)
+        obj = cls()
+        obj.mean_ = data["mean"]
+        obj.std_ = data["std"]
+        return obj
