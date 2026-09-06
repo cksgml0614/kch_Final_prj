@@ -12,17 +12,21 @@
 # 뉴스 테이블(daily_news, daily_news_bigkinds)에는 아무것도 쓰지 않는다 — 이 스크립트는
 # daily_labels에만 쓴다.
 #
-# 재실행 안전: daily_labels PK(ticker, date, window_n, horizon_h) UPSERT라 다시 실행해도
-# 안전하다(값이 같으면 IS DISTINCT FROM 조건에 걸려 건드리지 않는다). 외부 API 호출이 아니라
-# 이미 적재된 daily_stock_prices/market_indicators의 재계산이라 비용이 낮으므로, 다른
+# 재실행 안전: daily_labels PK(ticker, date, window_n, horizon_h, label_basis) UPSERT라 다시
+# 실행해도 안전하다(값이 같으면 IS DISTINCT FROM 조건에 걸려 건드리지 않는다). 외부 API 호출이
+# 아니라 이미 적재된 daily_stock_prices/market_indicators의 재계산이라 비용이 낮으므로, 다른
 # 도메인처럼 "초기적재/일일수집"을 분리하지 않았다 — 가격/KOSPI 데이터가 갱신되면 이
 # 스크립트를 그대로 다시 실행하면 된다.
+#
+# 2026-09-06: label_basis 확장 반영 — excess_return(기존) + absolute_return(신규, KOSPI 차감
+# 없는 순수 change_rate 기준) 두 basis를 모두 계산해 적재한다. 기존 excess_return 값은 동일
+# 공식으로 재계산되므로 UPSERT의 IS DISTINCT FROM 조건에 걸려 그대로 보존된다.
 
 import sys
 
 from constants import ACTIVE_TICKERS
 from db_manager import get_db_connection
-from 라벨.라벨_공통 import HORIZONS, WINDOW_SIZES, compute_multi_horizon_z_scores, to_records, upsert_labels
+from 라벨.라벨_공통 import HORIZONS, LABEL_BASES, WINDOW_SIZES, compute_multi_horizon_z_scores, to_records, upsert_labels
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -35,24 +39,25 @@ def main():
             raise RuntimeError("DB 연결 실패 — 라벨_생성")
         with conn.cursor() as cur:
             for ticker in ACTIVE_TICKERS:
-                merged = compute_multi_horizon_z_scores(ticker, cur)
-                if merged.empty:
-                    print(f"⚠️ {ticker}: 계산 대상 없음 (daily_stock_prices에 데이터 없음)")
-                    summary[ticker] = 0
-                    continue
+                summary[ticker] = 0
+                for basis in LABEL_BASES:
+                    merged = compute_multi_horizon_z_scores(ticker, cur, basis=basis)
+                    if merged.empty:
+                        print(f"⚠️ {ticker}/{basis}: 계산 대상 없음 (daily_stock_prices에 데이터 없음)")
+                        continue
 
-                records = to_records(merged, ticker)
-                inserted, updated = upsert_labels(cur, records)
-                conn.commit()
-                unchanged = len(records) - inserted - updated
-                print(
-                    f"✅ {ticker}: {merged['date'].min().date()}~{merged['date'].max().date()} "
-                    f"({len(merged)}거래일) x 윈도우 {WINDOW_SIZES} x horizon {HORIZONS} = {len(records)}행 계산 "
-                    f"— 신규 {inserted} / 갱신 {updated} / 변경없음 {unchanged}"
-                )
-                summary[ticker] = len(records)
+                    records = to_records(merged, ticker, basis=basis)
+                    inserted, updated = upsert_labels(cur, records)
+                    conn.commit()
+                    unchanged = len(records) - inserted - updated
+                    print(
+                        f"✅ {ticker}/{basis}: {merged['date'].min().date()}~{merged['date'].max().date()} "
+                        f"({len(merged)}거래일) x 윈도우 {WINDOW_SIZES} x horizon {HORIZONS} = {len(records)}행 계산 "
+                        f"— 신규 {inserted} / 갱신 {updated} / 변경없음 {unchanged}"
+                    )
+                    summary[ticker] += len(records)
 
-    print("\n=== 종목별 daily_labels 계산 건수 요약 ===")
+    print("\n=== 종목별 daily_labels 계산 건수 요약 (label_basis 2종 합산) ===")
     any_zero = False
     for ticker in ACTIVE_TICKERS:
         cnt = summary.get(ticker, 0)

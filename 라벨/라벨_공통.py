@@ -16,6 +16,13 @@
 # 시그니처는 compute_multi_horizon_z_scores()/to_records()(horizon_h 포함, h=1도 그 특수
 # 케이스로 처리)로 대체됐다. compute_z_scores()는 라벨_보고.py의 레짐 특성 계산(원 change_rate
 # 필요, daily_labels 자체를 쓰지 않음)이 계속 참조하므로 그대로 남겨뒀다.
+#
+# ✅ 2026-09-06 label_basis 확장: "시장 전체에 좋은 뉴스"가 KOSPI 차감으로 상쇄되는 것 아니냐는
+# 우려로, KOSPI를 빼지 않은 순수 change_rate 기준 z-score('absolute_return')를 추가했다
+# (daily_labels에 label_basis 컬럼 신설, PK 편입 — 기존 행은 label_basis='excess_return'으로
+# 보존). compute_multi_horizon_z_scores()/to_records()/upsert_labels()/load_labels() 모두
+# basis/label_basis 인자를 받되 기본값은 'excess_return'이라 기존 호출부는 수정 없이 그대로
+# 동작한다.
 
 import pandas as pd
 
@@ -25,6 +32,7 @@ from 시장지표.feature_loader import get_indicator_level_series
 
 WINDOW_SIZES = [20, 60, 120]
 HORIZONS = [1, 3, 5, 10]
+LABEL_BASES = ["excess_return", "absolute_return"]
 
 # CLAUDE.md D-2 / TASK_EF_라벨링_비교실험.md "라벨 정의"가 제시했던 임계값 후보(방향 라벨은
 # 후보가 곧 확정값이었음). 변동성만 3후보 중 1.0으로 확정(위 참고).
@@ -94,21 +102,25 @@ def compute_z_scores(ticker, cur, window_sizes=WINDOW_SIZES):
     return merged
 
 
-def compute_multi_horizon_z_scores(ticker, cur, window_sizes=WINDOW_SIZES, horizons=HORIZONS):
-    """h거래일 누적 초과수익률 기준 라벨(2026-09-02, 익일 h=1 대신/추가로 도입).
+def compute_multi_horizon_z_scores(ticker, cur, window_sizes=WINDOW_SIZES, horizons=HORIZONS, basis="excess_return"):
+    """h거래일 누적 수익률 기준 라벨(2026-09-02 horizon 확장, 2026-09-06 basis 확장).
 
-    cum_excess_return_t,h = t부터 h거래일(t, t+1, ..., t+h-1) excess_return 합계. h=1이면
-    excess_return_t 그 자체와 정확히 같다(기존 compute_z_scores()와 값이 완전히 일치 — 재적재
-    시 IS DISTINCT FROM에 걸려 h=1 행이 바뀌지 않는 것으로 검증됨).
-    sigma_t,h = 직전 window_n개 "앵커일"의 cum_excess_return_*,h 표준편차(t 시점 미포함, D-2와
-    동일 원칙 — 자기 자신의 크기로 자기 자신을 정규화하지 않기 위함).
-    z_t,h = cum_excess_return_t,h / sigma_t,h.
+    basis='excess_return'(기본, 기존): cum_t,h = t부터 h거래일(t..t+h-1) (종목-KOSPI) excess_return 합계.
+    basis='absolute_return'(신규): cum_t,h = 같은 구간의 종목 순수 change_rate 합계(KOSPI 차감 없음)
+    — "시장 전체에 좋은 뉴스"가 KOSPI에도 반영돼 초과수익률 계산에서 상쇄될 수 있다는 우려로 추가.
+    h=1이면 각 basis의 당일 값 그 자체와 정확히 같다(기존 compute_z_scores()와 값이 완전히 일치 —
+    재적재 시 IS DISTINCT FROM에 걸려 h=1/excess_return 행이 바뀌지 않는 것으로 검증됨).
+    sigma_t,h = 직전 window_n개 "앵커일"의 동일 basis cum_*,h 표준편차(t 시점 미포함, D-2와 동일
+    원칙 — 자기 자신의 크기로 자기 자신을 정규화하지 않기 위함).
+    z_t,h = cum_t,h / sigma_t,h.
 
-    데이터 끝부분(t+h-1이 보유한 가격 이력 범위를 넘는 날짜)은 cum_excess_return_t,h 자체가
-    NaN이 되어 sigma/z도 함께 NULL로 저장된다("기간 끝부분은 라벨 NULL" 요건).
+    데이터 끝부분(t+h-1이 보유한 가격 이력 범위를 넘는 날짜)은 cum_t,h 자체가 NaN이 되어 sigma/z도
+    함께 NULL로 저장된다("기간 끝부분은 라벨 NULL" 요건).
 
     구현은 compute_z_scores()와 별개 함수로 둔다 — 이미 검증된 h=1 파이프라인(라벨_보고.py의
     레짐 특성 계산이 참조)을 건드리지 않기 위해 종목/KOSPI 로딩 부분을 의도적으로 중복시켰다.
+    KOSPI는 basis='absolute_return'일 때도 그대로 로드한다 — 두 basis가 같은 거래일 캘린더
+    (KOSPI와 inner join된 날짜)를 공유해야 비교가 성립하기 때문이다.
 
     반환: DataFrame(date, stock_change_rate, kospi_change_rate, excess_return,
                     cum_1, sigma_20_1, z_20_1, ..., cum_10, sigma_120_10, z_120_10)
@@ -132,12 +144,13 @@ def compute_multi_horizon_z_scores(ticker, cur, window_sizes=WINDOW_SIZES, horiz
         .reset_index(drop=True)
     )
     merged["excess_return"] = merged["stock_change_rate"] - merged["kospi_change_rate"]
+    base_col = {"excess_return": "excess_return", "absolute_return": "stock_change_rate"}[basis]
 
     for h in horizons:
         # 뒤에서부터 굴린 뒤 다시 뒤집는 표준 트릭으로 "t부터 h거래일 합"(전방 롤링 합)을 만든다.
         # 뒤에 h-1개 미만 남은 행(데이터 끝부분)은 자동으로 NaN.
-        reversed_er = merged["excess_return"][::-1]
-        merged[f"cum_{h}"] = reversed_er.rolling(window=h, min_periods=h).sum()[::-1].values
+        reversed_base = merged[base_col][::-1]
+        merged[f"cum_{h}"] = reversed_base.rolling(window=h, min_periods=h).sum()[::-1].values
 
         for n in window_sizes:
             shifted = merged[f"cum_{h}"].shift(1)
@@ -147,11 +160,11 @@ def compute_multi_horizon_z_scores(ticker, cur, window_sizes=WINDOW_SIZES, horiz
     return merged
 
 
-def to_records(merged, ticker, window_sizes=WINDOW_SIZES, horizons=HORIZONS):
+def to_records(merged, ticker, window_sizes=WINDOW_SIZES, horizons=HORIZONS, basis="excess_return"):
     """compute_multi_horizon_z_scores() 결과를 daily_labels UPSERT용 (ticker, date, window_n,
-    horizon_h, excess_return, sigma, z_score) 튜플 리스트로 펼친다. NaN은 None(NULL)으로
-    변환한다 — 초기 N일이나 데이터 끝부분(h일 뒤 데이터 없음)처럼 계산할 수 없는 행은
-    excess_return(=cum_h)/sigma/z_score 각각 계산 가능한 만큼만 채우고 나머지는 NULL로
+    horizon_h, label_basis, excess_return, sigma, z_score) 튜플 리스트로 펼친다. NaN은
+    None(NULL)으로 변환한다 — 초기 N일이나 데이터 끝부분(h일 뒤 데이터 없음)처럼 계산할 수 없는
+    행은 excess_return(=cum_h)/sigma/z_score 각각 계산 가능한 만큼만 채우고 나머지는 NULL로
     저장한다(행 자체를 빼지 않음 — D-2 "초기 N일은 라벨 NULL"과 동일한 원칙)."""
     records = []
     for row in merged.itertuples(index=False):
@@ -163,7 +176,7 @@ def to_records(merged, ticker, window_sizes=WINDOW_SIZES, horizons=HORIZONS):
                 sigma = getattr(row, f"sigma_{n}_{h}")
                 z = getattr(row, f"z_{n}_{h}")
                 records.append((
-                    ticker, d, n, h,
+                    ticker, d, n, h, basis,
                     cum_val,
                     None if pd.isna(sigma) else float(sigma),
                     None if pd.isna(z) else float(z),
@@ -172,14 +185,15 @@ def to_records(merged, ticker, window_sizes=WINDOW_SIZES, horizons=HORIZONS):
 
 
 def upsert_labels(cur, records):
-    """records: (ticker, date, window_n, horizon_h, excess_return, sigma, z_score) 튜플 리스트.
-    market_indicators(G-1 계약)와 동일한 IS DISTINCT FROM + RETURNING 패턴으로 신규/갱신을 구분한다.
-    ⚠️ 2026-09-02 horizon_h 추가로 7-tuple이 됨(이전 6-tuple에서 변경) — PK도
-    (ticker,date,window_n,horizon_h)로 확장됨."""
+    """records: (ticker, date, window_n, horizon_h, label_basis, excess_return, sigma, z_score)
+    튜플 리스트. market_indicators(G-1 계약)와 동일한 IS DISTINCT FROM + RETURNING 패턴으로
+    신규/갱신을 구분한다.
+    ⚠️ 2026-09-06 label_basis 추가로 8-tuple이 됨(이전 7-tuple에서 변경) — PK도
+    (ticker,date,window_n,horizon_h,label_basis)로 확장됨."""
     query = """
-        INSERT INTO daily_labels (ticker, date, window_n, horizon_h, excess_return, sigma, z_score)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ticker, date, window_n, horizon_h) DO UPDATE
+        INSERT INTO daily_labels (ticker, date, window_n, horizon_h, label_basis, excess_return, sigma, z_score)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (ticker, date, window_n, horizon_h, label_basis) DO UPDATE
             SET excess_return = EXCLUDED.excess_return,
                 sigma = EXCLUDED.sigma,
                 z_score = EXCLUDED.z_score
@@ -237,10 +251,12 @@ def label_volatility_2class(z, t):
 
 # ── daily_labels 조회 + split 유틸 (라벨_보고.py/taskf_gating.py 공용) ──────────
 
-def load_labels(ticker, horizon_h=1):
+def load_labels(ticker, horizon_h=1, label_basis="excess_return"):
     """daily_labels 조회 전용(쓰기 없음). ticker의 특정 horizon_h(기본 1=익일, 기존 호출부
-    하위 호환) z_score 이력을 long format(date, window_n, excess_return, sigma, z_score)으로
-    로드한다. horizon_h=3/5/10을 넘기면 h거래일 누적 라벨을 로드한다(2026-09-02 확장)."""
+    하위 호환) x label_basis(기본 'excess_return', 기존 호출부 하위 호환) z_score 이력을
+    long format(date, window_n, excess_return, sigma, z_score)으로 로드한다. horizon_h=3/5/10을
+    넘기면 h거래일 누적 라벨을(2026-09-02 확장), label_basis='absolute_return'을 넘기면 KOSPI
+    차감 없는 순수 change_rate 기준 라벨을 로드한다(2026-09-06 확장)."""
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패 — 라벨_공통.load_labels")
@@ -249,10 +265,10 @@ def load_labels(ticker, horizon_h=1):
                 """
                 SELECT date, window_n, excess_return, sigma, z_score
                 FROM daily_labels
-                WHERE ticker = %s AND horizon_h = %s
+                WHERE ticker = %s AND horizon_h = %s AND label_basis = %s
                 ORDER BY date, window_n
                 """,
-                (ticker, horizon_h),
+                (ticker, horizon_h, label_basis),
             )
             rows = cur.fetchall()
     df = pd.DataFrame(rows, columns=["date", "window_n", "excess_return", "sigma", "z_score"])

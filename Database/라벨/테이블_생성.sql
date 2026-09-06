@@ -7,19 +7,29 @@
 -- 익일(h=1) 단일거래일 라벨 대신 h거래일 누적 초과수익률 라벨(h=3/5/10)을 같은 테이블에
 -- 함께 보관한다 — window_n과 동일하게 PK에 포함시켜 여러 horizon을 한 테이블에서 비교 가능하게
 -- 둔다(새 컬럼 추가로 처리, 기존 h=1 행 값은 덮어쓰지 않음).
+--
+-- 2026-09-06: label_basis 컬럼 추가(ALTER TABLE로 운영 DB에 적용, 기존 행은 전부
+-- label_basis='excess_return'으로 보존). "시장 전체에 좋은 뉴스"(예: 반도체 업황 전반 호재)가
+-- KOSPI에도 반영돼 초과수익률 계산에서 상쇄되는 것 아니냐는 우려로, KOSPI를 빼지 않은 순수
+-- change_rate 기준 z-score를 비교 축으로 추가했다. excess_return 컬럼은 label_basis에 따라
+-- 의미가 갈린다: 'excess_return'이면 기존 그대로 (종목-KOSPI) 누적값, 'absolute_return'이면
+-- 종목 change_rate 누적값 그 자체(KOSPI 차감 없음) — 컬럼명은 그대로 재사용하고 label_basis로
+-- 구분한다(horizon_h 도입 때 excess_return 컬럼이 h=1/h>1 두 의미를 겸했던 것과 같은 방식).
 
 CREATE TABLE IF NOT EXISTS daily_labels (
     ticker         VARCHAR(10) NOT NULL,
     date           DATE NOT NULL,          -- 거래일 기준(앵커일 t)
     window_n       INTEGER NOT NULL,       -- sigma 계산 윈도우(20/60/120 중 하나)
     horizon_h      INTEGER NOT NULL,       -- 누적 수익률 기간(거래일). 1=익일(기존), 3/5/10=n거래일 누적
-    excess_return  NUMERIC,                -- t부터 horizon_h거래일(t..t+h-1) 누적 (종목-KOSPI) change_rate 합. h=1이면 당일 값과 동일. 계산 가능하면 항상 채움
-    sigma          NUMERIC,                -- 직전 window_n개 앵커일의 동일 horizon_h 누적값 표준편차(t 시점 미포함). 버퍼 부족 시 NULL
+    label_basis    VARCHAR(20) NOT NULL,   -- 'excess_return'(종목-KOSPI, 기존) / 'absolute_return'(종목 순수 change_rate)
+    excess_return  NUMERIC,                -- t부터 horizon_h거래일(t..t+h-1) 누적 수익률 합(label_basis에 따라 초과/순수). h=1이면 당일 값과 동일. 계산 가능하면 항상 채움
+    sigma          NUMERIC,                -- 직전 window_n개 앵커일의 동일 horizon_h/label_basis 누적값 표준편차(t 시점 미포함). 버퍼 부족 시 NULL
     z_score        NUMERIC,                -- excess_return / sigma. sigma가 NULL이거나 t+h-1이 데이터 범위를 넘으면 NULL
 
-    PRIMARY KEY (ticker, date, window_n, horizon_h),
+    PRIMARY KEY (ticker, date, window_n, horizon_h, label_basis),
     CONSTRAINT ck_daily_labels_window_n CHECK (window_n IN (20, 60, 120)),
-    CONSTRAINT ck_daily_labels_horizon_h CHECK (horizon_h IN (1, 3, 5, 10))
+    CONSTRAINT ck_daily_labels_horizon_h CHECK (horizon_h IN (1, 3, 5, 10)),
+    CONSTRAINT ck_daily_labels_label_basis CHECK (label_basis IN ('excess_return', 'absolute_return'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_daily_labels_date ON daily_labels (date);

@@ -338,7 +338,7 @@ BigKinds(빅카인즈) CSV/Excel 일괄 적재 전용 — `daily_news`와 완전
 2023-08-23~2026-08-29, 전량 005930 고정. `daily_news`(search_backfill 등)와 어떻게 통합·비교할지는
 아직 미결 — Task A~F 어느 단계에도 아직 편입되지 않은 독립 데이터 소스다.
 
-### daily_labels `(ticker, date, window_n, horizon_h)` PK — `Database/라벨/테이블_생성.sql` (2026-08-30 설계 확정, 2026-08-31 생성·적재, 2026-09-02 horizon_h 추가)
+### daily_labels `(ticker, date, window_n, horizon_h, label_basis)` PK — `Database/라벨/테이블_생성.sql` (2026-08-30 설계 확정, 2026-08-31 생성·적재, 2026-09-02 horizon_h 추가, 2026-09-06 label_basis 추가)
 
 Task E 라벨을 뉴스 테이블(`daily_news`/`daily_news_bigkinds`)에 컬럼으로 추가하지 않고 별도
 테이블로 분리하기로 결정(2026-08-30, `TASK_EF_라벨링_비교실험.md` 실행 전 검토). 라벨은
@@ -351,8 +351,9 @@ ticker         varchar     NOT NULL   -- PK
 date           date        NOT NULL   -- PK, 거래일 기준(앵커일 t)
 window_n       integer     NOT NULL   -- PK, sigma 계산 윈도우(20/60/120 중 하나)
 horizon_h      integer     NOT NULL   -- PK, 누적 수익률 기간(거래일). 1=익일(기존), 3/5/10=n거래일 누적(2026-09-02 추가)
-excess_return  numeric                -- t부터 horizon_h거래일(t..t+h-1) 누적 (종목-KOSPI) change_rate 합. h=1이면 당일 값과 동일
-sigma          numeric                -- 직전 window_n개 앵커일의 동일 horizon_h 누적값 표준편차(t 시점 미포함)
+label_basis    varchar     NOT NULL   -- PK, 'excess_return'(종목-KOSPI, 기존) / 'absolute_return'(종목 순수 change_rate, 2026-09-06 추가)
+excess_return  numeric                -- t부터 horizon_h거래일(t..t+h-1) 누적 수익률 합(label_basis에 따라 초과/순수). h=1이면 당일 값과 동일
+sigma          numeric                -- 직전 window_n개 앵커일의 동일 horizon_h/label_basis 누적값 표준편차(t 시점 미포함)
 z_score        numeric                -- excess_return / sigma
 ```
 
@@ -372,9 +373,18 @@ z_score        numeric                -- excess_return / sigma
   변경 없이 보존(재계산 결과가 기존 값과 완전히 동일함을 UPSERT의 `IS DISTINCT FROM`으로
   실측 확인). h=3/5/10 신규 14,706행 추가, 총 19,608행. 별도 테이블이 아니라 컬럼 추가를
   택한 이유: `window_n`을 이미 같은 테이블 PK에 포함시켜 다루던 기존 패턴과의 일관성
+- **2026-09-06 `label_basis` 컬럼 추가**(ALTER TABLE로 운영 DB 적용, PK를 `(ticker, date,
+  window_n, horizon_h)`에서 `(ticker, date, window_n, horizon_h, label_basis)`로 확장) —
+  "시장 전체에 좋은 뉴스"로 인한 신호가 초과수익률의 KOSPI 차감으로 상쇄되는 것 아니냐는
+  우려에서, KOSPI를 빼지 않은 순수 `change_rate` 기준 z-score를 `label_basis='absolute_return'`
+  으로 추가 적재했다(기존 `label_basis='excess_return'` 19,608행은 값 변경 없이 보존,
+  absolute_return 신규 19,668행 추가). `excess_return` 컬럼명은 그대로 재사용하고
+  `label_basis`로 의미를 구분한다 — `horizon_h` 도입 때와 같은 컬럼 재사용 관례. **비교
+  게이팅 실험 결과 absolute_return 라벨에서도 유의한 신호가 확인되지 않아 "KOSPI 차감으로
+  시장 전체 신호가 상쇄된다"는 가설은 기각됐다** — 상세는 `결과_TaskF_게이팅검증.md` [5] 참고
 - z 분포·라벨 분포·split별 비교·확정된 임계값/윈도우는 `결과_TaskE_라벨링.md`, Task F
-  게이팅·검증·horizon 실험 결과는 `결과_TaskF_게이팅검증.md` 참고 — 상세 표는 그 문서들이
-  정본이며 여기서는 중복 기재하지 않는다
+  게이팅·검증·horizon·basis 비교 실험 결과는 `결과_TaskF_게이팅검증.md` 참고 — 상세 표는
+  그 문서들이 정본이며 여기서는 중복 기재하지 않는다
 
 ### market_indicators `(indicator_code, date)` PK — `Database/시장지표/테이블_생성.sql`
 
@@ -612,6 +622,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 | `감성분석/taskf_gating.py` | Task F 게이팅(h=1, 익일) — 라벨 3종 x 윈도우 3종 = 9개 조합 TF-IDF(char_wb 2-4gram)+로지스틱회귀. 뉴스-라벨 매칭(D보다 뒤인 첫 거래일, `allow_exact_matches=False`) | 실행 완료(2026-09-01, 당일 매칭 누수 발견·수정 반영). 결과만으로는 신호 착시였음이 이후 taskf_validate.py로 드러남 — 상세는 `결과_TaskF_게이팅검증.md`. 의존: `constants`, `감성분석.kobert_dataset`, `라벨.라벨_공통` |
 | `감성분석/taskf_validate.py` | taskf_gating.py(h=1) 결과 검증 — 레이블 셔플(30회)/시드-부트스트랩 대체/사전분포 무작위 예측기(200회)/표본크기 | 실행 완료(2026-09-01) — 검증 대상 3개 조합 전부 셔플 분포와 통계적으로 구분 안 됨(신호 미검출). 의존: `constants`, `감성분석.taskf_gating` |
 | `감성분석/taskf_gating_horizon.py` | Task F 게이팅+검증 통합(h=3/5/10, 윈도우 N=60 고정) — 블록 셔플(누적 윈도우 상관 보존) + 사전분포 무작위 예측기를 게이팅과 함께 즉시 실행 | 실행 완료(2026-09-02) — 9개 조합 전부 신호 미검출, horizon을 늘려도 개선 경향 없음. 의존: `constants`, `감성분석.kobert_dataset`, `감성분석.taskf_gating`, `라벨.라벨_공통` |
+| `감성분석/taskf_gating_basis.py` | Task F basis 비교(`label_basis` excess_return vs absolute_return, h=1/3, 윈도우 N=60 고정) — 블록 셔플 + 사전분포 무작위 예측기 동반 | 실행 완료(2026-09-06) — 12개 조합 전부 신호 미검출, "KOSPI 차감으로 시장 전체 신호가 상쇄된다" 가설 기각. 상세는 `결과_TaskF_게이팅검증.md` [5]. 의존: `constants`, `감성분석.kobert_dataset`, `감성분석.taskf_gating`, `감성분석.taskf_gating_horizon`, `라벨.라벨_공통` |
 
 **QA/검증용 별도 도구 (일회성, 파이프라인 아님)**: `recrawl_suspect_dates.py`(53일)/
 `recrawl_cluster_expand.py`(91일)/`recrawl_gap_mar_jun.py`(47일, 부분)로 3차에 걸쳐 진행됐다.
