@@ -31,6 +31,21 @@ Task B는 전면 백필 완료 후 QA 검증(53일 재크롤링) + 클러스터 
 (2026-09-06). 상세는 로드맵 "Task F 게이팅·검증·horizon 확장 실험" 및
 `결과_TaskF_게이팅검증.md` 참고.
 
+**추가 갱신(2026-09-06)**: Task T-1의 "무작위 수준" 결론 이후, 방향(상승/하락) 예측을 8종목
+pooled+종목임베딩으로 재시도했으나 역시 무작위 수준으로 재확인돼 **방향 예측 트랙을 완전히
+폐기**하고 **변동성(|수익률|) 예측으로 전환**했다(상세: `결과_TaskT_방향예측_폐기.md`). 전환
+직후 GARCH(1,1)가 SMA20을 이긴다는 결과를 얻었으나, 이후 GARCH 계산 함수의 날짜 라벨링
+버그(그날 자신의 수익률이 이미 섞여 있던 미래정보 누수)를 발견해 수정했고, **수정 후
+재검증한 결과 GARCH·하이브리드 Transformer 둘 다 SMA20을 못 이기고 조기경보 능력도
+우연 수준으로 무너짐**이 확정됐다. 이후 실험한 Parkinson(고가-저가 범위) 기반 변동성
+추정량만이 유일하게 GARCH·SMA20을 실제로 이기는 baseline으로 확인됐으나, 이를 Transformer
+피처로 추가하거나 압축 피처 없이 원본 시퀀스를 직접 줘도 성능이 개선되지 않았다 — 최근
+진단으로 이 실패가 "복잡한 과적합"이 아니라 "학습 초반(첫 epoch)에 거의 상수 예측으로
+수렴해버리는 분산 붕괴"임이 확인됐다. **현재 검증을 통과한 것은 Parkinson-SMA20(통계
+공식)뿐이며, 학습 기반 모델은 아직 이를 못 넘어서 개선을 계속 시도 중이다** — 최종
+결론이 아니라 진행 중인 트랙이다. 시간순 전체 경과·모든 수치표는
+`결과_TaskT_변동성예측_최종.md` 참고.
+
 `market_indicators`에 총 9개 지표, 38,955행(=14,072+24,883) 적재 완료: KOSPI/KOSDAQ/USD_KRW(G-2, FDR, 14,072행) + 기준금리·국고채3년·국고채10년·CPI·M2·선행지수순환변동치(G-3, ECOS, 24,883행). 반도체 수출금액지수는 종목 특화 지표라 공통 테이블 설계 원칙과 맞지 않아 제외. `시장지표/feature_loader.py`(G-4)로 누수 없는 피처 조회 가능 — `get_features(ticker, start_date, end_date)`가 종목 OHLCV + 지표 9개를 `published_date < 거래일` 조건으로 병합해 반환.
 
 ---
@@ -267,6 +282,9 @@ kch_Final_prj/
 ├── 결과_TaskE_라벨링.md              # Task E 실행 결과 상세 수치 (2026-08-31, CLAUDE.md는 요약·참조만)
 ├── 결과_TaskF_게이팅검증.md          # Task F 게이팅·검증·horizon 확장 실행 결과 (2026-09-02, CLAUDE.md는 요약·참조만)
 ├── TASK_G_market_indicators_적재.md  # 주가/거시 트랙 지시서 (Task G)
+├── 결과_TaskT_방향예측_폐기.md        # Task T 방향예측 폐기 배경·판정 근거 (2026-09-06)
+├── 결과_변동성_조기경보_검증.md        # ⚠️ 폐기됨(GARCH 라벨링 버그) — 실패 원인 추적용으로만 보존 (2026-09-06)
+├── 결과_TaskT_변동성예측_최종.md      # 변동성 예측 트랙 전체 경과·수치표 정본, 진행 중 (2026-09-06)
 ├── Database/              # 2026-08-23 도메인별 폴더로 재구성 (옛 create_tables.sql/init_table.sql/migrations/ 삭제)
 │   ├── 뉴스/               # 테이블_생성.sql(daily_news) / 데이터_삭제.sql / 테이블_삭제.sql
 │   ├── 주가/               # 테이블_생성.sql(daily_stock_prices) / 데이터_삭제.sql / 테이블_삭제.sql
@@ -549,7 +567,29 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 `시장지표/ecos_load.py`(→ 지표_초기적재/일일수집의 ECOS 섹션으로 분리). 삭제 전 grep으로 실제 import 의존
 없음을 확인했다(서로를 참조하던 것 외 다른 파일에서의 import 없음, 주석 언급만 존재).
 
-### 트랙 2 — Transformer 가격예측 (Task T-1, 완료 ✅ — "무작위 수준" 확정, 트랙 1 재개 근거로 연결됨)
+### 트랙 2 — Transformer 가격예측 (Task T-1 완료 ✅ → 방향예측 폐기, 2026-09-06부터 변동성 예측으로 전환·진행 중)
+
+⚠️ **2026-09-06 갱신**: 아래 Task T-1(방향예측) 서술은 역사적 기록으로 그대로 둔다. 이후
+방향예측을 8종목 pooled+종목임베딩으로 재시도했으나 동일 결론(무작위 수준)이 재확인돼
+**방향예측 트랙 전체를 폐기**했다(`가격예측_공통.py`/`가격예측_일일수집.py`/
+`test_evaluation_방향예측.py`는 `쓰래기통/`으로 이동, 상세는 `결과_TaskT_방향예측_폐기.md`).
+`가격예측_통합모델.py`(pooled 방향예측)는 폐기 확정이지만 오늘 만든 변동성 실험 스크립트
+대부분이 여기서 하이퍼파라미터 상수(BATCH_SIZE/D_MODEL 등)를 가져다 써서 **삭제 불가 —
+보존**(상수를 별도 모듈로 분리하기 전까지).
+
+**현재 진행 중(변동성 예측 트랙, 최종 결론 아님)**: GARCH(1,1)/하이브리드 Transformer/
+Parkinson 변동성 추정량/원본시퀀스 실험까지 진행했고, **Parkinson-SMA20(통계 baseline)만
+GARCH·SMA20을 실제로 이기며, 학습 기반 모델은 아직 이를 못 넘어서 개선 시도 중**이다.
+신규 핵심 모듈: `가격예측/garch_baseline.py`(GARCH baseline+leak-free 재귀), `가격예측/
+pooled_dataset.py`(8종목 pooled 시퀀스 빌더), `가격예측/parkinson_volatility_check.py`·
+`가격예측/raw_sequence_check_and_train.py`(서로 참조, 재사용 함수 포함이라 보존).
+`가격예측/model.py`에 `PooledTransformerRegressor` 추가(기존 `TransformerRegressor`는
+그대로 유지). 조기경보 검증 3종 스크립트·`test_evaluation_pooled_volatility.py`·
+`overfit_diagnosis.py`·`training_collapse_check.py`는 결과가 문서화된 뒤 삭제 완료
+(2026-09-06). 전체 경과·수치표는 `결과_TaskT_변동성예측_최종.md`가 정본이며 여기서는
+중복 기재하지 않는다.
+
+#### Task T-1 (완료 ✅ — "무작위 수준" 확정, 아래는 당시 기록)
 
 `가격예측/` 13개 파일 전부 실제로 쓰였음(폐기 후보 없음). `TASK_T_transformer_baseline.md`의
 진단 순서와 정확히 대응한다.
