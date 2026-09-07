@@ -234,21 +234,27 @@ def passes_deployment_gate(preds, actuals, threshold=0.0,
 # 별도 함수로 분리했다 — 하나의 함수에 두 판정 로직을 욱여넣으면 오히려 어느 쪽도 이해하기
 # 어려워진다고 판단).
 
-def passes_deployment_gate_volatility(hybrid_rmse, garch_rmse, sma_rmse):
-    """하이브리드(GARCH+Transformer) 변동성 예측 배포 게이트 — 하이브리드 RMSE가 GARCH(1,1)와
-    SMA20 baseline 둘 다보다 낮아야(개선돼야) 통과한다. 결과_변동성_조기경보_검증.md/
-    결과_TaskT_방향예측_폐기.md에서 확인된 실증 결과(하이브리드가 GARCH·SMA20 둘 다를
-    이김, 42~43% 개선)를 운영 게이트로 고정한 것 — 매일 재학습 후 이 기준을 넘는지 다시
-    확인해 모델이 퇴화하지 않았는지 감시한다.
+def passes_deployment_gate_volatility(hybrid_rmse, garch_rmse, sma_rmse, parkinson_rmse):
+    """하이브리드(GARCH+Transformer) 변동성 예측 배포 게이트 — 하이브리드 RMSE가 GARCH(1,1)·
+    SMA20·Parkinson-SMA20 baseline **셋 다**보다 낮아야(개선돼야) 통과한다.
 
-    세 RMSE는 호출부가 동일한 held-out(val) 구간·동일한 실현 변동성 정의(|로그수익률x100|)로
+    2026-09-07 확정(100종목 검증 세션): 50종목 검증까지는 GARCH·SMA20 둘만 기준이었으나
+    (Parkinson-SMA20은 "비교 대상 포함 여부"가 다음 세션 결정 사항으로 남아있었음), 100종목
+    확장 검증에서 하이브리드가 종목평균 제거 후 지표 기준으로 Parkinson-SMA20까지 셋 다
+    이기는 것을 확인해(결과_TaskT_변동성예측_최종.md) 세 번째 baseline으로 정식 포함시켰다.
+    이전 시그니처(garch_rmse, sma_rmse 2개)를 호출하는 코드는 없음을 확인 후 하위호환 없이
+    바로 확장(2026-09-07 grep 확인 — 이 함수의 실제 호출부가 아직 없었음).
+
+    네 RMSE는 호출부가 동일한 held-out(val) 구간·동일한 실현 변동성 정의(|로그수익률x100|)로
     미리 계산해서 넘겨야 한다 — 이 함수 자체는 비교만 한다."""
     beats_garch = hybrid_rmse < garch_rmse
     beats_sma = hybrid_rmse < sma_rmse
+    beats_parkinson = hybrid_rmse < parkinson_rmse
     return {
         "hybrid_rmse": hybrid_rmse, "garch_rmse": garch_rmse, "sma_rmse": sma_rmse,
-        "beats_garch": beats_garch, "beats_sma": beats_sma,
-        "passed": beats_garch and beats_sma,
+        "parkinson_rmse": parkinson_rmse,
+        "beats_garch": beats_garch, "beats_sma": beats_sma, "beats_parkinson": beats_parkinson,
+        "passed": beats_garch and beats_sma and beats_parkinson,
     }
 
 
