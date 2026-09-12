@@ -22,7 +22,7 @@ from sklearn.linear_model import LinearRegression
 from constants import STRESS_PERIOD_START
 from 가격예측.sequence_dataset import FeatureScaler, build_sequences, split_sequences_by_date
 from 가격예측.split_dataset import build_merged_dataset, split_normal_regime
-from 가격예측.train import directional_accuracy, majority_baseline_accuracy
+from 가격예측.검증용.train import directional_accuracy, majority_baseline_accuracy
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

@@ -39,7 +39,7 @@ from 가격예측.garch_baseline import (
     compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
     forecast_with_fixed_params, load_close_prices, rmse_mae,
 )
-from 가격예측.parkinson_volatility_check import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
+from 가격예측.parkinson_baseline import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
 from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_split_dates
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import (
@@ -148,9 +148,10 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
 
 
 def compute_full_period_sigma_cached(returns, params):
-    """garch_baseline.compute_full_period_sigma()와 동일한 결과를 내되, 이미 가진(캐시된)
-    params로 재적합 없이 재귀 계산만 한다 — compute_full_period_sigma가 내부적으로 하는
-    forecast_with_fixed_params(start_pos=0) 호출과 완전히 동일, fit() 단계만 스킵한 것."""
+    """검증용/garch_baseline_check.compute_full_period_sigma()와 동일한 결과를 내되, 이미
+    가진(캐시된) params로 재적합 없이 재귀 계산만 한다 — compute_full_period_sigma가
+    내부적으로 하는 forecast_with_fixed_params(start_pos=0) 호출과 완전히 동일, fit() 단계만
+    스킵한 것(2026-09-12: compute_full_period_sigma는 검증용/garch_baseline_check.py로 이동됨)."""
     return forecast_with_fixed_params(returns, params, 0)
 
 

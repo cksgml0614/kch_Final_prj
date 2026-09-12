@@ -16,8 +16,8 @@ from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_s
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import build_merged_dataset_v2, build_merged_dataset_v2_volatility_hybrid
 from 가격예측.train_common import evaluate_pooled_predictions, train_pooled_transformer
-from 가격예측.test_evaluation_pooled50_hybrid import EMBEDDING_DIM_50
-from 가격예측.가격예측_통합모델 import (
+from 가격예측.검증용.test_evaluation_pooled50_hybrid import EMBEDDING_DIM_50
+from 가격예측.검증용.가격예측_통합모델 import (
     BATCH_SIZE, DIM_FEEDFORWARD, DROPOUT, D_MODEL, LOOKBACK, LR,
     MAX_EPOCHS, NHEAD, NUM_LAYERS, PATIENCE, SEED, SMOKE_EPOCHS, WEIGHT_DECAY,
 )

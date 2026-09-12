@@ -27,7 +27,7 @@ from constants import ACTIVE_TICKERS, STOCK_INITIAL_LOAD_START
 from 가격예측.pooled_dataset import build_pooled_sequences
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.train_common import evaluate_pooled_predictions, train_pooled_transformer
-from 가격예측.가격예측_통합모델 import (
+from 가격예측.검증용.가격예측_통합모델 import (
     BATCH_SIZE, DIM_FEEDFORWARD, DROPOUT, D_MODEL, EMBEDDING_DIM, LOOKBACK, LR,
     MAX_EPOCHS, NHEAD, NUM_LAYERS, PATIENCE, SEED, SMOKE_EPOCHS, WEIGHT_DECAY,
 )

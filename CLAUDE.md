@@ -648,6 +648,16 @@ GARCH·SMA20·Parkinson-SMA20 셋 다 이겨야 통과로 확정(인자 확장).
 테이블에 `parkinson_sma20_baseline`/`gate_vs_parkinson` 컬럼 추가(SQL 파일 갱신, 운영
 DB 적용은 미실행).
 
+> 2026-09-12: 코드 의존성 재검증 후 `가격예측/` 27개 파일을 활성/검증용으로 재분리했다 —
+> 활성 파이프라인이 실제로 참조하는 부분만 원래 자리에 남기고, 참조되지 않는 파일 전체 또는
+> 파일 내 진단 전용 함수는 `가격예측/검증용/`으로 옮겼다(실험 결론 자체는 위 기록대로 유지).
+> `parkinson_volatility_check.py`는 활성 부분만 남아 `parkinson_baseline.py`로 개명됐고,
+> 진단부(`build_test_frame`/`main` 등)는 `검증용/parkinson_baseline_check.py`로,
+> `garch_baseline.py`의 `fit_and_forecast_garch`/`compute_full_period_sigma`/`main`은
+> `검증용/garch_baseline_check.py`로 분리됐다. `가격예측_통합모델.py`는 `검증용/`으로
+> 통째 이동. 상세 표는 아래 갱신하지 않은 이번 절(2026-09-06~07 기록)이 아니라 이 세션
+> 종료 시점의 커밋 메시지 참고.
+
 신규/확장 핵심 모듈(2026-09-06~07 누적): `가격예측/garch_baseline.py`(GARCH baseline+
 leak-free 재귀), `가격예측/pooled_dataset.py`(다종목 pooled 시퀀스 빌더, 8→50→100종목
 확장에도 코드 수정 없이 대응), `가격예측/parkinson_volatility_check.py`·`가격예측/
@@ -669,6 +679,14 @@ test_evaluation_pooled50_hybrid.py`·`가격예측/test_evaluation_pooled50_hybr
 `결과_TaskT_변동성예측_최종.md` [13] 참고.
 
 #### Task T-1 (완료 ✅ — "무작위 수준" 확정, 아래는 당시 기록)
+
+> 2026-09-12: 아래 "13개 파일 전부 실제로 쓰였음"은 **당시(Task T-1 시점) 기준 기록**이며
+> 지금은 사실이 아니다 — 이후 여러 세션을 거치며 `가격예측_변동성_공통.py` 등 새 활성
+> 진입점으로 파이프라인이 교체되면서, 이 표에 나열된 `train.py`/`train_v2.py`/
+> `diagnose_baseline.py`/`compare_v2_variants.py`/`diagnose_down_class.py`/
+> `seed_stability_check.py`/`pr_curve_vs_random.py` 7개는 전부 코드 의존성 재검증 결과
+> 활성 파이프라인에서 더 이상 참조되지 않음이 확인돼 `검증용/`으로 이동됐다(활성 부분은
+> 유지, 진단/검증 전용 코드만 분리 — 이 표 자체는 역사적 기록으로 그대로 둔다).
 
 `가격예측/` 13개 파일 전부 실제로 쓰였음(폐기 후보 없음). `TASK_T_transformer_baseline.md`의
 진단 순서와 정확히 대응한다.

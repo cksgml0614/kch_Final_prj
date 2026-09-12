@@ -17,15 +17,16 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from constants import ACTIVE_TICKERS, STOCK_INITIAL_LOAD_START
 from 가격예측.garch_baseline import (
-    compute_log_returns_pct, compute_sma_baseline, fit_and_forecast_garch,
+    compute_log_returns_pct, compute_sma_baseline,
     load_close_prices, rmse_mae,
 )
-from 가격예측.parkinson_volatility_check import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
+from 가격예측.검증용.garch_baseline_check import fit_and_forecast_garch
+from 가격예측.parkinson_baseline import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
 from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_split_dates
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import build_merged_dataset_v2, build_merged_dataset_v2_volatility_hybrid
 from 가격예측.train_common import evaluate_pooled_predictions, train_pooled_transformer
-from 가격예측.가격예측_통합모델 import (
+from 가격예측.검증용.가격예측_통합모델 import (
     BATCH_SIZE, DIM_FEEDFORWARD, DROPOUT, D_MODEL, LOOKBACK, LR,
     MAX_EPOCHS, NHEAD, NUM_LAYERS, PATIENCE, SEED, SMOKE_EPOCHS, WEIGHT_DECAY,
 )

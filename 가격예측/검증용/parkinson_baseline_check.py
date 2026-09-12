@@ -1,20 +1,40 @@
-# parkinson_volatility_check.py — Parkinson 변동성 추정량이 GARCH σ/SMA20/recent_vol_ma20보다
-# 유용한 정보를 주는지 검증 (2026-09-06, 일회성 분석 — 자동화/운영 코드 아님).
+# parkinson_baseline_check.py — parkinson_volatility_check.py(2026-09-06)에서 분리된
+# 진단/검증 전용 코드 (2026-09-12, 가격예측/ 활성·검증 재분리 세션).
 #
-# 배경: 학계 GARCH-신경망 하이브리드 연구는 대개 고빈도(5분봉 등) 실현변동성을 핵심 피처로
-# 쓰는데, 이 프로젝트는 그 데이터가 없다. 대안으로, 일중 고가-저가 범위 기반 Parkinson(1980)
-# 추정량이 종가 기반 변동성 추정보다 통계적으로 더 효율적(같은 정보량 대비 분산이 작음)이라는
-# 것이 알려져 있다 — hl_range_ratio가 이미 피처에 있지만 "당일 원시값"으로만 쓰이고 있어,
-# "직전 20일 Parkinson 변동성 평균"이라는 명시적 지속성 피처로 재가공해볼 가치가 있다.
+# 원본 파일의 build_test_frame()/main()/N_SHUFFLE/SHUFFLE_SEEDS/HYBRID15_*를 값 변경 없이
+# 그대로 옮겼다. 활성 파이프라인(가격예측_변동성_공통.py)은 load_high_low()/
+# compute_parkinson_vol_pct()/PARK_WINDOW만 쓰므로, 이 파일의 build_test_frame()/main()은
+# 운영 경로에서 호출되지 않는다 — 남은 활성 함수는 가격예측/parkinson_baseline.py에 있다.
+#
+# 배경(원본 파일 헤더 그대로 보존): Parkinson 변동성 추정량이 GARCH σ/SMA20/recent_vol_ma20보다
+# 유용한 정보를 주는지 검증하는 일회성 분석 — 자동화/운영 코드 아님.
 #
 # ⚠️ 리크 방지 설계: Parkinson 추정량 자체(parkinson_vol(t), high(t)/low(t) 사용)는 t일
 # 자신의 장중 정보라 target(t)(=|종가수익률(t)|)을 예측하는 피처로 쓰면 리크다. 이 스크립트는
 # 두 가지를 명확히 구분한다:
-#   (a) "당일 동시성 상관관계" — parkinson_vol(t) vs target(t): Parkinson이 얼마나 좋은
-#       "그날 자체의" 변동성 추정량인지 보는 순수 진단용. 예측 피처로 쓸 수 없는 값이다.
-#   (b) "예측용 상관관계/RMSE" — GARCH σ(t)/SMA20(t)/recent_vol_ma20(t)와 동일하게, t-1까지의
-#       Parkinson 값만으로 만든 시차 피처("Parkinson-SMA20", 직전 20일 Parkinson 평균을
-#       shift(1)한 것)를 target(t)과 비교. 이것만이 실제로 16번째 피처 후보가 될 수 있다.
+#   (a) "당일 동시성 상관관계" — parkinson_vol(t) vs target(t): 순수 진단용, 예측 피처 불가.
+#   (b) "예측용 상관관계/RMSE" — t-1까지의 Parkinson 값만으로 만든 시차 피처.
+#
+# ⚠️ 2026-09-12 하이퍼파라미터 처리: 원본 파일은 이 14개 상수를 가격예측_통합모델.py에서
+# import했다(당시 8종목 방향예측 실험 파일, 이후 검증용/으로 archived). 하지만
+# 가격예측_통합모델.py의 EMBEDDING_DIM=8은 가격예측_변동성_공통.py의 EMBEDDING_DIM=20(100종목
+# 기준)과 값이 다르다 — 재검증 중 발견된 사실. import 대상을 가격예측_변동성_공통.py로 바꾸면
+# EMBEDDING_DIM이 8→20으로 조용히 바뀌어 2026-09-06 8종목 hybrid16 실험의 재현성이 깨지므로,
+# 원본 실행 당시 값을 그대로 리터럴로 고정한다(출처: 가격예측_통합모델.py, 2026-09-06 시점).
+LOOKBACK = 20
+EMBEDDING_DIM = 8  # 2026-09-06 8종목 hybrid16 실험 당시 값(가격예측_통합모델.py 원본) — 100종목용 20과 다름, 변경 금지
+D_MODEL = 32
+NHEAD = 2
+NUM_LAYERS = 2
+DIM_FEEDFORWARD = 64
+DROPOUT = 0.3
+BATCH_SIZE = 32
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+SMOKE_EPOCHS = 2
+MAX_EPOCHS = 60
+PATIENCE = 8
+SEED = 42
 
 import sys
 from datetime import date
@@ -24,25 +44,18 @@ import pandas as pd
 import torch
 
 from constants import ACTIVE_TICKERS, STOCK_INITIAL_LOAD_START
-from db_manager import get_db_connection
-from 가격예측.garch_baseline import (
-    compute_log_returns_pct, compute_sma_baseline, fit_and_forecast_garch,
-    load_close_prices, rmse_mae,
-)
+from 가격예측.garch_baseline import compute_log_returns_pct, compute_sma_baseline, load_close_prices, rmse_mae
+from 가격예측.검증용.garch_baseline_check import fit_and_forecast_garch
 from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_split_dates
 from 가격예측.dataset_builder import build_base_dataset_v2_volatility
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import build_merged_dataset_v2, build_merged_dataset_v2_volatility_hybrid
 from 가격예측.train_common import evaluate_pooled_predictions, train_pooled_transformer
-from 가격예측.가격예측_통합모델 import (
-    BATCH_SIZE, DIM_FEEDFORWARD, DROPOUT, D_MODEL, EMBEDDING_DIM, LOOKBACK, LR,
-    MAX_EPOCHS, NHEAD, NUM_LAYERS, PATIENCE, SEED, SMOKE_EPOCHS, WEIGHT_DECAY,
-)
+from 가격예측.parkinson_baseline import load_high_low, compute_parkinson_vol_pct, PARK_WINDOW
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-PARK_WINDOW = 20
 N_SHUFFLE = 7
 SHUFFLE_SEEDS = [0, 1, 7, 123, 2024, 777, 999]
 
@@ -56,26 +69,6 @@ HYBRID15_RESULTS = {
 }
 HYBRID15_AVG = (2.709781, 1.833777)
 HYBRID15_SHUFFLE = {"rmse_mean": 2.950011, "rmse_std": 0.028239, "mae_mean": 1.904412, "mae_std": 0.008861}
-
-
-def load_high_low(ticker, start_date, end_date):
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT date, high, low FROM daily_stock_prices WHERE ticker=%s AND date BETWEEN %s AND %s ORDER BY date",
-                (ticker, start_date, end_date),
-            )
-            rows = cur.fetchall()
-    df = pd.DataFrame(rows, columns=["date", "high", "low"]).astype({"high": float, "low": float})
-    df["date"] = pd.to_datetime(df["date"])
-    return df.set_index("date")
-
-
-def compute_parkinson_vol_pct(high, low):
-    """parkinson_vol(t) = sqrt(1/(4 ln2) * ln(high/low)^2), x100(%) 스케일 통일.
-    당일 H/L을 쓰므로 그 자체는 t일 정보 — 리크 방지 주석 참고."""
-    raw = np.sqrt((np.log(high / low) ** 2) / (4 * np.log(2)))
-    return raw * 100
 
 
 def build_test_frame(ticker, train_end, val_end):
