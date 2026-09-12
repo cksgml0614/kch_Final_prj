@@ -113,7 +113,7 @@ def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, trai
     if precomputed_sigma is not None:
         sigma_full, params = precomputed_sigma, garch_params
     else:
-        from 가격예측.garch_baseline import compute_full_period_sigma  # 순환 임포트 방지(지연 임포트)
+        from 가격예측.검증용.garch_baseline_check import compute_full_period_sigma  # 2026-09-12: 함수가 검증용/으로 이동(경로 갱신, 순환 임포트 방지 목적은 동일)
         sigma_full, params = compute_full_period_sigma(ticker, start_date, end_date, train_end)
 
     merged = merged.copy()
