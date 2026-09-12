@@ -11,6 +11,9 @@
 | **뉴스/감성** (Task A~F) | `TASK_개정판_데이터_재구축.md`(A~D) + `TASK_EF_라벨링_비교실험.md`(E~F, 2026-08-29 분리) | Task A 완료, 판정 승인됨. Task B 완료 — 전면 백필 완료(2023-08-23~2026-08-28) + QA 검증·클러스터 확장 재크롤링·갭 구간 표본 재크롤링까지 전부 완료(`source='search_backfill'` 최종 14,392행). **Task E 완료 — 임계값·윈도우 확정(상세: `결과_TaskE_라벨링.md`)** |
 | **주가/거시** (Task G) | `TASK_G_market_indicators_적재.md` | **G-0~G-4 전체 완료** |
 
+> 2026-09-12: 코드 의존성 검증 후 `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인,
+> 실험 결론 자체는 위 기록대로 유지).
+
 **현재 상태(2026-09-01)**: Task G 완료 후 열렸던 두 갈래(Transformer 착수 / 뉴스·감성 Task B 재개) 모두
 착수됐다. **Task T-1(Transformer ablation baseline)은 완료돼 "가격+거시지표만으로는 익일 방향성이
 무작위 수준과 구분 안 됨"으로 확정**됐다(상세는 "파이프라인 실행 순서 > 트랙 2" 참고). **뉴스/감성
@@ -351,6 +354,9 @@ kch_Final_prj/
     └── Bigkinds.py         # 레거시. BigKinds CSV 일괄 적재, 미사용
 ```
 
+> 2026-09-12: 위 트리의 `뉴스데이터/`, `감성분석/`, `라벨/`, `빅카인즈/`는 코드 의존성 검증 후
+> `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
+
 ---
 
 ## DB 스키마
@@ -374,6 +380,9 @@ OHLCV + change_rate. 2020-01-02 ~ 2026-07-31, 거래일 1,615일. 005930/000660 
 2026-08-23 기준 이미 라이브 — "추가 예정" 아님). `target_date`는 Task D 완료 전이라 현재 전부 NULL.
 `UNIQUE(ticker, article_url) WHERE article_url IS NOT NULL`로 종목별 기사 중복 방지.
 
+> 2026-09-12: 코드 의존성 검증 후 이 테이블을 다루는 코드(`뉴스데이터/`)는 `쓰래기통/`으로
+> 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
+
 ### daily_news_bigkinds `(id)` — `Database/뉴스_빅카인즈/테이블_생성.sql`
 BigKinds(빅카인즈) CSV/Excel 일괄 적재 전용 — `daily_news`와 완전히 분리된 별도 테이블(FK 없음,
 서로 영향 없음). `title, summary`(본문 전체), `press, article_url, keywords, category`(통합 분류1),
@@ -391,6 +400,9 @@ BigKinds(빅카인즈) CSV/Excel 일괄 적재 전용 — `daily_news`와 완전
 2026-08-29 최초 적재 완료: 20,053행(전체 읽음 20,221행, 파일 내부 정상 중복 168건 제외), 날짜 범위
 2023-08-23~2026-08-29, 전량 005930 고정. `daily_news`(search_backfill 등)와 어떻게 통합·비교할지는
 아직 미결 — Task A~F 어느 단계에도 아직 편입되지 않은 독립 데이터 소스다.
+
+> 2026-09-12: 코드 의존성 검증 후 이 테이블을 다루는 코드(`빅카인즈/`)는 `쓰래기통/`으로
+> 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
 
 ### daily_labels `(ticker, date, window_n, horizon_h, label_basis)` PK — `Database/라벨/테이블_생성.sql` (2026-08-30 설계 확정, 2026-08-31 생성·적재, 2026-09-02 horizon_h 추가, 2026-09-06 label_basis 추가)
 
@@ -439,6 +451,9 @@ z_score        numeric                -- excess_return / sigma
 - z 분포·라벨 분포·split별 비교·확정된 임계값/윈도우는 `결과_TaskE_라벨링.md`, Task F
   게이팅·검증·horizon·basis 비교 실험 결과는 `결과_TaskF_게이팅검증.md` 참고 — 상세 표는
   그 문서들이 정본이며 여기서는 중복 기재하지 않는다
+
+> 2026-09-12: 코드 의존성 검증 후 이 테이블을 다루는 코드(`라벨/`)는 `쓰래기통/`으로 이동
+> (활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
 
 ### market_indicators `(indicator_code, date)` PK — `Database/시장지표/테이블_생성.sql`
 
@@ -693,6 +708,9 @@ test_evaluation_pooled50_hybrid.py`·`가격예측/test_evaluation_pooled50_hybr
 
 ### 트랙 3 — 뉴스/감성 (Task A~F, Task B 방향 이번 세션에 재개)
 
+> 2026-09-12: 코드 의존성 검증 후 아래 `뉴스데이터/`·`감성분석/`·`라벨/` 코드는 `쓰래기통/`으로
+> 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
+
 2026-08-23 구조 정리로 `NaverSearchBackfill.py`가 공통/최초적재/일일수집 3개 파일로 분리됨.
 날짜 상수는 `constants.py`(`NEWS_BACKFILL_START`/`NEWS_BACKFILL_END`, 2023-08-23~2026-08-23
 고정값)로 중앙화. 뉴스_일일수집.py는 이번에 신규 정의된 개념(다른 로더와 같은 "DB 최신일+1 ~
@@ -740,6 +758,9 @@ test_evaluation_pooled50_hybrid.py`·`가격예측/test_evaluation_pooled50_hybr
 함께 기록돼 있다.
 
 ### 트랙 3 부가 — BigKinds 데이터 소스 (2026-08-29 신규, Task A~F 체계 미편입)
+
+> 2026-09-12: 코드 의존성 검증 후 `빅카인즈/`는 `쓰래기통/`으로 이동(활성 파이프라인 참조
+> 0건 확인, 실험 결론 자체는 위 기록대로 유지).
 
 `daily_news`(search_backfill 계열)와는 완전히 분리된 별도 실험 소스. Task A~F 어느 단계에도 아직
 공식 편입되지 않았고, 기존 뉴스/감성 트랙과 어떻게 관계지을지(대체/보완/별도 비교)는 사람이 아직
@@ -824,6 +845,9 @@ test_evaluation_pooled50_hybrid.py`·`가격예측/test_evaluation_pooled50_hybr
 G-2/G-3 완료로 KOSPI 등락률과 거시지표 6종이 확보되어 초과수익률 라벨링(Task E)이 열린다. G-4 완료로 Transformer ablation baseline 착수에 필요한 피처 조회 함수도 준비됐다.
 
 ### 뉴스/감성 트랙 (Task A~F) — Task B 완료(백필+QA), Task E 착수 대기
+
+> 2026-09-12: 코드 의존성 검증 후 이 트랙 코드는 `쓰래기통/`으로 이동(활성 파이프라인 참조
+> 0건 확인, 실험 결론 자체는 위 기록대로 유지).
 
 | 단계 | 내용 | 상태 |
 |---|---|---|
