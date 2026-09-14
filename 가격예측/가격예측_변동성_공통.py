@@ -365,21 +365,31 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, fea
             torch.from_numpy(X_next_s).to(device), torch.from_numpy(tid).to(device)
         ).cpu().numpy()[0]
 
+    predicted_volatility = float(pred)
+    # sanity check(2026-09-14, 사람 결정): NaN/inf/음수만 차단 — 변동성은 음수가 될 수 없는
+    # 값이라 확실한 결함 신호지만, 상한선은 일부러 두지 않는다. 실제 급변장에서는 크게 튀는
+    # 예측이 정상일 수 있어 임의 상한이 오히려 정상 예측을 막을 위험이 있다는 판단.
+    if not np.isfinite(predicted_volatility) or predicted_volatility < 0:
+        raise ValueError(
+            f"[{ticker}] 예측값 비정상(NaN/inf/음수) — predicted_volatility={predicted_volatility!r}. "
+            f"저장을 건너뜁니다."
+        )
+
     prediction_date = pd.Timestamp(last_confirmed_date).date()
     target_date = next_weekday(prediction_date)
 
     trailing_mean = _trailing_predicted_volatility_mean(ticker, target_date)
-    is_early_warning = bool(trailing_mean is not None and float(pred) > 1.5 * trailing_mean)
+    is_early_warning = bool(trailing_mean is not None and predicted_volatility > 1.5 * trailing_mean)
 
     next_day = baselines_by_ticker[ticker]["next_day"]
     save_prediction(
-        ticker, target_date, prediction_date, float(pred),
+        ticker, target_date, prediction_date, predicted_volatility,
         next_day["garch"], next_day["sma20"], next_day["parkinson"],
         is_early_warning, version, gate,
     )
 
     return {
-        "predicted_volatility": float(pred),
+        "predicted_volatility": predicted_volatility,
         "garch_baseline": next_day["garch"], "sma20_baseline": next_day["sma20"],
         "parkinson_sma20_baseline": next_day["parkinson"],
         "is_early_warning": is_early_warning,
@@ -389,12 +399,19 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, fea
 
 def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
-    통합) -> 체크포인트 저장 -> 종목별 다음 거래일 예측(run_isolated로 종목별 격리) ->
-    model_predictions 저장.
+    통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> (통과 시에만) 종목별 다음 거래일 예측
+    (run_isolated로 종목별 격리) -> model_predictions 저장.
 
     학습 자체는 격리하지 않는다(가격예측_통합모델.py와 동일 근거 — 모델이 하나라 학습 실패는
     전체 실패, 단일 종목 파이프라인처럼 "한 종목만 실패, 나머지는 계속"이 구조적으로 불가능).
-    예측 단계만 종목별로 run_isolated로 감싼다."""
+    예측 단계만 종목별로 run_isolated로 감싼다.
+
+    2026-09-14(사람 결정, 엄격 게이트 방식 채택): gate["passed"]가 False면 예측 루프 자체를
+    건너뛴다 — 이전에는 gate_passed=False가 model_predictions에 기록만 될 뿐 저장을 막지
+    않아 게이트가 사실상 장식이었다. 체크포인트 저장(학습 자체가 성공했다는 기록)은 게이트와
+    무관하게 항상 수행한다 — 나중에 분석/재현에 필요하고, "학습은 됐는데 배포 기준에 못
+    미쳤다"는 상태 자체가 유효한 결과다. 미통과가 며칠 연속될 수 있고 그동안
+    model_predictions에 신규 행이 쌓이지 않을 수 있다는 점은 인지한 상태에서 내린 결정."""
     train_out = train_daily_pooled_model(tickers, start_date, end_date)
     model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
     ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
@@ -414,6 +431,27 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         },
     )
 
+    gate_str = "통과" if gate["passed"] else "미통과"
+    print(f"\n📊 pooled 하이브리드 변동성 모델 학습 완료(버전 {version}, "
+          f"train={train_out['n_train']}/val={train_out['n_val']}) — 배포 게이트 {gate_str}")
+    print(f"   val RMSE: hybrid={gate['hybrid_rmse']:.4f}  GARCH={gate['garch_rmse']:.4f}  "
+          f"SMA20={gate['sma_rmse']:.4f}  Parkinson-SMA20={gate['parkinson_rmse']:.4f}")
+    print(f"   개별 판정: vs GARCH={gate['beats_garch']}  vs SMA20={gate['beats_sma']}  "
+          f"vs Parkinson-SMA20={gate['beats_parkinson']}")
+
+    if not gate["passed"]:
+        failed_against = [
+            name for name, beat in (
+                ("GARCH", gate["beats_garch"]),
+                ("SMA20", gate["beats_sma"]),
+                ("Parkinson-SMA20", gate["beats_parkinson"]),
+            ) if not beat
+        ]
+        skip_reason = f"배포 게이트 미통과 — 다음 baseline을 이기지 못함: {', '.join(failed_against)}"
+        print(f"\n🚫🚫🚫 {skip_reason} 🚫🚫🚫")
+        print("🚫 예측 저장을 건너뜁니다 — model_predictions에 이번 실행분 행이 추가되지 않습니다.")
+        return {"version": version, "gate": gate, "predictions": {}, "skipped": True, "skip_reason": skip_reason}
+
     results = {}
     for ticker in tickers:
         r = run_isolated(
@@ -423,14 +461,6 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         )
         results[ticker] = r["result"] if r["status"] == "success" else f"실패 ({r['error']})"
 
-    gate_str = "통과" if gate["passed"] else "미통과"
-    print(f"\n✅ pooled 하이브리드 변동성 모델 학습 완료(버전 {version}, "
-          f"train={train_out['n_train']}/val={train_out['n_val']}) — 배포 게이트 {gate_str}")
-    print(f"   val RMSE: hybrid={gate['hybrid_rmse']:.4f}  GARCH={gate['garch_rmse']:.4f}  "
-          f"SMA20={gate['sma_rmse']:.4f}  Parkinson-SMA20={gate['parkinson_rmse']:.4f}")
-    print(f"   개별 판정: vs GARCH={gate['beats_garch']}  vs SMA20={gate['beats_sma']}  "
-          f"vs Parkinson-SMA20={gate['beats_parkinson']}")
-
     n_failed = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("실패"))
     print(f"\n=== 종목별 예측 결과 ({len(tickers) - n_failed}/{len(tickers)} 성공) ===")
     for ticker, r in results.items():
@@ -438,4 +468,4 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     if n_failed:
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
-    return {"version": version, "gate": gate, "predictions": results}
+    return {"version": version, "gate": gate, "predictions": results, "skipped": False}
