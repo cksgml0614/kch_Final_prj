@@ -410,14 +410,21 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, fea
     }
 
 
-def _log_mlflow_run(tickers, version, train_out, gate, skipped, skip_reason=None, prediction_results=None):
-    """일일 실행 결과(학습 곡선, 게이트 판정, 스킵 여부)를 MLflow "일일_자동화" experiment에
-    기록한다. 게이트 통과/미통과/스킵 여부와 무관하게 항상 호출된다 — MLflow는
-    model_predictions(A-1 게이트로 미통과 시 저장 스킵됨)와 달리 "무슨 일이 있었는지 전부
-    보는" 관측 도구이기 때문(2026-09-14, MLflow 통합 설계 결정).
+def _log_mlflow_run(tickers, version, train_out, gate, prediction_results):
+    """일일 실행 결과(학습 곡선, 게이트 판정, 종목별 예측 성공/실패 수)를 MLflow
+    "일일_자동화" experiment에 기록한다. 게이트 통과/미통과 여부와 무관하게 항상 호출된다
+    — MLflow는 "무슨 일이 있었는지 전부 보는" 관측 도구이기 때문(2026-09-14, MLflow 통합
+    설계 결정).
+
+    2026-09-14(D-1/D-2, A-1의 "저장 스킵" 결정 철회): 예전에는 게이트 미통과 시
+    run_pooled_volatility_pipeline()이 예측 루프 자체를 건너뛰어 이 함수도 "스킵됨" 분기
+    (skip_reason 태그만 남기고 종목별 성공/실패 카운트는 생략)를 탔었다. 이제 예측 루프가
+    게이트 결과와 무관하게 항상 실행되므로 그 분기 자체가 코드상 도달 불가능해져
+    prediction_results를 필수 인자로 바꾸고 skip 관련 분기를 제거했다 — model_predictions에
+    저장되는지 여부와 무관하게(지금은 항상 저장됨) MLflow에는 항상 같은 형태로 기록된다.
 
     ⚠️ 이 함수 전체를 하나의 try/except로 감싼다 — MLflow 서버가 꺼져있거나 응답이 없어도
-    파이프라인 본체(학습/예측/DB저장)는 절대 중단되면 안 된다는 요구사항 때문. A-1의
+    파이프라인 본체(학습/예측/DB저장)는 절대 중단되면 안 된다는 요구사항 때문. A-2의
     예측값 sanity check(잘못된 예측값 자체를 막는 것)와는 성격이 다른 방어 코드다: 이쪽은
     "로깅이라는 부가 기능의 실패를 흡수"하는 것이 목적이라 실패해도 예외를 다시 던지지
     않고 경고만 출력한다."""
@@ -445,31 +452,42 @@ def _log_mlflow_run(tickers, version, train_out, gate, skipped, skip_reason=None
                 "parkinson_rmse": gate["parkinson_rmse"],
                 "gate_passed": int(gate["passed"]),
             })
-            if skipped:
-                mlflow.set_tag("skip_reason", skip_reason)
-            elif prediction_results is not None:
-                n_failed = sum(1 for v in prediction_results.values() if isinstance(v, str) and v.startswith("실패"))
-                n_success = len(prediction_results) - n_failed
-                mlflow.log_metrics({"n_predictions_success": n_success, "n_predictions_failed": n_failed})
+            n_failed = sum(1 for v in prediction_results.values() if isinstance(v, str) and v.startswith("실패"))
+            n_success = len(prediction_results) - n_failed
+            mlflow.log_metrics({"n_predictions_success": n_success, "n_predictions_failed": n_failed})
     except Exception as e:
         print(f"⚠️ MLflow 로깅 실패(파이프라인은 계속 진행됩니다) — {e}")
 
 
 def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
-    통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> (통과 시에만) 종목별 다음 거래일 예측
-    (run_isolated로 종목별 격리) -> model_predictions 저장.
+    통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> 종목별 다음 거래일 예측(run_isolated로
+    종목별 격리) -> model_predictions 저장(게이트 결과와 무관하게 항상 저장).
 
     학습 자체는 격리하지 않는다(가격예측_통합모델.py와 동일 근거 — 모델이 하나라 학습 실패는
     전체 실패, 단일 종목 파이프라인처럼 "한 종목만 실패, 나머지는 계속"이 구조적으로 불가능).
     예측 단계만 종목별로 run_isolated로 감싼다.
 
-    2026-09-14(사람 결정, 엄격 게이트 방식 채택): gate["passed"]가 False면 예측 루프 자체를
-    건너뛴다 — 이전에는 gate_passed=False가 model_predictions에 기록만 될 뿐 저장을 막지
-    않아 게이트가 사실상 장식이었다. 체크포인트 저장(학습 자체가 성공했다는 기록)은 게이트와
-    무관하게 항상 수행한다 — 나중에 분석/재현에 필요하고, "학습은 됐는데 배포 기준에 못
-    미쳤다"는 상태 자체가 유효한 결과다. 미통과가 며칠 연속될 수 있고 그동안
-    model_predictions에 신규 행이 쌓이지 않을 수 있다는 점은 인지한 상태에서 내린 결정."""
+    2026-09-14(D-1, A-1의 "저장 스킵" 결정 철회 — 같은 날 안에서 방침이 두 번 바뀜, 아래
+    경과 참고): A-1(같은 날 오전)은 "gate['passed']가 False면 예측 루프 자체를 건너뛴다"는
+    엄격한 방식을 채택했다 — 그전에는 gate_passed=False가 model_predictions에 기록만 될
+    뿐 저장을 막지 않아 게이트가 사실상 장식이었기 때문. 이후 actual_volatility 백필로 A-1
+    적용 *이전*에 저장됐던 100행을 실제 결과와 대조해보니 하이브리드가 세 baseline 전부에
+    뒤졌음이 확인돼(결과_TaskT_변동성예측_최종.md 및 아래 "actual_volatility 백필" 절
+    참고) 게이트 강제의 방향성 자체는 지지됐다. 그런데 A-1 적용 이후 게이트가 연속
+    미통과하면서 예측 계산 자체가 아예 안 일어나 "미래 예측이 실제로 얼마나 정확한지"를
+    계속 검증할 데이터가 더 이상 쌓이지 않는 문제가 드러났다 — 게이트를 검증하려면 게이트가
+    걸러낸 예측이라도 계속 쌓여야 하는데, 엄격 스킵이 그 검증 자체를 불가능하게 만드는
+    모순이었다. **결정: model_predictions에는 게이트 통과 여부와 무관하게 항상 저장하고,
+    이미 있던 gate_passed 컬럼으로 신뢰 가능 여부를 구분한다.** 새 테이블을 만들지 않고
+    기존 model_predictions에 통합 — `gate_passed=true`만 보고 싶으면 아래 D-3에서 준비한
+    `model_predictions_trusted` 뷰를 사용할 것(뷰 DDL만 준비됨, 실제 생성은 사람이 psql로
+    직접 실행 — `Database/가격예측/뷰_생성.sql`). A-1 이전(2026-09-12)에 저장된 기존 100행의
+    gate_passed 값은 소급 수정하지 않고 그대로 히스토리로 보존한다.
+
+    A-2(예측값 NaN/inf/음수 sanity check)는 게이트와 무관한 별개 로직이라 이번 결정과
+    무관하게 그대로 유지된다. 체크포인트 저장(학습 자체가 성공했다는 기록)도 게이트와
+    무관하게 항상 수행하는 기존 동작 그대로."""
     train_out = train_daily_pooled_model(tickers, start_date, end_date)
     model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
     ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
@@ -505,11 +523,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
                 ("Parkinson-SMA20", gate["beats_parkinson"]),
             ) if not beat
         ]
-        skip_reason = f"배포 게이트 미통과 — 다음 baseline을 이기지 못함: {', '.join(failed_against)}"
-        print(f"\n🚫🚫🚫 {skip_reason} 🚫🚫🚫")
-        print("🚫 예측 저장을 건너뜁니다 — model_predictions에 이번 실행분 행이 추가되지 않습니다.")
-        _log_mlflow_run(tickers, version, train_out, gate, skipped=True, skip_reason=skip_reason)
-        return {"version": version, "gate": gate, "predictions": {}, "skipped": True, "skip_reason": skip_reason}
+        print(f"\n⚠️⚠️⚠️ 배포 게이트 미통과 — 다음 baseline을 이기지 못함: {', '.join(failed_against)} ⚠️⚠️⚠️")
+        print("⚠️ 이번 예측은 저장되지만 gate_passed=False로 표시됩니다 — 참고용으로만 사용하세요.")
 
     results = {}
     for ticker in tickers:
@@ -527,5 +542,5 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     if n_failed:
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
-    _log_mlflow_run(tickers, version, train_out, gate, skipped=False, prediction_results=results)
-    return {"version": version, "gate": gate, "predictions": results, "skipped": False}
+    _log_mlflow_run(tickers, version, train_out, gate, results)
+    return {"version": version, "gate": gate, "predictions": results}
