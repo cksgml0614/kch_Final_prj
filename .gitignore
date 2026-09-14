@@ -30,3 +30,7 @@ __pycache__/
 
 # BigKinds 원본 CSV (대용량 데이터 파일, 로컬에서 직접 배치)
 빅카인즈_뉴스/
+
+# MLflow 로컬 트래킹 DB + 아티팩트 저장소 (로컬에서 생성, 2026-09-14)
+mlflow.db
+mlflow_artifacts/

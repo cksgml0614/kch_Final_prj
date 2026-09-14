@@ -29,6 +29,7 @@ import json
 import os
 from datetime import date, timedelta
 
+import mlflow
 import numpy as np
 import pandas as pd
 import torch
@@ -94,6 +95,13 @@ CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints", "pooled_volatility_hybrid")
 # embedding_dim이 달라 load_checkpoint()가 latest.txt로 엉뚱한 모델을 집어올 위험이 있다.
 GARCH_PARAM_CACHE_DIR = os.path.join(_HERE, "checkpoints", "garch_params")
 LOG_DIR = os.path.join(_HERE, "logs")
+
+# MLflow 일일 자동화 로깅 (2026-09-14 신규). 자동화 스크립트는 서버와 같은 컴퓨터에서
+# 돌기 때문에 기본값은 localhost — Tailscale 등 외부 경유는 노트북에서 UI로 조회할 때만
+# 필요하고 이 파이프라인 자체와는 무관하다. 환경변수로 덮어쓸 수 있게 해 서버 위치가
+# 바뀌어도 코드 수정 없이 대응 가능하게 함.
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+MLFLOW_EXPERIMENT_NAME = "일일_자동화"
 
 
 def _model_kwargs(num_stocks):
@@ -209,7 +217,9 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED):
     자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
 
     반환: model, scaler, feature_cols, ticker_to_id, device, gate, baselines_by_ticker,
-    train_end/val_end, n_train/n_val, n_train_by_ticker."""
+    train_end/val_end, n_train/n_val, n_train_by_ticker, history/best_epoch/best_val_loss/
+    overfit_ratio_at_end(2026-09-14, MLflow 로깅용으로 추가 — train_pooled_transformer가
+    이미 계산해 반환하던 값을 여기서 버리고 있었을 뿐, 학습 로직 자체는 변경 없음)."""
     ref, _ = build_merged_dataset_v2(tickers[0], start_date, end_date)
     train_end, val_end = compute_global_split_dates(ref.index)
 
@@ -265,6 +275,9 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED):
         "train_end": train_end, "val_end": val_end,
         "n_train": len(X_train), "n_val": len(X_val),
         "n_train_by_ticker": n_train_by_ticker,
+        "history": result["history"], "best_epoch": result["best_epoch"],
+        "best_val_loss": result["best_val_loss"],
+        "overfit_ratio_at_end": result["overfit_ratio_at_end"],
     }
 
 
@@ -397,6 +410,51 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, fea
     }
 
 
+def _log_mlflow_run(tickers, version, train_out, gate, skipped, skip_reason=None, prediction_results=None):
+    """일일 실행 결과(학습 곡선, 게이트 판정, 스킵 여부)를 MLflow "일일_자동화" experiment에
+    기록한다. 게이트 통과/미통과/스킵 여부와 무관하게 항상 호출된다 — MLflow는
+    model_predictions(A-1 게이트로 미통과 시 저장 스킵됨)와 달리 "무슨 일이 있었는지 전부
+    보는" 관측 도구이기 때문(2026-09-14, MLflow 통합 설계 결정).
+
+    ⚠️ 이 함수 전체를 하나의 try/except로 감싼다 — MLflow 서버가 꺼져있거나 응답이 없어도
+    파이프라인 본체(학습/예측/DB저장)는 절대 중단되면 안 된다는 요구사항 때문. A-1의
+    예측값 sanity check(잘못된 예측값 자체를 막는 것)와는 성격이 다른 방어 코드다: 이쪽은
+    "로깅이라는 부가 기능의 실패를 흡수"하는 것이 목적이라 실패해도 예외를 다시 던지지
+    않고 경고만 출력한다."""
+    try:
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
+        with mlflow.start_run(run_name=date.today().isoformat()):
+            mlflow.set_tags({"n_tickers": len(tickers), "version": version})
+            mlflow.log_params({
+                "LOOKBACK": LOOKBACK, "D_MODEL": D_MODEL, "NHEAD": NHEAD,
+                "NUM_LAYERS": NUM_LAYERS, "DIM_FEEDFORWARD": DIM_FEEDFORWARD,
+                "DROPOUT": DROPOUT, "EMBEDDING_DIM": EMBEDDING_DIM,
+                "BATCH_SIZE": BATCH_SIZE, "LR": LR, "WEIGHT_DECAY": WEIGHT_DECAY,
+                "MAX_EPOCHS": MAX_EPOCHS, "PATIENCE": PATIENCE, "SEED": SEED,
+            })
+            for epoch, train_loss, val_loss in train_out["history"]:
+                mlflow.log_metric("train_loss", train_loss, step=epoch)
+                mlflow.log_metric("val_loss", val_loss, step=epoch)
+            mlflow.log_metrics({
+                "best_val_loss": train_out["best_val_loss"],
+                "overfit_ratio_at_end": train_out["overfit_ratio_at_end"],
+                "hybrid_rmse": gate["hybrid_rmse"],
+                "garch_rmse": gate["garch_rmse"],
+                "sma_rmse": gate["sma_rmse"],
+                "parkinson_rmse": gate["parkinson_rmse"],
+                "gate_passed": int(gate["passed"]),
+            })
+            if skipped:
+                mlflow.set_tag("skip_reason", skip_reason)
+            elif prediction_results is not None:
+                n_failed = sum(1 for v in prediction_results.values() if isinstance(v, str) and v.startswith("실패"))
+                n_success = len(prediction_results) - n_failed
+                mlflow.log_metrics({"n_predictions_success": n_success, "n_predictions_failed": n_failed})
+    except Exception as e:
+        print(f"⚠️ MLflow 로깅 실패(파이프라인은 계속 진행됩니다) — {e}")
+
+
 def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
     통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> (통과 시에만) 종목별 다음 거래일 예측
@@ -450,6 +508,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         skip_reason = f"배포 게이트 미통과 — 다음 baseline을 이기지 못함: {', '.join(failed_against)}"
         print(f"\n🚫🚫🚫 {skip_reason} 🚫🚫🚫")
         print("🚫 예측 저장을 건너뜁니다 — model_predictions에 이번 실행분 행이 추가되지 않습니다.")
+        _log_mlflow_run(tickers, version, train_out, gate, skipped=True, skip_reason=skip_reason)
         return {"version": version, "gate": gate, "predictions": {}, "skipped": True, "skip_reason": skip_reason}
 
     results = {}
@@ -468,4 +527,5 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     if n_failed:
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
+    _log_mlflow_run(tickers, version, train_out, gate, skipped=False, prediction_results=results)
     return {"version": version, "gate": gate, "predictions": results, "skipped": False}

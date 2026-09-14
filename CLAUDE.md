@@ -753,6 +753,92 @@ GARCH 파라미터 캐시는 재사용만 됐고(재적합 안 함, `fitted_at` 
 새 예측이 전혀 쌓이지 않는 상태가 이어진다** — 며칠 더 지켜보고도 계속 미통과면 원인
 규명을 다음 세션 최우선 순위로 올릴 것.
 
+#### MLflow 통합 — 일일 자동화 로깅 (2026-09-14)
+
+`model_predictions`는 게이트 미통과 시 그날 행이 아예 안 쌓이는 구조(A-1)라 "실제로 무슨
+일이 있었는지"를 계속 볼 수 있는 별도 관측 도구가 필요했다. MLflow를 도입해 매일 실행
+결과(학습 곡선, 게이트 판정, 스킵 여부)를 게이트 통과/미통과/스킵과 **무관하게 항상** 기록한다.
+
+**설계 결정 및 이유**:
+- **백엔드: SQLite**(`mlflow.db`) — 자동화 프로세스의 쓰기와 노트북에서의 UI 조회가 동시에
+  일어날 수 있어 파일 기반 저장소보다 동시 접근에 안전한 SQLite를 선택
+- **서버: 상시 프로세스**로 별도로 띄워둠(파이프라인 실행할 때만 잠깐 켜지는 방식이 아님) —
+  `mlflow_server_start.bat`(프로젝트 루트) 실행, 백엔드 `sqlite:///mlflow.db`, 아티팩트
+  `./mlflow_artifacts`, `--host 0.0.0.0 --port 5000`
+- **Experiment: `일일_자동화`** 하나만 사용, 날짜별로 나누지 않고 매일 run 1개씩 누적(run_name이
+  오늘 날짜, 예: "2026-09-13") — 시계열로 쌓인 run들을 MLflow UI에서 한 experiment 안에서
+  바로 비교하기 위함
+- **tracking URI**: `가격예측_변동성_공통.MLFLOW_TRACKING_URI`, 환경변수 `MLFLOW_TRACKING_URI`로
+  덮어쓸 수 있고 기본값은 `http://127.0.0.1:5000`. 자동화 스크립트는 서버와 같은 컴퓨터에서
+  돌기 때문에 로컬호스트로 충분 — Tailscale 등 외부 경유는 노트북에서 UI로 조회할 때만 쓰는
+  것이고 이 파이프라인 자체와는 무관
+
+**구현 위치**: `가격예측/가격예측_변동성_공통.py`
+- `train_daily_pooled_model()`이 `train_pooled_transformer()`의 반환값 중 그동안 버리고
+  있던 `history`/`best_epoch`/`best_val_loss`/`overfit_ratio_at_end`를 자신의 반환 dict에
+  추가로 담아 전달하도록 수정(학습 로직 자체는 변경 없음 — 이미 계산되고 있던 값을 로깅을
+  위해 밖으로 꺼낸 것뿐)
+- `_log_mlflow_run()` 신규 함수 — 태그(`n_tickers`, `version`, 스킵 시 `skip_reason`),
+  하이퍼파라미터 13개(LOOKBACK/D_MODEL/NHEAD/NUM_LAYERS/DIM_FEEDFORWARD/DROPOUT/
+  EMBEDDING_DIM/BATCH_SIZE/LR/WEIGHT_DECAY/MAX_EPOCHS/PATIENCE/SEED), step별 메트릭
+  (train_loss/val_loss, step=epoch), 단일값 메트릭(best_val_loss, overfit_ratio_at_end,
+  hybrid/garch/sma/parkinson RMSE, gate_passed를 0/1로), 예측까지 완료된 경우 추가로
+  `n_predictions_success`/`n_predictions_failed`를 기록
+- `run_pooled_volatility_pipeline()`의 두 종료 지점(게이트 미통과로 스킵하고 반환하는
+  지점 / 종목별 예측까지 마치고 반환하는 지점) **양쪽 모두에서** `_log_mlflow_run()`을
+  호출 — 코드상 하나의 연속된 run 객체를 분기 너머로 들고 가는 대신, 호출부 두 곳에서
+  각각 완결된 로깅을 하는 방식을 택했다(두 지점은 상호 배타적이라 실행마다 정확히 한 번만
+  호출됨 — 결과적으로 "게이트 결과와 무관하게 항상 정확히 1개의 run이 남는다"는 요구사항은
+  동일하게 충족하면서, 분기를 넘나드는 run 컨텍스트 관리의 복잡도를 피함)
+
+**장애 격리(중요)**: `_log_mlflow_run()` 전체를 하나의 try/except로 감싼다 — MLflow
+서버가 꺼져있거나 응답이 없어도 파이프라인 본체(학습/예측/DB 저장)는 절대 중단되면 안
+된다는 요구사항 때문. 실패 시 콘솔에 경고만 출력하고 계속 진행한다. **A-1의 예측값 sanity
+check와는 성격이 다른 방어 코드**다 — sanity check는 잘못된 예측값 자체를 막는 것이고,
+이쪽은 "로깅이라는 부가 기능의 실패를 흡수"하는 것이 목적이라 항상 무해하게 넘어가야 한다.
+
+**검증(2026-09-14, 로컬에서 MLflow 서버를 직접 띄워 수행)**:
+1. 두 활성 진입점(`가격예측_변동성_공통.py`, `가격예측_변동성_일일수집.py`) import 통과 확인
+2. 서버를 띄운 상태에서 2종목(005930/000660) 파이프라인 실행 → 게이트 미통과로 스킵되는
+   경로 자연 재현 — `일일_자동화` experiment가 자동 생성되고 run 1개 생성, MLflow client로
+   직접 조회해 태그(`skip_reason` 포함)·파라미터 13개·`train_loss`/`val_loss` step별 이력
+   (15 epoch 전부)·단일값 메트릭이 전부 정확히 기록된 것을 확인
+3. **장애 격리 테스트(핵심)**: 서버를 끈 상태에서 같은 2종목 재실행 → 콘솔에
+   "⚠️ MLflow 로깅 실패(파이프라인은 계속 진행됩니다)"만 찍히고 학습·게이트 판정·스킵
+   로직까지 전부 정상 완료(`exit code 0`)됨을 확인 — 이게 이번 통합에서 가장 중요한 검증
+4. 게이트 통과 branch의 `n_predictions_success`/`n_predictions_failed` 로깅은 자연 재현이
+   안 나와(2회 모두 미통과), `_log_mlflow_run()`을 합성(synthetic) `train_out`/`gate`/
+   `prediction_results`로 직접 호출해 해당 브랜치만 별도 검증 — 성공 1건/실패 1건을 넣었을 때
+   메트릭이 정확히 그대로 기록됨을 확인(전체 파이프라인 재학습 없이 신규 코드 경로만 저비용
+   검증)
+5. 기존 `model_predictions` 2026-09-14 target_date 100행이 테스트 전후로 전혀 안 바뀐 것을
+   `SELECT COUNT(*)` 확인(모든 테스트 경로가 게이트 미통과로 스킵되거나 실제 DB 저장 없는
+   합성 호출이라 애초에 저장 경로를 안 탐)
+6. 테스트로 생긴 임시 체크포인트 2개와 `mlflow.db`는 삭제, `checkpoints/pooled_volatility_
+   hybrid/latest.txt`는 그날 실제로 있었던 마지막 정당한 실행(100종목 일일 실행,
+   `20260914_105126`)으로 복원
+
+**기타 변경**: `requirements.txt`에 `mlflow==3.16.0` 등 관련 패키지 추가(`pip freeze`로
+재생성, 기존 컨벤션 유지) — 이 과정에서 `protobuf`가 7.34.1→6.33.6으로 하향됐으나
+`pip check`로 의존성 충돌 없음을 확인. `.gitignore`에 `mlflow.db`/`mlflow_artifacts/`
+추가(로컬 생성물, 기존 컨벤션과 동일하게 커밋 안 함).
+
+⚠️ **주목할 부수 발견**: MLflow 3.16 서버 기동 로그에 "Security middleware enabled with
+default settings (localhost-only). To allow connections from other hosts, use --host 0.0.0.0
+and configure --allowed-hosts and --cors-allowed-origins."가 출력됐다 — `mlflow_server_start.bat`가
+`--host 0.0.0.0`으로 띄우더라도 MLflow 3.x의 신규 보안 미들웨어가 기본적으로 localhost 외
+접속을 막을 수 있다는 뜻으로 읽힌다. 이 프로젝트에서 설계한 대로 Tailscale 경유 원격(노트북)
+접속을 실제로 시도할 때 `--allowed-hosts`/`--cors-allowed-origins` 추가 설정이 필요할 수
+있음 — **아직 실제로 Tailscale 경유 접속을 테스트하지 않았다.** 다음에 원격 조회를 실제로
+써볼 때 확인하고, 막히면 `mlflow_server_start.bat`에 `--allowed-hosts`를 추가할 것.
+
+**schtasks 등록 (준비만 완료, 실행 안 함 — 사람이 직접 실행할지 결정)**: 시스템 시작 시
+1회 실행되는 트리거로 등록하는 명령을 아래에 남겨둔다. 상시 프로세스이므로 매일 트리거가
+아니라 "부팅 시 1회"만 필요하다.
+```
+schtasks /create /tn "MLflow Server" /tr "C:\kch_Final_prj\mlflow_server_start.bat" /sc onstart /ru "%USERNAME%"
+```
+
 > 2026-09-12: 코드 의존성 재검증 후 `가격예측/` 27개 파일을 활성/검증용으로 재분리했다 —
 > 활성 파이프라인이 실제로 참조하는 부분만 원래 자리에 남기고, 참조되지 않는 파일 전체 또는
 > 파일 내 진단 전용 함수는 `가격예측/검증용/`으로 옮겼다(실험 결론 자체는 위 기록대로 유지).
