@@ -32,6 +32,34 @@ def compute_global_split_dates(reference_dates, train_ratio=TRAIN_RATIO, val_rat
     return train_end, val_end
 
 
+def compute_rolling_split_dates(reference_dates, val_days=60, test_days=0):
+    """2026-09-15 단발성 진단용(D-4 후속) — compute_global_split_dates()의 비율(70/15/15)
+    기반 분할은 전체 ~6.6년 데이터 중 val 구간이 거래일 캘린더 앞쪽 절반 근처(실측: 2024년
+    하반기)에 거의 고정되는 부작용이 있다. `--end`를 하루씩 움직여도 val 윈도우 자체는
+    몇 주 단위로만 미세 이동해 "여러 날짜로 반복 검증"의 실효성이 떨어진다(19영업일
+    워크포워드 백테스트에서 실측 확인 — CLAUDE.md "19영업일 워크포워드 백테스트" 절 참고).
+
+    이 함수는 그 대안 가설(val 윈도우를 데이터 끝쪽 최근 구간에 고정하는 롤링 분할이 val
+    게이트 판정을 바꾸는지)을 진단하기 위해 추가했다 — `compute_global_split_dates()`는
+    100종목 검증을 통과한 정본이므로 절대 수정하지 않고 이 함수를 병렬로 추가만 한다.
+
+    train_end를 "마지막 거래일 - val_days(-test_days)" 직전 거래일로 고정한다(비율이
+    아니라 절대 일수 기준). val_days=60 기본값 근거: 거래일 기준 약 3개월(분기) 윈도우 —
+    compute_global_split_dates()의 15% val 비율이 ~6.6년 데이터에서는 약 1년에 해당했던
+    것과 대비해 "최근 국면"만 보도록 훨씬 좁히려는 의도이면서, 동시에 100종목 x 60일 =
+    6,000 val 시퀀스로 RMSE 추정 자체의 통계적 안정성도 확보하려는 절충값이다(값은
+    잠정적 — 재검증 여부가 결정되면 사람이 재검토할 것).
+
+    반환: (train_end, val_end) — compute_global_split_dates()와 동일한 시그니처/의미."""
+    dates = pd.Series(sorted(pd.DatetimeIndex(reference_dates).unique()))
+    n = len(dates)
+    if val_days + test_days >= n:
+        raise ValueError(f"val_days+test_days({val_days + test_days})가 전체 거래일 수({n})보다 많거나 같음")
+    train_end = dates.iloc[n - val_days - test_days - 1]
+    val_end = dates.iloc[n - test_days - 1]
+    return train_end, val_end
+
+
 def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=build_merged_dataset_v2):
     """종목별 V2 피처 계산 + 종목별 시퀀스 구성 + 전역 날짜 컷 분할 + pooling.
 
