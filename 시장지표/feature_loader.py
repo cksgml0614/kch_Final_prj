@@ -111,13 +111,35 @@ def get_indicator_level_series(indicator_code, end_date):
     )
 
 
-def get_features(ticker, start_date, end_date):
+def load_indicator_cache(end_date):
+    """INDICATOR_CODES 9종 전체의 원자료(_load_indicator_series 결과)를 한 번에 조회해
+    {code: DataFrame} 딕셔너리로 반환한다(2026-09-20, 100종목 pooled 파이프라인 성능
+    최적화용 — 거시지표는 종목과 무관해 매 종목 재조회가 낭비였다).
+
+    ⚠️ 이 캐시는 end_date에 종속적이다(published_date <= end_date 필터). get_features()에
+    precomputed_indicators로 넘길 때는 반드시 동일한 end_date로 호출해야 한다 — 여기서
+    end_date 일치 여부를 검증하지 않으므로 호출부(pooled_dataset.py 등, 100종목이 전부 같은
+    start_date/end_date를 쓰는 경우)가 책임진다.
+
+    반환: {indicator_code: DataFrame(_load_indicator_series와 동일 스키마)}"""
+    with get_db_connection() as conn:
+        if not conn:
+            raise RuntimeError("DB 연결 실패")
+        with conn.cursor() as cur:
+            return {code: _load_indicator_series(cur, code, end_date) for code in INDICATOR_CODES}
+
+
+def get_features(ticker, start_date, end_date, precomputed_indicators=None):
     """미래 정보 누수 없이 종목 OHLCV + 시장지표 9종을 결합한 피처 행렬을 반환한다.
 
     인덱스: 거래일 (daily_stock_prices 기준)
     컬럼: open, high, low, close, volume + INDICATOR_CODES 9개
     각 지표는 published_date < 거래일인 값 중 최신값 (동일자 공표분 제외).
-    """
+
+    precomputed_indicators(선택, 2026-09-20 추가): load_indicator_cache(end_date)의 반환값을
+    그대로 넘기면 지표 9종의 DB 조회를 생략하고 캐시를 재사용한다 — 조인 로직(_asof_join,
+    종목별 trading_dates 기준)은 동일하게 그대로 수행되므로 결과는 완전히 동일하다. None이면
+    기존과 똑같이 매번 새로 조회한다(하위 호환, 기본값)."""
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패")
@@ -130,7 +152,10 @@ def get_features(ticker, start_date, end_date):
             trading_dates = pd.Series(features.index)
 
             for code in INDICATOR_CODES:
-                indicator_df = _load_indicator_series(cur, code, end_date)
+                if precomputed_indicators is not None:
+                    indicator_df = precomputed_indicators[code]
+                else:
+                    indicator_df = _load_indicator_series(cur, code, end_date)
                 features[code] = _asof_join(trading_dates, indicator_df).values
 
     return features

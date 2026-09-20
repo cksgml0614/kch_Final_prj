@@ -55,8 +55,16 @@ def _excess_return_z(stock_cr, kospi_cr, window=WINDOW):
     return excess_return, sigma, z
 
 
-def build_momentum_feature(ticker, start_date, end_date, window=WINDOW):
+def build_momentum_feature(ticker, start_date, end_date, window=WINDOW, raw=None, true_kospi=None):
     """target 행 t에 배치할 excess_return_z_(t-1) 피처를 계산한다.
+
+    raw(선택, 2026-09-20 추가): 호출부가 이미 계산해둔 get_features(ticker, start_date,
+    end_date) 결과를 넘기면 재계산하지 않는다 — 같은 (ticker, start_date, end_date)로 계산된
+    것이어야 한다(호출부 책임). None이면 기존과 동일하게 내부에서 계산한다.
+    true_kospi(선택, 2026-09-20 추가): load_true_kospi(start_date, end_date) 결과를 넘기면
+    재계산하지 않는다 — 종목과 무관한 값이라 100종목이 그대로 공유할 수 있다(단, start_date/
+    end_date는 이 호출과 같아야 한다). None이면 기존과 동일하게 내부에서 계산한다.
+    이 두 인자를 넘기지 않으면(둘 다 None) 이 함수의 동작은 리팩터링 이전과 완전히 동일하다.
 
     Returns
     -------
@@ -64,11 +72,13 @@ def build_momentum_feature(ticker, start_date, end_date, window=WINDOW):
     diag : dict — 검증/비교용 중간 산출물 (raw, true_kospi, excess_return, sigma, z,
            wrong_momentum(잘못된 방식 비교용))
     """
-    raw = get_features(ticker, start_date, end_date)
+    if raw is None:
+        raw = get_features(ticker, start_date, end_date)
     stock_cr = raw["close"].pct_change()
 
     # --- 올바른 방식: market_indicators를 date 기준 직접 조회 ---
-    true_kospi = load_true_kospi(start_date, end_date)
+    if true_kospi is None:
+        true_kospi = load_true_kospi(start_date, end_date)
     kospi_aligned = true_kospi.reindex(raw.index)
     n_missing = int(kospi_aligned.isna().sum())
     kospi_cr = kospi_aligned.pct_change()

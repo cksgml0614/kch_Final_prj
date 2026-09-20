@@ -149,7 +149,9 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
 
     train_returns = returns[returns.index <= train_end]
     am_train = arch_model(train_returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
-    res_train = am_train.fit(disp="off")
+    # cov_type="classic" — 표준오차(샌드위치 공분산)는 안 쓰고 params 점추정치만 쓰므로
+    # 기본값 "robust"의 추가 계산 비용을 뺀다(2026-09-20).
+    res_train = am_train.fit(disp="off", cov_type="classic")
     params = res_train.params
     _save_garch_cache(ticker, params, train_end)
     return params, True
@@ -227,10 +229,14 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED):
     for ticker in tickers:
         baselines_by_ticker[ticker] = compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end)
 
-    def hybrid_build_fn(ticker, s, e):
+    def hybrid_build_fn(ticker, s, e, precomputed_indicators=None, true_kospi=None):
+        # precomputed_indicators/true_kospi(2026-09-20): pooled_dataset.build_pooled_sequences가
+        # 이 시그니처를 보고(inspect) 거시지표 캐시를 종목 루프 시작 전에 한 번만 만들어 넘긴다
+        # — 성능 최적화일 뿐 조인/계산 로직은 동일(값 변경 없음 검증 완료).
         b = baselines_by_ticker[ticker]
         return build_merged_dataset_v2_volatility_hybrid(
             ticker, s, e, train_end, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
+            precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
         )
 
     splits, feature_cols, ticker_to_id, (train_end2, val_end2) = build_pooled_sequences(

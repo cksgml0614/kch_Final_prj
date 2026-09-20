@@ -51,11 +51,22 @@ def build_merged_dataset(ticker, start_date, end_date):
                      "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
 
 
-def build_merged_dataset_v2(ticker, start_date, end_date):
+def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None):
     """build_merged_dataset과 동일하나 build_base_dataset_v2(정상성 재설계 피처)를 쓴다.
-    momentum(excess_return_z_lag1)은 이미 정상성 있는 z-score라 변경 없이 그대로 재사용."""
-    base, raw = build_base_dataset_v2(ticker, start_date, end_date)
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date)
+    momentum(excess_return_z_lag1)은 이미 정상성 있는 z-score라 변경 없이 그대로 재사용.
+
+    precomputed_indicators/true_kospi(선택, 2026-09-20 추가, 성능 최적화 — 100종목 pooled
+    파이프라인에서 종목과 무관한 데이터를 종목마다 재조회하던 것을 없앤다): 각각 시장지표.
+    feature_loader.load_indicator_cache(end_date) / momentum_feature.load_true_kospi(...)의
+    결과를 그대로 전달. 이전에는 이 함수가 get_features()를 build_base_dataset_v2 안에서
+    한 번, build_momentum_feature 안에서 또 한 번 — 종목당 총 두 번 호출했다. 여기서는
+    build_base_dataset_v2가 반환하는 raw를 그대로 build_momentum_feature에 넘겨 get_features
+    호출을 종목당 1회로 줄인다. 조인/계산 로직 자체는 전혀 바뀌지 않는다 — raw가 언제나
+    build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators)와 정확히
+    같은 값이기 때문(캐시가 있든 없든 get_features()의 반환값은 동일함이 캐시 추가 시점에
+    검증됨). 둘 다 None이면 기존과 완전히 동일하게 동작한다."""
+    base, raw = build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators)
+    momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
 
     merged = base.copy()
     merged["excess_return_z_lag1"] = momentum
@@ -67,14 +78,18 @@ def build_merged_dataset_v2(ticker, start_date, end_date):
                      "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
 
 
-def build_merged_dataset_v2_volatility(ticker, start_date, end_date):
+def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None):
     """build_merged_dataset_v2의 변동성 버전(2026-09-06, Task T 변동성 예측). target이
     |로그수익률x100|이고 피처에 recent_vol_ma20이 추가된 build_base_dataset_v2_volatility를
     쓴다는 점만 다르다 — momentum(excess_return_z_lag1)은 방향/변동성 어느 쪽이든 "종목의
     시장 대비 초과수익률 흐름"이라는 같은 의미의 입력 피처라 그대로 재사용한다(target 정의와
-    무관, 재계산 불필요)."""
-    base, raw = build_base_dataset_v2_volatility(ticker, start_date, end_date)
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date)
+    무관, 재계산 불필요).
+
+    precomputed_indicators/true_kospi(선택, 2026-09-20): build_merged_dataset_v2와 동일한
+    성능 최적화 — get_features() 종목당 중복 호출 제거. 둘 다 None이면 기존과 동일."""
+    base, raw = build_base_dataset_v2_volatility(ticker, start_date, end_date,
+                                                  precomputed_indicators=precomputed_indicators)
+    momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
 
     merged = base.copy()
     merged["excess_return_z_lag1"] = momentum
@@ -87,7 +102,8 @@ def build_merged_dataset_v2_volatility(ticker, start_date, end_date):
 
 
 def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, train_end,
-                                               precomputed_sigma=None, garch_params=None):
+                                               precomputed_sigma=None, garch_params=None,
+                                               precomputed_indicators=None, true_kospi=None):
     """build_merged_dataset_v2_volatility(14피처) + GARCH(1,1) 조건부 σ를 15번째 피처로
     추가한 하이브리드 버전(2026-09-06) — GARCH가 이미 잡아낸 "어제 변동성→오늘 변동성"
     persistence 신호를 Transformer가 처음부터 재학습하지 않고 그대로 입력받게 하기 위함.
@@ -107,8 +123,14 @@ def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, trai
 
     garch_baseline 함수들을 그대로 재사용한다 — 여기서 지연 임포트하는 이유는 garch_baseline.py가
     이미 split_dataset.build_merged_dataset_v2를 임포트하고 있어(분할 경계 계산용), 모듈
-    최상단에서 서로를 임포트하면 순환 임포트가 되기 때문이다."""
-    merged, meta = build_merged_dataset_v2_volatility(ticker, start_date, end_date)
+    최상단에서 서로를 임포트하면 순환 임포트가 되기 때문이다.
+
+    precomputed_indicators/true_kospi(선택, 2026-09-20): build_merged_dataset_v2_volatility에
+    그대로 전달(성능 최적화, 결과는 동일). None이면 기존과 동일."""
+    merged, meta = build_merged_dataset_v2_volatility(
+        ticker, start_date, end_date,
+        precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
+    )
 
     if precomputed_sigma is not None:
         sigma_full, params = precomputed_sigma, garch_params
