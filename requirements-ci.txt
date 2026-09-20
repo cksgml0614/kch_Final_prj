@@ -1,12 +1,19 @@
-# requirements-ci.txt — GitHub Actions 일일 데이터 수집 워크플로 전용 최소 의존성
-# (.github/workflows/daily_data_collection.yml, 2026-09-20).
+# requirements-ci.txt — GitHub Actions 워크플로 전용 최소 의존성.
+# 사용처: .github/workflows/daily_data_collection.yml (2026-09-20),
+#         .github/workflows/monthly_universe_check.yml (2026-09-20, 종목_월간갱신.py --dry-run)
 #
 # requirements.txt를 그대로 쓰지 않는 이유: requirements.txt는 torch/torchvision/torchaudio를
 # +cu121(CUDA 12.1 전용 빌드, download.pytorch.org 전용 인덱스)로 고정하고 있어 GitHub
 # Actions의 GPU 없는 표준 러너(ubuntu-latest)에서는 `pip install -r requirements.txt` 자체가
-# 실패한다. 이 워크플로는 가격/지표 수집만 하고 모델 학습은 하지 않으므로(학습은 로컬 유지)
-# torch 계열이 애초에 필요 없다 — 주가_일일수집.py/지표_일일수집.py가 실제로 import하는
-# 패키지만 골라 별도 파일로 둔다. 버전은 requirements.txt와 동일하게 맞춘다.
+# 실패한다. 버전은 requirements.txt와 동일하게 맞춘다(torch만 +cpu 빌드로 교체).
+#
+# 2026-09-20 추가(monthly_universe_check.yml용): 종목_월간갱신.py가 가격예측_변동성_공통.py를
+# import하는데, 그 모듈이 최상단에서 torch/mlflow/arch를 무조건 import한다(실제로 GARCH
+# 적합이나 모델 학습을 실행하지 않아도 import 시점에 걸림) — daily_data_collection.yml은
+# 이 셋을 안 쓰지만, 두 워크플로가 이 파일을 공유하는 쪽을 택해(사람 지시) 같이 설치된다.
+# torch는 +cu121 대신 +cpu 빌드를 pytorch 공식 CPU 인덱스에서 받는다(GPU 없는 러너용,
+# 모델 학습을 안 하므로 CPU 빌드로 충분 — import와 CPU 텐서 연산만 필요).
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 finance-datareader==0.9.110
 numpy==2.4.3
@@ -15,3 +22,6 @@ psycopg==3.3.3
 psycopg-binary==3.3.3
 python-dotenv==1.2.2
 requests==2.32.3
+torch==2.5.1+cpu
+mlflow==3.16.0
+arch==8.0.0
