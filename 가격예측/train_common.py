@@ -479,3 +479,238 @@ def train_pooled_transformer(X_train, y_train, tid_train, X_val, y_val, tid_val,
         "val_loader": val_loader,
         "overfit_ratio_at_end": last_val_loss / last_train_loss if last_train_loss > 0 else float("inf"),
     }
+
+
+# ── 급변 구간 가중 손실 실험(2026-09-20) ─────────────────────────────────────────
+# train_pooled_transformer()/run_pooled_epoch()/make_pooled_loader()는 건드리지 않는다(운영
+# 파이프라인·기존 실험 재현성 보존) — 가중 손실은 아래 3개 함수를 새로 추가해 병렬로 둔다.
+# 가중치는 train 배치의 손실 계산에만 관여하고, val 평가/조기종료는 기존과 동일한 평이한
+# MSE를 그대로 쓴다(baseline과 공정 비교하려면 "무엇이 좋은 모델인가"의 잣대 자체는 같아야
+# 하므로 — 가중치는 학습을 유도하는 수단일 뿐 평가 기준까지 바꾸는 것이 아니다).
+
+def make_weighted_pooled_loader(X, y, ticker_ids, sample_weight, batch_size, shuffle):
+    """make_pooled_loader()와 동일하되 종목 배열 뒤에 sample_weight(float32, y와 같은 길이)를
+    4번째 텐서로 추가한다 — train 로더 전용(val은 가중치가 필요 없어 make_pooled_loader를
+    그대로 쓴다)."""
+    ds = TensorDataset(
+        torch.from_numpy(X), torch.from_numpy(y), torch.from_numpy(ticker_ids),
+        torch.from_numpy(sample_weight.astype(np.float32)),
+    )
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
+
+
+def run_pooled_epoch_weighted_train(model, loader, optimizer, device):
+    """run_pooled_epoch(train_mode=True)의 가중 손실판. loss = mean(weight_i * (pred_i-y_i)^2)
+    — 가중치 합으로 나누는 정규화 없이 사용자가 지정한 식 그대로(단순 산술평균에 weight를
+    곱한 항을 평균) 계산한다. reduction='none'으로 원소별 제곱오차를 구한 뒤 배치 안에서
+    weight를 곱하고 평균 낸다."""
+    model.train()
+    criterion = nn.MSELoss(reduction="none")
+    total_loss, n = 0.0, 0
+    for xb, yb, tid, wb in loader:
+        xb, yb, tid, wb = xb.to(device), yb.to(device), tid.to(device), wb.to(device)
+        pred = model(xb, tid)
+        per_sample = criterion(pred, yb)
+        loss = (wb * per_sample).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * len(xb)
+        n += len(xb)
+    return total_loss / n
+
+
+def train_pooled_transformer_weighted(X_train, y_train, tid_train, sample_weight_train,
+                                       X_val, y_val, tid_val,
+                                       n_features, lookback, num_stocks, embedding_dim,
+                                       d_model, nhead, num_layers, dim_feedforward, dropout,
+                                       batch_size, lr, weight_decay, smoke_epochs, max_epochs, patience,
+                                       device, seed=42, verbose=True, label=""):
+    """train_pooled_transformer()의 가중 손실판 — train 손실만 sample_weight_train으로
+    가중한다(급변 구간 대응 실험, 2026-09-20). sample_weight_train이 전부 1.0이면
+    train_pooled_transformer()와 수학적으로 동일한 손실이 나온다(다만 baseline 비교에는
+    원본 train_pooled_transformer를 그대로 쓰는 쪽을 권장 — 이 함수가 시드/배치 순서까지
+    완전히 동일하다는 보장은 별도로 확인하지 않았다).
+
+    스모크 테스트 단계도 가중 손실을 쓴다(본 학습과 동일 손실 함수여야 스모크가 실제로
+    검증하는 의미가 있음). val 평가/조기종료 기준은 run_pooled_epoch()의 평이한 MSE 그대로
+    — test는 절대 건드리지 않는다(train/val 로더만 받는다)."""
+    set_seed(seed)
+    model = PooledTransformerRegressor(n_features, lookback, num_stocks, embedding_dim,
+                                        d_model, nhead, num_layers, dim_feedforward, dropout).to(device)
+
+    train_loader = make_weighted_pooled_loader(X_train, y_train, tid_train, sample_weight_train,
+                                                batch_size, shuffle=True)
+    val_loader = make_pooled_loader(X_val, y_val, tid_val, batch_size, shuffle=False)
+
+    val_criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    history = []
+    prefix = f"[{label}] " if label else ""
+
+    if verbose:
+        print(f"{prefix}스모크 테스트 ({smoke_epochs} epoch, 가중 손실)")
+    for epoch in range(1, smoke_epochs + 1):
+        train_loss = run_pooled_epoch_weighted_train(model, train_loader, optimizer, device)
+        val_loss = run_pooled_epoch(model, val_loader, val_criterion, optimizer, device, False)
+        history.append((epoch, train_loss, val_loss))
+        finite = np.isfinite(train_loss) and np.isfinite(val_loss)
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f} val_loss={val_loss:.6f} finite={finite}")
+        if not finite:
+            raise RuntimeError(f"{label}: 스모크 테스트 중 loss가 NaN/Inf")
+
+    if verbose:
+        print(f"{prefix}본 학습 (최대 {max_epochs} epoch, patience={patience})")
+    best_val_loss = float("inf")
+    best_state = None
+    best_epoch = smoke_epochs
+    patience_counter = 0
+
+    for epoch in range(smoke_epochs + 1, smoke_epochs + 1 + max_epochs):
+        train_loss = run_pooled_epoch_weighted_train(model, train_loader, optimizer, device)
+        val_loss = run_pooled_epoch(model, val_loader, val_criterion, optimizer, device, False)
+        history.append((epoch, train_loss, val_loss))
+        marker = ""
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch
+            patience_counter = 0
+            marker = " *best*"
+        else:
+            patience_counter += 1
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f} val_loss={val_loss:.6f}{marker}")
+        if patience_counter >= patience:
+            if verbose:
+                print(f"{prefix}  early stopping (patience={patience}, best epoch={best_epoch})")
+            break
+
+    model.load_state_dict(best_state)
+    last_epoch, last_train_loss, last_val_loss = history[-1]
+
+    return {
+        "model": model,
+        "history": history,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "last_epoch": last_epoch,
+        "last_train_loss": last_train_loss,
+        "last_val_loss": last_val_loss,
+        "val_loader": val_loader,
+        "overfit_ratio_at_end": last_val_loss / last_train_loss if last_train_loss > 0 else float("inf"),
+    }
+
+
+# ── 비대칭(quantile/pinball) 손실 실험(2026-09-20) ────────────────────────────────
+# 가중 MSE(train_pooled_transformer_weighted)·isotonic 후처리가 모두 "레벨만 밀어올리는"
+# 방식이었던 것과 달리, pinball loss는 손실 함수 자체가 샘플 단위로 비대칭이다 — 이미 잘
+# 맞히는 샘플은 (y-pred)가 작아 어느 쪽 항을 골라도 손실이 작고, 과소예측 중인 샘플만
+# (y-pred)>0 쪽 기울기(tau)가 걸려 크게 벌점을 받는다. 그룹 단위로 가중치를 미리 정해야 했던
+# 위 두 방법과 달리 그룹 라벨링이 전혀 필요 없다.
+#
+# val 손실도 이번엔 plain MSE가 아니라 같은 tau의 pinball loss를 쓴다 — 가중 MSE 실험에서는
+# train/val이 여전히 "같은 MSE라는 잣대"를 공유했지만, pinball loss로 학습된 모델은 애초에
+# 평균이 아니라 tau번째 조건부 분위수를 맞히도록 최적화되므로, 모델 선택(조기종료) 기준도
+# 그 목적함수와 일치시켜야 한다 — plain MSE로 모델을 고르면 "이 모델이 tau-분위수를 얼마나
+# 잘 맞히는지"와 다른 기준으로 최고 체크포인트를 고르게 된다.
+
+def pinball_loss(pred, y, tau):
+    """loss_i = max(tau*(y_i-pred_i), (tau-1)*(y_i-pred_i)). tau>0.5면 과소예측(pred<y)
+    쪽에 더 큰 기울기(tau)가, 과대예측(pred>y) 쪽에는 더 작은 기울기(1-tau)가 걸린다."""
+    diff = y - pred
+    return torch.maximum(tau * diff, (tau - 1) * diff)
+
+
+def run_pooled_epoch_pinball(model, loader, optimizer, device, tau, train_mode):
+    """run_pooled_epoch()의 pinball loss판 — criterion 대신 tau를 받는다는 점만 다르다."""
+    model.train(train_mode)
+    total_loss, n = 0.0, 0
+    with torch.set_grad_enabled(train_mode):
+        for xb, yb, tid in loader:
+            xb, yb, tid = xb.to(device), yb.to(device), tid.to(device)
+            pred = model(xb, tid)
+            loss = pinball_loss(pred, yb, tau).mean()
+            if train_mode:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            total_loss += loss.item() * len(xb)
+            n += len(xb)
+    return total_loss / n
+
+
+def train_pooled_transformer_pinball(X_train, y_train, tid_train, X_val, y_val, tid_val, tau,
+                                      n_features, lookback, num_stocks, embedding_dim,
+                                      d_model, nhead, num_layers, dim_feedforward, dropout,
+                                      batch_size, lr, weight_decay, smoke_epochs, max_epochs, patience,
+                                      device, seed=42, verbose=True, label=""):
+    """train_pooled_transformer()의 pinball loss판 — train/val 둘 다 같은 tau의 pinball
+    loss로 학습·모델선택한다(위 헤더 설명 참고). test는 절대 건드리지 않는다."""
+    set_seed(seed)
+    model = PooledTransformerRegressor(n_features, lookback, num_stocks, embedding_dim,
+                                        d_model, nhead, num_layers, dim_feedforward, dropout).to(device)
+
+    train_loader = make_pooled_loader(X_train, y_train, tid_train, batch_size, shuffle=True)
+    val_loader = make_pooled_loader(X_val, y_val, tid_val, batch_size, shuffle=False)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    history = []
+    prefix = f"[{label}] " if label else ""
+
+    if verbose:
+        print(f"{prefix}스모크 테스트 ({smoke_epochs} epoch, pinball tau={tau})")
+    for epoch in range(1, smoke_epochs + 1):
+        train_loss = run_pooled_epoch_pinball(model, train_loader, optimizer, device, tau, True)
+        val_loss = run_pooled_epoch_pinball(model, val_loader, optimizer, device, tau, False)
+        history.append((epoch, train_loss, val_loss))
+        finite = np.isfinite(train_loss) and np.isfinite(val_loss)
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f} val_loss={val_loss:.6f} finite={finite}")
+        if not finite:
+            raise RuntimeError(f"{label}: 스모크 테스트 중 loss가 NaN/Inf")
+
+    if verbose:
+        print(f"{prefix}본 학습 (최대 {max_epochs} epoch, patience={patience})")
+    best_val_loss = float("inf")
+    best_state = None
+    best_epoch = smoke_epochs
+    patience_counter = 0
+
+    for epoch in range(smoke_epochs + 1, smoke_epochs + 1 + max_epochs):
+        train_loss = run_pooled_epoch_pinball(model, train_loader, optimizer, device, tau, True)
+        val_loss = run_pooled_epoch_pinball(model, val_loader, optimizer, device, tau, False)
+        history.append((epoch, train_loss, val_loss))
+        marker = ""
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch
+            patience_counter = 0
+            marker = " *best*"
+        else:
+            patience_counter += 1
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f} val_loss={val_loss:.6f}{marker}")
+        if patience_counter >= patience:
+            if verbose:
+                print(f"{prefix}  early stopping (patience={patience}, best epoch={best_epoch})")
+            break
+
+    model.load_state_dict(best_state)
+    last_epoch, last_train_loss, last_val_loss = history[-1]
+
+    return {
+        "model": model,
+        "history": history,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "last_epoch": last_epoch,
+        "last_train_loss": last_train_loss,
+        "last_val_loss": last_val_loss,
+        "val_loader": val_loader,
+        "overfit_ratio_at_end": last_val_loss / last_train_loss if last_train_loss > 0 else float("inf"),
+    }
