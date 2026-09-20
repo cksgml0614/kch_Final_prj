@@ -16,6 +16,7 @@
 # 이 파일(및 이 파일을 참조하는 검증용/의 다른 진단 스크립트)뿐이라 문제 없다.
 
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 
 import numpy as np
@@ -53,7 +54,9 @@ def fit_and_forecast_garch(returns, train_end, test_start_first_date):
     """
     train_returns = returns[returns.index <= train_end]
     am_train = arch_model(train_returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
-    res_train = am_train.fit(disp="off")
+    # cov_type="classic" — 표준오차(샌드위치 공분산)는 안 쓰고 params 점추정치만 쓰므로
+    # 기본값 "robust"의 추가 계산 비용을 뺀다(2026-09-20, 100종목 GARCH 병렬화 작업 중 발견).
+    res_train = am_train.fit(disp="off", cov_type="classic")
 
     target_pos = returns.index.get_loc(test_start_first_date)
     start_pos = max(target_pos - 1, 0)
@@ -78,6 +81,36 @@ def compute_full_period_sigma(ticker, start_date, end_date, train_end):
     close = load_close_prices(ticker, start_date, end_date)
     returns = compute_log_returns_pct(close)
     return fit_and_forecast_garch(returns, train_end, returns.index[0])
+
+
+def _fit_one_ticker_for_pool(args):
+    """ProcessPoolExecutor용 최상위 워커 함수(피클 가능해야 해서 top-level에 둔다).
+    반환: (ticker, sigma_full, params) — precompute_garch_parallel()에서만 호출한다."""
+    ticker, start_date, end_date, train_end = args
+    sigma, params = compute_full_period_sigma(ticker, start_date, end_date, train_end)
+    return ticker, sigma, params
+
+
+def precompute_garch_parallel(tickers, start_date, end_date, train_end, max_workers=None):
+    """compute_full_period_sigma()를 종목별로 병렬 실행한다(2026-09-20, ablation 실험에서
+    100종목 순차 적합이 병목으로 확인돼 추가). 종목별 GARCH(1,1) MLE 적합은 서로 완전히
+    독립(각자 자기 종목 수익률만 사용)이라 안전하게 병렬화된다.
+
+    ⚠️ Windows는 기본이 spawn 방식이라, 이 함수를 호출하는 스크립트는 반드시
+    `if __name__ == "__main__":` 가드 안에서 호출해야 한다(가드 밖에서 부르면 자식 프로세스가
+    모듈을 재임포트하면서 무한 재귀적으로 프로세스를 또 만든다). `load_close_prices()`가 호출마다
+    새 DB 커넥션을 여는 구조(db_manager.get_db_connection())라 프로세스 간 커넥션 공유 문제는
+    없다.
+
+    max_workers=None이면 os.cpu_count() 전부 사용(ProcessPoolExecutor 기본값)."""
+    args = [(t, start_date, end_date, train_end) for t in tickers]
+    cache = {}
+    with ProcessPoolExecutor(max_workers=max_workers) as ex:
+        for i, (ticker, sigma, params) in enumerate(ex.map(_fit_one_ticker_for_pool, args), 1):
+            cache[ticker] = (sigma, params)
+            if i % 20 == 0 or i == len(tickers):
+                print(f"  GARCH sigma 병렬 사전계산 {i}/{len(tickers)}", flush=True)
+    return cache
 
 
 def main():
