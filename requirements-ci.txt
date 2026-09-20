@@ -1,0 +1,17 @@
+# requirements-ci.txt — GitHub Actions 일일 데이터 수집 워크플로 전용 최소 의존성
+# (.github/workflows/daily_data_collection.yml, 2026-09-20).
+#
+# requirements.txt를 그대로 쓰지 않는 이유: requirements.txt는 torch/torchvision/torchaudio를
+# +cu121(CUDA 12.1 전용 빌드, download.pytorch.org 전용 인덱스)로 고정하고 있어 GitHub
+# Actions의 GPU 없는 표준 러너(ubuntu-latest)에서는 `pip install -r requirements.txt` 자체가
+# 실패한다. 이 워크플로는 가격/지표 수집만 하고 모델 학습은 하지 않으므로(학습은 로컬 유지)
+# torch 계열이 애초에 필요 없다 — 주가_일일수집.py/지표_일일수집.py가 실제로 import하는
+# 패키지만 골라 별도 파일로 둔다. 버전은 requirements.txt와 동일하게 맞춘다.
+
+finance-datareader==0.9.110
+numpy==2.4.3
+pandas==2.2.3
+psycopg==3.3.3
+psycopg-binary==3.3.3
+python-dotenv==1.2.2
+requests==2.32.3

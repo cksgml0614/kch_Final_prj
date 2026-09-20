@@ -1,0 +1,45 @@
+# .github/workflows/daily_data_collection.yml — 일일 시세/거시지표 수집 → 클라우드(Neon) DB
+# (2026-09-20, A-7). 모델 학습은 여기서 하지 않는다 — 학습은 로컬(daily_pipeline.bat)에
+# 그대로 남긴다. 이 워크플로는 딱 두 스크립트만 실행한다:
+#   - 주가데이터.주가_일일수집  (구 FinanceData_load.py의 후신, 2026-08-23 분리)
+#   - 시장지표.지표_일일수집    (구 market_index_load.py+ecos_load.py의 후신, 2026-08-23 분리)
+# ⚠️ 사용자가 지시한 원 파일명(FinanceData_load.py/market_index_load.py/ecos_load.py)은
+# CLAUDE.md 기록대로 2026-08-23에 이미 삭제되고 위 두 스크립트로 대체됐다 — 존재하지 않는
+# 파일을 다시 만들지 않고 현재 활성 파일을 그대로 사용한다.
+#
+# 의존성은 requirements.txt가 아니라 requirements-ci.txt를 쓴다(그 파일 상단 주석 참고 —
+# requirements.txt의 torch+cu121 GPU 전용 빌드가 이 러너에서 설치 자체가 안 됨).
+
+name: 일일 시세/거시지표 수집
+
+on:
+  schedule:
+    # UTC 11:00 = KST 20:00 (로컬에서 실측한 "FDR 종가 데이터가 안정적으로 조회된 시각
+    # 19:40대"보다 여유를 둠 — CLAUDE.md "일일 파이프라인 통합 실행 스크립트" 절 참고)
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    env:
+      USE_CLOUD_DB: "true"
+      NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
+      ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치 (CI 전용 최소 세트)
+        run: pip install -r requirements-ci.txt
+
+      - name: 주가 일일수집
+        run: python -m 주가데이터.주가_일일수집
+
+      - name: 지표 일일수집 (FDR 3종 + ECOS 6종)
+        run: python -m 시장지표.지표_일일수집
