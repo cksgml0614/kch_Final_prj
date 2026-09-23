@@ -16,7 +16,7 @@ on:
   schedule:
     # UTC 11:00 = KST 20:00 (로컬에서 실측한 "FDR 종가 데이터가 안정적으로 조회된 시각
     # 19:40대"보다 여유를 둠 — CLAUDE.md "일일 파이프라인 통합 실행 스크립트" 절 참고)
-    - cron: "0 11 * * *"
+    - cron: "54 10 * * *"
   workflow_dispatch: {}
 
 jobs:
