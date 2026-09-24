@@ -81,6 +81,37 @@ EMBEDDING_DIM = 20  # test_evaluation_pooled100_hybrid.EMBEDDING_DIM_100과 동�
 # 위 헤더 설명 참고).
 GARCH_REFIT_MAX_AGE_DAYS = 30
 
+# ── 아키텍처 스위치 (2026-09-24, LSTM/GAF+CNN 등 향후 아키텍처 추가 대비 구조만 마련) ──
+# 지금은 "transformer" 하나뿐이지만, MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
+# 고르는 자리를 미리 만들어둔다. 새 아키텍처를 추가할 때 손대야 하는 곳은 이 세 곳뿐이다:
+#   1) train_common.py에 그 아키텍처용 train_pooled_<arch>() 학습 함수 추가 — 시그니처와
+#      반환값(dict: model/history/best_epoch/best_val_loss/val_loader/overfit_ratio_at_end)을
+#      train_pooled_transformer()와 동일하게 맞추고, 모델의 forward(x, ticker_ids)도 동일
+#      인터페이스를 지켜야 한다(predict_and_save_for_ticker가 이 인터페이스로 범용 호출한다).
+#   2) model.py에 Pooled<Arch>Regressor 클래스 추가 + train_common._MODEL_CLASSES에 등록
+#      (지금은 daily 파이프라인이 "매일 전체 재학습" 원칙이라 load_checkpoint()를 안 거치지만,
+#      나중에 체크포인트를 불러와 쓰는 경로가 생기면 이 등록이 필요해진다)
+#   3) 아래 _ARCHITECTURES에 항목 추가
+# 하이퍼파라미터 블록(D_MODEL 등)은 지금은 transformer 전용이라 그대로 둔다 — 아키텍처마다
+# 하이퍼파라미터 셋이 달라지면 그때 _ARCHITECTURES 항목별로 분리한다.
+MODEL_ARCHITECTURE = os.environ.get("MODEL_ARCHITECTURE", "transformer").strip().lower()
+
+_ARCHITECTURES = {
+    "transformer": {
+        "model_class_name": "PooledTransformerRegressor",
+        "train_fn": train_pooled_transformer,
+    },
+}
+
+
+def _get_architecture_config(name):
+    if name not in _ARCHITECTURES:
+        raise ValueError(
+            f"알 수 없는 MODEL_ARCHITECTURE={name!r} (지원: {list(_ARCHITECTURES)})"
+        )
+    return _ARCHITECTURES[name]
+
+
 # 이 pooled 모델이 종목 하나를 학습에 포함시키기 위한 최소 train 시퀀스 수. 2026-09-07 100종목
 # 확장 세션 실측 기준: 443060(HD현대마린솔루션, 실제 train 시퀀스 13개)은 그대로 포함해도
 # 문제가 없었고, 0126Z0/064400(train 0개)은 애초에 종목 리스트에서 제외했다 — "13은 포함,
@@ -222,6 +253,9 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED):
     train_end/val_end, n_train/n_val, n_train_by_ticker, history/best_epoch/best_val_loss/
     overfit_ratio_at_end(2026-09-14, MLflow 로깅용으로 추가 — train_pooled_transformer가
     이미 계산해 반환하던 값을 여기서 버리고 있었을 뿐, 학습 로직 자체는 변경 없음)."""
+    arch = _get_architecture_config(MODEL_ARCHITECTURE)  # 잘못된 값이면 GARCH 적합 등 무거운
+    # 작업을 시작하기 전에 바로 실패시킨다(fail fast).
+
     ref, _ = build_merged_dataset_v2(tickers[0], start_date, end_date)
     train_end, val_end = compute_global_split_dates(ref.index)
 
@@ -257,7 +291,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED):
     X_val_s = scaler.transform(X_val).astype(np.float32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    result = train_pooled_transformer(
+    result = arch["train_fn"](
         X_train_s, y_train, tid_train, X_val_s, y_val, tid_val,
         len(feature_cols), LOOKBACK, len(tickers), EMBEDDING_DIM,
         D_MODEL, NHEAD, NUM_LAYERS, DIM_FEEDFORWARD, DROPOUT,
@@ -501,7 +535,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
 
     version = save_checkpoint(
         model, scaler, feature_cols, _model_kwargs(len(tickers)), CHECKPOINT_DIR,
-        model_class_name="PooledTransformerRegressor",
+        model_class_name=_get_architecture_config(MODEL_ARCHITECTURE)["model_class_name"],
         extra_meta={
             "tickers": tickers, "ticker_to_id": ticker_to_id,
             "gate": {k: v for k, v in gate.items()},
