@@ -15,5 +15,8 @@
 -- 아니라 원본 model_predictions 테이블을 직접 조회할 것 — 이 뷰는 "신뢰 가능한 예측만"
 -- 걸러내는 용도로만 쓴다.
 
+-- 2026-09-27: input_data_suspect(입력 데이터 오염 의심) 행도 제외하도록 확장 — gate_passed와 같은
+-- 필터링 패턴. 배경은 테이블_생성.sql 하단 2026-09-27 마이그레이션 주석 참고. (운영 DB 적용 완료)
+
 CREATE OR REPLACE VIEW model_predictions_trusted AS
-SELECT * FROM model_predictions WHERE gate_passed = true;
+SELECT * FROM model_predictions WHERE gate_passed = true AND input_data_suspect = false;

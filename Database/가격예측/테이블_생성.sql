@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS model_predictions (
     gate_vs_sma20             BOOLEAN      NOT NULL,   -- 하이브리드 RMSE < SMA20 RMSE (val 기준)
     gate_vs_parkinson         BOOLEAN      NOT NULL,   -- 하이브리드 RMSE < Parkinson-SMA20 RMSE (val 기준, 2026-09-07 추가)
     created_at                TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    input_data_suspect        BOOLEAN      NOT NULL DEFAULT false,  -- 입력 데이터 오염 의심(2026-09-27 추가, 아래 마이그레이션 참고)
 
     PRIMARY KEY (ticker, target_date)
 );
@@ -50,3 +51,18 @@ CREATE INDEX IF NOT EXISTS idx_model_predictions_prediction_date ON model_predic
 -- ALTER TABLE model_predictions
 --     ALTER COLUMN parkinson_sma20_baseline SET NOT NULL,
 --     ALTER COLUMN gate_vs_parkinson SET NOT NULL;
+
+-- ── 2026-09-27 마이그레이션: input_data_suspect (운영 DB에 적용 완료) ─────────────────────
+-- 배경: FDR 지수 캐시(fdr_krx_data_cache)가 2026-09-17 장중 스냅숏 이후 갱신되지 않아
+-- market_indicators의 KOSPI/KOSDAQ가 9/18~ 결측 — 그 상태로 만든 예측(prediction_date
+-- 2026-09-18/2026-09-23, 200행)은 KOSPI 레벨 피처가 forward-fill되고 excess_return_z_lag1이
+-- KOSPI 수익률 0으로 계산된 오염 입력을 썼다. 소급 재계산하지 않고(기록 보존) 이 플래그로
+-- 표시한다. 이후 실행분은 가격예측_변동성_공통.check_market_index_freshness()가 결측을 감지하면
+-- 자동으로 true를 기록한다. model_predictions_trusted 뷰가 이 플래그도 걸러낸다(뷰_생성.sql).
+-- 컬럼 순서: 운영 DB에서는 ALTER로 맨 뒤(created_at 다음)에 붙었으므로 위 CREATE TABLE도 같은
+-- 위치에 두었다.
+--
+-- ALTER TABLE model_predictions ADD COLUMN IF NOT EXISTS input_data_suspect BOOLEAN NOT NULL DEFAULT false;
+-- UPDATE model_predictions SET input_data_suspect = true WHERE prediction_date IN ('2026-09-18', '2026-09-23');
+-- (같은 날 추가) 9/14 주가 장중 수집 오염(84종목 종가, --force로 정정) — 9/14 입력을 쓴 예측 2행도 표시:
+-- UPDATE model_predictions SET input_data_suspect = true WHERE prediction_date = '2026-09-14';

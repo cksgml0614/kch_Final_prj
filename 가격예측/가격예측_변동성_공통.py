@@ -372,15 +372,17 @@ def _trailing_predicted_volatility_mean(ticker, before_target_date, n=60):
 
 def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
                      garch_baseline, sma20_baseline, parkinson_sma20_baseline,
-                     is_early_warning, model_version, gate):
-    """model_predictions에 UPSERT((ticker, target_date) 기준) — 재실행 시 최신 값으로 덮어씀."""
+                     is_early_warning, model_version, gate, input_data_suspect=False):
+    """model_predictions에 UPSERT((ticker, target_date) 기준) — 재실행 시 최신 값으로 덮어씀.
+    input_data_suspect(2026-09-27): 입력 데이터 오염 의심 플래그 — 재실행으로 예측값이 바뀌면
+    플래그도 그 실행 기준으로 함께 덮어쓴다(깨끗한 재실행 후에도 true가 남지 않도록)."""
     query = """
         INSERT INTO model_predictions
             (ticker, target_date, prediction_date, predicted_volatility,
              garch_baseline, sma20_baseline, parkinson_sma20_baseline,
              is_early_warning, model_version,
-             gate_passed, gate_vs_garch, gate_vs_sma20, gate_vs_parkinson)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             gate_passed, gate_vs_garch, gate_vs_sma20, gate_vs_parkinson, input_data_suspect)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (ticker, target_date) DO UPDATE
             SET prediction_date = EXCLUDED.prediction_date,
                 predicted_volatility = EXCLUDED.predicted_volatility,
@@ -392,7 +394,8 @@ def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
                 gate_passed = EXCLUDED.gate_passed,
                 gate_vs_garch = EXCLUDED.gate_vs_garch,
                 gate_vs_sma20 = EXCLUDED.gate_vs_sma20,
-                gate_vs_parkinson = EXCLUDED.gate_vs_parkinson
+                gate_vs_parkinson = EXCLUDED.gate_vs_parkinson,
+                input_data_suspect = EXCLUDED.input_data_suspect
     """
     with get_db_connection() as conn:
         if not conn:
@@ -403,12 +406,14 @@ def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
                 float(garch_baseline), float(sma20_baseline), float(parkinson_sma20_baseline),
                 bool(is_early_warning), model_version,
                 bool(gate["passed"]), bool(gate["beats_garch"]), bool(gate["beats_sma"]), bool(gate["beats_parkinson"]),
+                bool(input_data_suspect),
             ))
         conn.commit()
 
 
 def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, feature_cols,
-                                 ticker_to_id, device, version, gate, baselines_by_ticker):
+                                 ticker_to_id, device, version, gate, baselines_by_ticker,
+                                 input_data_suspect=False):
     """pooled 하이브리드 모델로 한 종목의 다음 거래일 변동성을 예측하고 model_predictions에
     저장한다. run_isolated로 감싸 호출하는 것을 전제로 예외를 그대로 던진다(격리 책임은
     호출부에 있음)."""
@@ -446,7 +451,7 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, fea
     save_prediction(
         ticker, target_date, prediction_date, predicted_volatility,
         next_day["garch"], next_day["sma20"], next_day["parkinson"],
-        is_early_warning, version, gate,
+        is_early_warning, version, gate, input_data_suspect=input_data_suspect,
     )
 
     return {
@@ -507,6 +512,47 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results):
         print(f"⚠️ MLflow 로깅 실패(파이프라인은 계속 진행됩니다) — {e}")
 
 
+# 주가지수(KOSPI/KOSDAQ) 신선도 점검(2026-09-27, 가시성 확보용 경고만 — 파이프라인은 멈추지 않음).
+# 배경: FinanceDataReader의 KS11/KQ11은 KRX 실시간이 아니라 FDR 작성자가 운영하는 GitHub 캐시
+# (FinanceData/fdr_krx_data_cache)에서 읽는데, 이 캐시의 지수 파일이 2026-09-17 이후 갱신되지 않아
+# market_indicators의 KOSPI/KOSDAQ가 9/17에서 멈췄다(같은 기간 네이버 fchart에는 9/18~9/23 존재
+# 확인). 결측이 있으면 (1) feature_loader의 asof 조인이 KOSPI/KOSDAQ 레벨 피처를 마지막 값으로 조용히
+# forward-fill하고, (2) momentum_feature.load_true_kospi 경로는 reindex -> pct_change(fill_method=
+# 'pad')로 결측일 KOSPI 수익률이 0이 되어 excess_return_z_lag1이 사실상 "종목 절대수익률 z"로
+# 오염된다 — 둘 다 에러 없이 진행되므로 최소한 로그에 드러나게 한다.
+INDEX_FRESHNESS_CODES = ("KOSPI", "KOSDAQ")
+
+
+def check_market_index_freshness(end_date):
+    """daily_stock_prices의 최신 거래일(<= end_date) 대비 KOSPI/KOSDAQ가 몇 거래일 뒤처졌는지
+    경고로 출력한다. 반환: {indicator_code: 뒤처진 거래일 수}."""
+    with get_db_connection() as conn:
+        if not conn:
+            raise RuntimeError("DB 연결 실패 — check_market_index_freshness")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT indicator_code, MAX(date) FROM market_indicators "
+                "WHERE indicator_code = ANY(%s) AND date <= %s GROUP BY indicator_code",
+                (list(INDEX_FRESHNESS_CODES), end_date),
+            )
+            latest = dict(cur.fetchall())
+            lag = {}
+            for code in INDEX_FRESHNESS_CODES:
+                last = latest.get(code)
+                cur.execute(
+                    "SELECT COUNT(DISTINCT date), MAX(date) FROM daily_stock_prices "
+                    "WHERE date <= %s AND (%s::date IS NULL OR date > %s::date)",
+                    (end_date, last, last),
+                )
+                n_behind, stock_last = cur.fetchone()
+                lag[code] = int(n_behind)
+                if n_behind > 0:
+                    print(f"⚠️ {code} 지수 결측: market_indicators 최신={last}, 주가 최신={stock_last} — "
+                          f"{n_behind}거래일째 결측. 결측일 KOSPI/KOSDAQ 피처는 마지막 값으로 채워지고 "
+                          f"excess_return_z_lag1은 KOSPI 수익률 0으로 계산되어 예측이 오염될 수 있음.")
+    return lag
+
+
 def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
     통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> 종목별 다음 거래일 예측(run_isolated로
@@ -536,6 +582,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     A-2(예측값 NaN/inf/음수 sanity check)는 게이트와 무관한 별개 로직이라 이번 결정과
     무관하게 그대로 유지된다. 체크포인트 저장(학습 자체가 성공했다는 기록)도 게이트와
     무관하게 항상 수행하는 기존 동작 그대로."""
+    # 지수 결측이 있으면 이번 실행의 예측 전부를 input_data_suspect=True로 기록한다(2026-09-27).
+    input_data_suspect = any(n > 0 for n in check_market_index_freshness(end_date).values())
     train_out = train_daily_pooled_model(tickers, start_date, end_date)
     model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
     ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
@@ -579,7 +627,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         r = run_isolated(
             predict_and_save_for_ticker, ticker, start_date, end_date,
             model, scaler, feature_cols, ticker_to_id, device, version, gate, baselines_by_ticker,
-            label=ticker, log_dir=LOG_DIR,
+            input_data_suspect=input_data_suspect, label=ticker, log_dir=LOG_DIR,
         )
         results[ticker] = r["result"] if r["status"] == "success" else f"실패 ({r['error']})"
 
