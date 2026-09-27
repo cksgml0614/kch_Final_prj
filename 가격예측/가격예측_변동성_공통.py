@@ -300,7 +300,15 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED):
     )
 
     val_preds, val_actuals, val_tids = evaluate_pooled_predictions(result["model"], result["val_loader"], device)
-    hybrid_val_rmse, _ = rmse_mae(val_preds, val_actuals)
+    # 2026-09-27 게이트 집계 버그 수정: 아래 baseline 3종은 "종목별 val RMSE의 단순 평균"인데,
+    # 하이브리드만 전체 val 행을 한데 모은(pooled) RMSE로 계산해 비교하고 있었다 — 같은 오차라도
+    # 종목별 RMSE 평균 <= pooled RMSE(젠센 부등식)라 baseline에 구조적으로 유리한 비교였다(2026-09-12
+    # 첫 운영 실행부터 게이트가 계속 미통과한 원인). 100종목 검증 정본(검증용/test_evaluation_pooled100_
+    # hybrid.py:253)과 같은 방식으로 하이브리드도 종목별 RMSE 평균으로 맞춘다. 경위는 CLAUDE.md 참고.
+    hybrid_val_rmse = float(np.mean([
+        rmse_mae(val_preds[val_tids == tid], val_actuals[val_tids == tid])[0]
+        for tid in np.unique(val_tids)
+    ]))
 
     avg_garch_rmse = float(np.mean([b["val_rmse"]["garch"] for b in baselines_by_ticker.values()]))
     avg_sma_rmse = float(np.mean([b["val_rmse"]["sma20"] for b in baselines_by_ticker.values()]))
