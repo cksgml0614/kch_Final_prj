@@ -12,6 +12,7 @@
 # 이게 버그가 아니라 알려진 상태라는 걸 화면에 명시한다(상단 상태 표시 + (c)의 표본 수 표기).
 
 import os
+import sys
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -20,6 +21,11 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# `streamlit run 대시보드/...`로 실행하면 sys.path에 대시보드/만 들어가므로 프로젝트 루트를 추가한다
+# (constants.STOCK_NAMES 종목명 표시용, 2026-09-27).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from constants import STOCK_NAMES  # noqa: E402
 
 st.set_page_config(page_title="변동성 예측 대시보드", layout="wide")
 
@@ -37,7 +43,7 @@ def load_predictions():
             SELECT ticker, target_date, prediction_date, predicted_volatility,
                    garch_baseline, sma20_baseline, parkinson_sma20_baseline,
                    actual_volatility, gate_passed, gate_vs_garch, gate_vs_sma20,
-                   gate_vs_parkinson, model_version
+                   gate_vs_parkinson, model_version, input_data_suspect
             FROM model_predictions
             ORDER BY target_date, ticker
             """,
@@ -152,3 +158,73 @@ else:
     fig_c.update_layout(title=f"일별 RMSE/MAE 추이 {title_suffix}", xaxis_title="target_date",
                          yaxis_title="오차", height=400)
     st.plotly_chart(fig_c, use_container_width=True)
+
+# ============================================================
+# (d) 날짜별 전 종목 뷰 + 예측 상위 10종목 (2026-09-27 추가)
+# ============================================================
+# 종목 필터와 무관하게 선택한 target_date 하루의 전 종목을 보여준다. 2026-09-28 실행부터 게이트
+# 집계 버그가 수정돼 gate_passed=true 행이 쌓이기 시작하므로, 날짜별 통과 여부·입력 오염 플래그
+# (input_data_suspect)를 함께 표시해 "이 날 예측을 믿어도 되는지"를 바로 볼 수 있게 한다.
+st.subheader("(d) 날짜별 전 종목 예측 + 상위 10종목")
+TOP_N = 10
+dates = sorted(df["target_date"].dt.date.unique(), reverse=True)
+# ?date=YYYY-MM-DD 쿼리 파라미터로 기본 날짜 지정 가능(특정 날짜 링크 공유용), 없으면 최신일
+q = st.query_params.get("date")
+default_idx = next((i for i, d in enumerate(dates) if str(d) == q), 0)
+sel_date = st.selectbox("target_date 선택", dates, index=default_idx, key="d_date")
+day = df[df["target_date"].dt.date == sel_date].copy()
+day["종목명"] = day["ticker"].map(STOCK_NAMES).fillna("")
+day["label"] = day["종목명"].where(day["종목명"] != "", day["ticker"])   # 축은 종목명만(100개라 겹침 방지), 코드는 hover·표에
+day = day.sort_values("predicted_volatility", ascending=False).reset_index(drop=True)
+day["rank"] = day.index + 1
+
+n_pass, n_suspect, n_actual = int(day["gate_passed"].sum()), int(day["input_data_suspect"].sum()), int(day["actual_volatility"].notna().sum())
+status = []
+status.append(f"게이트 통과 {n_pass}/{len(day)}")
+status.append(f"입력 오염 의심 {n_suspect}/{len(day)}")
+status.append(f"실측 확정 {n_actual}/{len(day)}")
+pred_dates = sorted(day["prediction_date"].astype(str).unique())
+versions = sorted(day["model_version"].unique())
+st.caption(f"prediction_date {', '.join(pred_dates)} · 모델 버전 {', '.join(versions)} · " + " · ".join(status))
+if n_suspect:
+    st.warning("이 날짜 예측은 input_data_suspect=true(입력 데이터 오염 의심)입니다 — 참고용으로만 보세요.")
+elif n_pass == 0:
+    st.warning("이 날짜 예측은 배포 게이트 미통과(gate_passed=false)입니다. 2026-09-27 이전 판정은 게이트 집계 버그 "
+               "(CLAUDE.md 참고) 영향을 받았을 수 있습니다.")
+
+is_top = day["rank"] <= TOP_N
+fig_d = go.Figure()
+fig_d.add_trace(go.Bar(
+    x=day["label"], y=day["predicted_volatility"], name="예측",
+    marker_color=["#d62728" if t else "#9ecae1" for t in is_top],
+    customdata=day[["rank", "gate_passed", "input_data_suspect", "ticker"]].values,
+    hovertemplate="%{x}(%{customdata[3]})<br>예측=%{y:.3f}<br>순위=%{customdata[0]}<br>gate_passed=%{customdata[1]}"
+                  "<br>suspect=%{customdata[2]}<extra></extra>",
+))
+if n_actual:
+    act = day.dropna(subset=["actual_volatility"])
+    fig_d.add_trace(go.Scatter(
+        x=act["label"], y=act["actual_volatility"], mode="markers", name="실측",
+        marker=dict(symbol="diamond", size=8, color="#ffb000", line=dict(color="#333333", width=1)),
+        hovertemplate="%{x}<br>실측=%{y:.3f}<extra></extra>",
+    ))
+fig_d.update_layout(
+    title=f"{sel_date} 전 종목 예측 변동성(내림차순, 빨강=상위 {TOP_N})" + (" + 실측" if n_actual else ""),
+    xaxis=dict(tickangle=-90, tickfont=dict(size=8), tickmode="linear", dtick=1), yaxis_title="변동성(|로그수익률x100|)",
+    height=560, bargap=0.15, legend=dict(orientation="h", y=1.08),
+)
+st.plotly_chart(fig_d, use_container_width=True)
+
+top = day[is_top][["rank", "ticker", "종목명", "predicted_volatility", "actual_volatility",
+                  "gate_passed", "input_data_suspect"]]
+st.dataframe(
+    top, use_container_width=True, hide_index=True,
+    column_config={
+        "rank": st.column_config.NumberColumn("순위"),
+        "ticker": st.column_config.TextColumn("종목코드"),
+        "predicted_volatility": st.column_config.NumberColumn("예측값", format="%.3f"),
+        "actual_volatility": st.column_config.NumberColumn("실측", format="%.3f"),
+        "gate_passed": st.column_config.CheckboxColumn("게이트 통과"),
+        "input_data_suspect": st.column_config.CheckboxColumn("입력 오염 의심"),
+    },
+)
