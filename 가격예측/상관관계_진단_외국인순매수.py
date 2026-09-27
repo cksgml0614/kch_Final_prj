@@ -13,6 +13,11 @@
 # "val/test를 보고 피처를 고른" 것과 다를 바 없는 정보 누수가 된다. 전체 기간판 히트맵/수치
 # (feature_correlation_heatmap_pooled100*.png)는 별도 파일로 이미 저장돼 있어 그대로 두고,
 # 이번 결과는 `_train_only` 접미사로 구분한다.
+#
+# 2026-09-27: 레버리지 효과(하락 충격이 이후 변동성을 더 키우는 비대칭) 진단용 파생 피처
+# downside_shock = max(-close_return, 0), upside_move = max(close_return, 0)을 진단 프레임에만
+# 추가했다(본 모델 피처셋은 그대로). 두 피처 모두 이미 t-1로 shift된 close_return의 행 단위
+# 변환이라 추가 누수는 없다. 히트맵은 `_train_only_leverage` 접미사로 별도 저장한다.
 
 import sys
 from datetime import date
@@ -81,6 +86,12 @@ if __name__ == "__main__":
     print(f"train만 대상: train_end={train_end.date()}, n={len(pooled)}행 "
           f"(전체 {len(pooled_full)}행 중 {len(pooled)/len(pooled_full)*100:.1f}%)")
 
+    # 레버리지 효과 진단용 파생 피처(진단 전용, 파이프라인 미편입 — 파일 상단 2026-09-27 주석 참고)
+    pooled = pooled.copy()
+    pooled["downside_shock"] = (-pooled["close_return"]).clip(lower=0)
+    pooled["upside_move"] = pooled["close_return"].clip(lower=0)
+    leverage_cols = ["downside_shock", "upside_move"]
+
     feature_cols = [c for c in pooled.columns if c not in ("target", "ticker")]
 
     # 텍스트 출력((a)/(b))과 히트맵이 전부 이 하나의 (feature+target) 상관행렬에서 파생된다 —
@@ -117,15 +128,27 @@ if __name__ == "__main__":
         print(f"  {name:<28}{c:+.4f}")
 
     # ============================================================
+    # (c) 레버리지 파생 피처 요약 — target 상관 + 기존 강한 피처와의 겹침
+    # ============================================================
+    print("\n=== (c) 레버리지 파생 피처 (train만) ===")
+    compare_cols = ["close_return", "garch_sigma", "hl_range_ratio", "recent_vol_ma20"]
+    compare_cols = [c for c in compare_cols if c in full_corr.columns]
+    print(f"  close_return-target: {full_corr.loc['close_return', 'target']:+.4f}")
+    for lc in leverage_cols:
+        overlaps = ", ".join(f"{c}={full_corr.loc[lc, c]:+.4f}" for c in compare_cols)
+        print(f"  {lc}-target: {full_corr.loc[lc, 'target']:+.4f} | 겹침: {overlaps}")
+    print(f"  downside_shock-upside_move: {full_corr.loc['downside_shock', 'upside_move']:+.4f}")
+
+    # ============================================================
     # 히트맵 — target까지 포함한 (n+1)x(n+1) 전체 행렬, train만 대상
     # ============================================================
-    fig, ax = plt.subplots(figsize=(12, 10))
+    fig, ax = plt.subplots(figsize=(14, 12))
     sns.heatmap(full_corr, annot=True, fmt=".2f", cmap="coolwarm", vmin=-1, vmax=1,
                 square=True, ax=ax, cbar_kws={"label": "Pearson correlation"})
     ax.set_title(f"Feature+target correlation heatmap (pooled {pooled['ticker'].nunique()} tickers, "
                  f"train만 n={len(pooled)}, train_end={train_end.date()})")
     plt.tight_layout()
-    heatmap_path = f"{OUT_DIR}/feature_correlation_heatmap_pooled100_train_only.png"
+    heatmap_path = f"{OUT_DIR}/feature_correlation_heatmap_pooled100_train_only_leverage.png"
     fig.savefig(heatmap_path, dpi=150)
     print(f"\n히트맵 저장: {heatmap_path} (전체 기간판: "
           f"{OUT_DIR}/feature_correlation_heatmap_pooled100_with_target.png, "
