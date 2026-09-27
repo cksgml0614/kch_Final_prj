@@ -286,3 +286,68 @@ def _print_section_summary(section_name, results):
         if r["status"].startswith("실패"):
             print(f"  ⚠️ {code}: 적재 실패 — 확인 필요")
 
+
+
+# ── 기간 지정 강제 재수집(2026-09-27) ────────────────────────────────────
+# 배경: 일일수집은 항상 last_date+1부터만 조회하므로, 이미 적재된 날짜의 값이 소스 쪽에서 나중에
+# 정정돼도(예: FDR 지수 캐시가 2026-09-17 장중 12:22 스냅숏을 종가로 저장한 뒤 멈춘 건) 영원히
+# 다시 받지 않는다 — upsert_market_indicators 자체는 값이 다르면 덮어쓰도록(IS DISTINCT FROM)
+# 이미 돼 있으므로 "지정 기간을 다시 조회해서 같은 upsert에 태우는" 경로만 있으면 된다.
+# 이번 KOSPI 건 전용이 아니라 재사용 가능한 인프라로 둔다(CLI: 지표_일일수집.py --force).
+# dry_run=True면 DB에 쓰지 않고 기존 값 대비 변경 예정 내역만 출력한다 — 과거 값을 덮어쓰는
+# 작업이므로 먼저 dry-run으로 확인하는 것을 권장.
+
+def _fetch_indicator_range(indicator_code, start, end):
+    """지표 1건을 [start, end](date) 구간으로 소스에서 다시 조회해 적재용 records로 반환."""
+    if indicator_code in FDR_INDICATOR_MAP:
+        df = fdr.DataReader(FDR_INDICATOR_MAP[indicator_code], start.isoformat(), end.isoformat())
+        if df.empty:
+            return []
+        df.index.name = "Date"
+        df = df.reset_index().dropna(subset=["Close"])
+        records = [(indicator_code, r["Date"].date(), round(float(r["Close"]), 4), r["Date"].date())
+                   for _, r in df.iterrows()]
+    elif indicator_code in ECOS_INDICATOR_META:
+        if not Config.ECOS_API_KEY:
+            raise RuntimeError("ECOS_API_KEY가 .env에 없음")
+        meta = ECOS_INDICATOR_META[indicator_code]
+        cycle = meta["frequency"]
+        fmt = "%Y%m%d" if cycle == "D" else "%Y%m"
+        rows = fetch_ecos_series(meta["ecos_stat_code"], meta["ecos_item_code"], cycle,
+                                 start.strftime(fmt), end.strftime(fmt))
+        records, _ = parse_ecos_records(indicator_code, cycle, rows or [])
+    else:
+        raise ValueError(f"알 수 없는 지표 코드: {indicator_code}")
+    return [r for r in records if start <= r[1] <= end]
+
+
+def force_refetch_indicator(cur, indicator_code, start, end, dry_run=False):
+    """[start, end] 구간을 소스에서 다시 받아 기존 값과 다르면 덮어쓴다(없던 날짜는 신규 적재).
+    소스에 없는 기존 행은 삭제하지 않는다. 변경 내역(날짜별 old->new)을 출력하고 결과 dict 반환."""
+    records = _fetch_indicator_range(indicator_code, start, end)
+    cur.execute(
+        "SELECT date, value FROM market_indicators WHERE indicator_code = %s AND date BETWEEN %s AND %s",
+        (indicator_code, start, end),
+    )
+    existing = {d: float(v) for d, v in cur.fetchall()}
+    new_dates = [r for r in records if r[1] not in existing]
+    changed = [r for r in records if r[1] in existing and abs(existing[r[1]] - r[2]) > 1e-9]
+    source_missing = sorted(set(existing) - {r[1] for r in records})
+
+    tag = "[dry-run] " if dry_run else ""
+    for r in changed:
+        print(f"  {tag}{indicator_code} {r[1]}: {existing[r[1]]} -> {r[2]} (정정)")
+    for r in new_dates:
+        print(f"  {tag}{indicator_code} {r[1]}: (없음) -> {r[2]} (신규)")
+    if source_missing:
+        print(f"  ⚠️ {indicator_code}: DB에는 있으나 소스에 없는 날짜 {len(source_missing)}건(삭제하지 않음): "
+              f"{source_missing[:5]}{' ...' if len(source_missing) > 5 else ''}")
+
+    result = {"status": "dry-run" if dry_run else "완료", "rows_fetched": len(records),
+              "inserted": len(new_dates), "updated": len(changed)}
+    if records:
+        result["date_range"] = (records[0][1], records[-1][1])
+    if not dry_run and records:
+        inserted, updated = upsert_market_indicators(cur, records)
+        result["inserted"], result["updated"] = inserted, updated
+    return result

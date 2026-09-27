@@ -75,3 +75,61 @@ def update_stock_data(ticker, start_date_override=None):
             cur.executemany(insert_query, data_list)
             print(f"🚀 {ticker}: {len(data_list)}건의 새로운 데이터 적재 완료!")
             return f"완료 ({len(data_list)}건)"
+
+
+# ── 기간 지정 강제 재수집(2026-09-27) ────────────────────────────────────
+# update_stock_data()는 last_date+1부터만 받고 INSERT도 ON CONFLICT DO NOTHING이라, 이미 적재된
+# 날짜의 값이 소스에서 정정돼도 절대 반영되지 않는다. 오염/정정 대응용으로 [start, end]를 다시
+# 받아 값이 다른 행만 덮어쓰는 별도 경로를 둔다(기존 증분 경로는 그대로 — DO NOTHING 유지).
+# CLI: 주가_일일수집.py --force. dry_run=True면 변경 예정 내역만 출력.
+
+_PRICE_COLS = ("open", "high", "low", "close", "volume", "change_rate")
+
+
+def force_refetch_stock(cur, ticker, start, end, dry_run=False):
+    df = fdr.DataReader(ticker, start.isoformat(), end.isoformat())
+    records = []
+    if not df.empty:
+        df = df.reset_index().fillna(0)
+        records = [
+            (ticker, r["Date"].date(), int(r["Open"]), int(r["High"]), int(r["Low"]),
+             int(r["Close"]), int(r["Volume"]), float(r["Change"]))
+            for _, r in df.iterrows()
+        ]
+    cur.execute(
+        f"SELECT date, {', '.join(_PRICE_COLS)} FROM daily_stock_prices "
+        "WHERE ticker = %s AND date BETWEEN %s AND %s",
+        (ticker, start, end),
+    )
+    existing = {row[0]: row[1:] for row in cur.fetchall()}
+
+    def _differs(old, new):
+        return any(abs(float(o) - float(n)) > 1e-9 for o, n in zip(old, new))
+
+    new_rows = [r for r in records if r[1] not in existing]
+    changed = [r for r in records if r[1] in existing and _differs(existing[r[1]], r[2:])]
+    source_missing = sorted(set(existing) - {r[1] for r in records})
+
+    tag = "[dry-run] " if dry_run else ""
+    for r in changed:
+        old = existing[r[1]]
+        diffs = ", ".join(f"{c} {o}->{n}" for c, o, n in zip(_PRICE_COLS, old, r[2:]) if abs(float(o) - float(n)) > 1e-9)
+        print(f"  {tag}{ticker} {r[1]}: {diffs} (정정)")
+    for r in new_rows:
+        print(f"  {tag}{ticker} {r[1]}: close={r[5]} (신규)")
+    if source_missing:
+        print(f"  ⚠️ {ticker}: DB에는 있으나 소스에 없는 날짜 {len(source_missing)}건(삭제하지 않음): {source_missing[:5]}")
+
+    if not dry_run and (new_rows or changed):
+        cur.executemany(
+            """
+            INSERT INTO daily_stock_prices (ticker, date, open, high, low, close, volume, change_rate)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ticker, date) DO UPDATE SET
+                open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close,
+                volume = EXCLUDED.volume, change_rate = EXCLUDED.change_rate
+            """,
+            new_rows + changed,
+        )
+    return {"fetched": len(records), "inserted": len(new_rows), "updated": len(changed),
+            "status": "dry-run" if dry_run else "완료"}
