@@ -53,6 +53,7 @@ from 가격예측.train_common import (
     passes_deployment_gate_volatility,
     run_isolated,
     save_checkpoint,
+    train_pooled_lstm,
     train_pooled_transformer,
 )
 
@@ -82,7 +83,7 @@ EMBEDDING_DIM = 20  # test_evaluation_pooled100_hybrid.EMBEDDING_DIM_100과 동�
 GARCH_REFIT_MAX_AGE_DAYS = 30
 
 # ── 아키텍처 스위치 (2026-09-24, LSTM/GAF+CNN 등 향후 아키텍처 추가 대비 구조만 마련) ──
-# 지금은 "transformer" 하나뿐이지만, MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
+# "transformer"(기본값) + "lstm"(2026-09-27 추가). MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
 # 고르는 자리를 미리 만들어둔다. 새 아키텍처를 추가할 때 손대야 하는 곳은 이 세 곳뿐이다:
 #   1) train_common.py에 그 아키텍처용 train_pooled_<arch>() 학습 함수 추가 — 시그니처와
 #      반환값(dict: model/history/best_epoch/best_val_loss/val_loader/overfit_ratio_at_end)을
@@ -100,6 +101,13 @@ _ARCHITECTURES = {
     "transformer": {
         "model_class_name": "PooledTransformerRegressor",
         "train_fn": train_pooled_transformer,
+    },
+    # 2026-09-27: LSTM 등록(아키텍처 비교 트랙). 하이퍼파라미터 블록은 그대로 공유 — D_MODEL은
+    # hidden_size, NUM_LAYERS는 LSTM 층 수로 해석되고 NHEAD/DIM_FEEDFORWARD는 무시된다(train_
+    # common.train_pooled_lstm 위 주석 참고).
+    "lstm": {
+        "model_class_name": "PooledLSTMRegressor",
+        "train_fn": train_pooled_lstm,
     },
 }
 
@@ -136,6 +144,13 @@ MLFLOW_EXPERIMENT_NAME = "일일_자동화"
 
 
 def _model_kwargs(num_stocks):
+    # 체크포인트 meta에 저장돼 load_checkpoint()가 cls(**model_kwargs)로 그대로 넘기므로, 모델
+    # 클래스 생성자가 받는 인자만 담아야 한다(LSTM은 nhead/dim_feedforward가 없음, 2026-09-27).
+    if MODEL_ARCHITECTURE == "lstm":
+        return dict(
+            lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
+            hidden_size=D_MODEL, num_layers=NUM_LAYERS, dropout=DROPOUT,
+        )
     return dict(
         lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
         d_model=D_MODEL, nhead=NHEAD, num_layers=NUM_LAYERS,

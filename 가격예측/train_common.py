@@ -31,12 +31,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from 가격예측.model import PooledTransformerRegressor, TransformerRegressor
+from 가격예측.model import PooledLSTMRegressor, PooledTransformerRegressor, TransformerRegressor
 from 가격예측.sequence_dataset import FeatureScaler
 
 _MODEL_CLASSES = {
     "TransformerRegressor": TransformerRegressor,
     "PooledTransformerRegressor": PooledTransformerRegressor,
+    "PooledLSTMRegressor": PooledLSTMRegressor,
 }
 
 
@@ -416,6 +417,93 @@ def train_pooled_transformer(X_train, y_train, tid_train, X_val, y_val, tid_val,
     set_seed(seed)
     model = PooledTransformerRegressor(n_features, lookback, num_stocks, embedding_dim,
                                         d_model, nhead, num_layers, dim_feedforward, dropout).to(device)
+
+    train_loader = make_pooled_loader(X_train, y_train, tid_train, batch_size, shuffle=True)
+    val_loader = make_pooled_loader(X_val, y_val, tid_val, batch_size, shuffle=False)
+
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    history = []
+    prefix = f"[{label}] " if label else ""
+
+    if verbose:
+        print(f"{prefix}스모크 테스트 ({smoke_epochs} epoch)")
+    for epoch in range(1, smoke_epochs + 1):
+        train_loss = run_pooled_epoch(model, train_loader, criterion, optimizer, device, True)
+        val_loss = run_pooled_epoch(model, val_loader, criterion, optimizer, device, False)
+        history.append((epoch, train_loss, val_loss))
+        finite = np.isfinite(train_loss) and np.isfinite(val_loss)
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f} val_loss={val_loss:.6f} finite={finite}")
+        if not finite:
+            raise RuntimeError(f"{label}: 스모크 테스트 중 loss가 NaN/Inf")
+
+    if verbose:
+        print(f"{prefix}본 학습 (최대 {max_epochs} epoch, patience={patience})")
+    best_val_loss = float("inf")
+    best_state = None
+    best_epoch = smoke_epochs
+    patience_counter = 0
+
+    for epoch in range(smoke_epochs + 1, smoke_epochs + 1 + max_epochs):
+        train_loss = run_pooled_epoch(model, train_loader, criterion, optimizer, device, True)
+        val_loss = run_pooled_epoch(model, val_loader, criterion, optimizer, device, False)
+        history.append((epoch, train_loss, val_loss))
+        marker = ""
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch
+            patience_counter = 0
+            marker = " *best*"
+        else:
+            patience_counter += 1
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f} val_loss={val_loss:.6f}{marker}")
+        if patience_counter >= patience:
+            if verbose:
+                print(f"{prefix}  early stopping (patience={patience}, best epoch={best_epoch})")
+            break
+
+    model.load_state_dict(best_state)
+    last_epoch, last_train_loss, last_val_loss = history[-1]
+
+    return {
+        "model": model,
+        "history": history,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "last_epoch": last_epoch,
+        "last_train_loss": last_train_loss,
+        "last_val_loss": last_val_loss,
+        "val_loader": val_loader,
+        "overfit_ratio_at_end": last_val_loss / last_train_loss if last_train_loss > 0 else float("inf"),
+    }
+
+
+# ── pooled LSTM(2026-09-27, 아키텍처 비교 트랙) ───────────────────────────────────
+# train_pooled_transformer()와 시그니처·반환값·학습 루프(스모크 테스트 -> 본 학습, Adam+MSE,
+# early stopping, best_state 복원)를 완전히 동일하게 맞췄다 — 학습 방식까지 바뀌면 "아키텍처
+# 효과"와 "학습 방식 효과"가 섞여 순수 비교가 안 되기 때문. 루프를 공용 헬퍼로 뽑지 않고
+# 복제한 것은 위 가중/pinball 변형과 같은 이유(운영 중인 train_pooled_transformer 경로를
+# 한 줄도 건드리지 않기 위함)다.
+#
+# 하이퍼파라미터 매핑: 호출부(가격예측_변동성_공통.train_daily_pooled_model)가 아키텍처와
+# 무관하게 같은 위치 인자를 넘기므로 d_model -> hidden_size(=32, Transformer와 용량 수준을
+# 맞춤), num_layers -> LSTM 층 수(=2)로 해석하고, nhead/dim_feedforward는 LSTM에 대응 개념이
+# 없어 무시한다.
+
+def train_pooled_lstm(X_train, y_train, tid_train, X_val, y_val, tid_val,
+                      n_features, lookback, num_stocks, embedding_dim,
+                      d_model, nhead, num_layers, dim_feedforward, dropout,
+                      batch_size, lr, weight_decay, smoke_epochs, max_epochs, patience,
+                      device, seed=42, verbose=True, label=""):
+    """train_pooled_transformer()의 LSTM 버전 — PooledLSTMRegressor(ticker_ids 입력)용.
+    test는 절대 건드리지 않는다 — train/val 로더만 받아서 학습·검증한다."""
+    set_seed(seed)
+    model = PooledLSTMRegressor(n_features, lookback, num_stocks, embedding_dim,
+                                hidden_size=d_model, num_layers=num_layers, dropout=dropout).to(device)
 
     train_loader = make_pooled_loader(X_train, y_train, tid_train, batch_size, shuffle=True)
     val_loader = make_pooled_loader(X_val, y_val, tid_val, batch_size, shuffle=False)
