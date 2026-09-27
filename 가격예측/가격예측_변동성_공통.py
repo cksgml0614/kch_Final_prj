@@ -83,7 +83,7 @@ EMBEDDING_DIM = 20  # test_evaluation_pooled100_hybrid.EMBEDDING_DIM_100과 동�
 GARCH_REFIT_MAX_AGE_DAYS = 30
 
 # ── 아키텍처 스위치 (2026-09-24, LSTM/GAF+CNN 등 향후 아키텍처 추가 대비 구조만 마련) ──
-# "transformer"(기본값) + "lstm"(2026-09-27 추가). MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
+# "lstm"(2026-09-27부터 기본값) + "transformer". MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
 # 고르는 자리를 미리 만들어둔다. 새 아키텍처를 추가할 때 손대야 하는 곳은 이 세 곳뿐이다:
 #   1) train_common.py에 그 아키텍처용 train_pooled_<arch>() 학습 함수 추가 — 시그니처와
 #      반환값(dict: model/history/best_epoch/best_val_loss/val_loader/overfit_ratio_at_end)을
@@ -95,7 +95,10 @@ GARCH_REFIT_MAX_AGE_DAYS = 30
 #   3) 아래 _ARCHITECTURES에 항목 추가
 # 하이퍼파라미터 블록(D_MODEL 등)은 지금은 transformer 전용이라 그대로 둔다 — 아키텍처마다
 # 하이퍼파라미터 셋이 달라지면 그때 _ARCHITECTURES 항목별로 분리한다.
-MODEL_ARCHITECTURE = os.environ.get("MODEL_ARCHITECTURE", "transformer").strip().lower()
+# 2026-09-27 기본값 transformer -> lstm 전환(사람 결정, 지도교수님 피드백 "수치형 시계열은 수치형답게").
+# 근거: 대칭 게이트 기준 LSTM seed 42/43/44 = 1.9643/1.9666/1.9680으로 3 seed 전부 통과, Transformer(1.9594)와
+# 동급. Transformer로 되돌리려면 환경변수 MODEL_ARCHITECTURE=transformer.
+MODEL_ARCHITECTURE = os.environ.get("MODEL_ARCHITECTURE", "lstm").strip().lower()
 
 _ARCHITECTURES = {
     "transformer": {
