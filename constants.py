@@ -6,22 +6,8 @@ from collections import namedtuple
 STRESS_PERIOD_START = "2026-02-02"
 STRESS_PERIOD_END = "2026-07-31"
 
-# 뉴스 크롤러(뉴스_최초적재.py) 백필 대상 범위.
-# ⚠️ 고정값 — 실행 시점 기준 자동 재계산 안 됨. 상세는 CLAUDE.md 참조.
-NEWS_BACKFILL_START = "2023-08-23"
-NEWS_BACKFILL_END = "2026-08-23"
-
 # 주가 초기적재(주가_초기적재.py) 시작일
 STOCK_INITIAL_LOAD_START = "2020-01-01"
-
-# 뉴스/감성 트랙(Task E/F) 학습 대상 기간.
-# ⚠️ 고정값 — 데이터가 더 쌓여도 자동으로 늘어나지 않음. NEWS_BACKFILL_START/END와의 관계·갱신
-# 기준은 CLAUDE.md 참조.
-TRAIN_PERIOD_START = "2023-08-23"
-TRAIN_PERIOD_END = "2026-08-28"
-
-# Task E/F 시계열 분할 비율 (train, val, test) — D-8
-SPLIT_RATIOS = (0.70, 0.15, 0.15)
 
 # 종목 마스터. 배경은 CLAUDE.md 참조.
 Stock = namedtuple("Stock", ["ticker", "name", "active"])
@@ -156,7 +142,7 @@ STOCKS = [
     Stock("052690", "한전기술", True),          # 대체(원래 순위는 062040 산일전기)
 ]
 
-# 뉴스 크롤러: 종목코드 -> 검색어(회사명) 매핑 (비활성 포함 전체)
+# 종목코드 -> 회사명 매핑 (비활성 포함 전체, 대시보드·발표자료 표시용)
 STOCK_NAMES = {s.ticker: s.name for s in STOCKS}
 
 # 활성 종목코드만 (주가 로더 등 "무엇을 수집할지"만 필요한 쪽에서 사용)
