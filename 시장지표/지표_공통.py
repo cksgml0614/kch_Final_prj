@@ -1,7 +1,9 @@
 # 지표_공통.py
 # 지표_초기적재.py / 지표_일일수집.py가 대등하게 참조하는 공용 로직(2026-08-23 재작업,
 # 뉴스_공통.py 패턴과 통일). 두 파일 모두 이 파일만 import하고 서로를 참조하지 않는다.
-# FDR(KOSPI/KOSDAQ/USD_KRW)+ECOS(거시지표 6종) 두 소스를 함수 단위로 명확히 분리했고,
+# FDR(USD_KRW)+ECOS(KOSPI/KOSDAQ + 거시지표 6종) 두 소스를 함수 단위로 명확히 분리했고,
+# (2026-10-03: KOSPI/KOSDAQ를 FDR(KS11/KQ11)에서 ECOS 802Y001로 영구 전환 — FDR이 지수를 읽는
+#  GitHub 캐시가 2026-09-17 장중 스냅숏 이후 갱신을 멈춰, 그 뒤로 0건 적재가 조용히 이어졌다.)
 # 호출부(초기적재/일일수집)가 각각 독립적으로 예외 처리해 한쪽이 실패해도 다른 쪽은
 # 계속 진행되게 한다. 공통 upsert 로직(db_utils.py)은 그대로 재사용 — G-1 계약(적재 순서,
 # published_date 등)을 한 곳에서만 지킨다.
@@ -21,22 +23,12 @@ from 시장지표.db_utils import get_last_date, upsert_indicator_meta, upsert_m
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# ── FDR(KOSPI/KOSDAQ/USD_KRW) ──────────────────────────────────────────
+# ── FDR(USD_KRW) ──────────────────────────────────────────────────────
 FDR_INDICATOR_MAP = {
-    "KOSPI": "KS11",
-    "KOSDAQ": "KQ11",
     "USD_KRW": "USD/KRW",
 }
 
 FDR_INDICATOR_META = {
-    "KOSPI": {
-        "name": "코스피 지수", "source": "FDR", "frequency": "D", "unit": "point",
-        "note": "FDR 심볼: KS11 (alias 매핑, source_symbol 컬럼 없음)",
-    },
-    "KOSDAQ": {
-        "name": "코스닥 지수", "source": "FDR", "frequency": "D", "unit": "point",
-        "note": "FDR 심볼: KQ11 (alias 매핑, source_symbol 컬럼 없음)",
-    },
     "USD_KRW": {
         "name": "원/달러 환율", "source": "FDR", "frequency": "D", "unit": "KRW",
         "note": "FDR 심볼: USD/KRW (alias 매핑, 1달러당 원화, value=Close 컬럼)",
@@ -89,7 +81,7 @@ def update_fdr_indicator(cur, indicator_code, start_date=None):
 
 
 def load_fdr_indicators(cur, only_uninitialized=False):
-    """FDR 지표(KOSPI/KOSDAQ/USD_KRW) 전체를 처리하고 결과 dict를 반환한다.
+    """FDR 지표(USD_KRW) 전체를 처리하고 결과 dict를 반환한다.
     only_uninitialized=True면 아직 한 번도 적재 안 된(last_date 없는) 지표만 대상으로 한다(초기적재용)."""
     upsert_indicator_meta(cur, FDR_INDICATOR_META)
 
@@ -107,11 +99,25 @@ def load_fdr_indicators(cur, only_uninitialized=False):
     return results
 
 
-# ── ECOS(기준금리·국고채3/10년·CPI·M2·선행지수) ─────────────────────────
+# ── ECOS(KOSPI/KOSDAQ·기준금리·국고채3/10년·CPI·M2·선행지수) ─────────────
 ECOS_BASE_URL = "https://ecos.bok.or.kr/api/StatisticSearch"
 PAGE_SIZE = 10000
 
 ECOS_INDICATOR_META = {
+    # KOSPI/KOSDAQ는 코드명을 그대로 둔다(ECOS_<통계표>_<항목> 명명 규칙의 예외) — feature_loader·
+    # momentum_feature·freshness 점검·학습 피처 컬럼명이 모두 "KOSPI"/"KOSDAQ"를 키로 쓰기 때문이다.
+    "KOSPI": {
+        "name": "코스피 지수", "source": "ECOS", "frequency": "D", "unit": "point",
+        "ecos_stat_code": "802Y001", "ecos_item_code": "0001000",
+        "note": "일별 종가. published_date = date. 2026-10-03 FDR(KS11)에서 ECOS로 전환 "
+                "(FDR GitHub 캐시 2026-09-17 이후 미갱신). 코드명은 피처 호환 때문에 유지",
+    },
+    "KOSDAQ": {
+        "name": "코스닥 지수", "source": "ECOS", "frequency": "D", "unit": "point",
+        "ecos_stat_code": "802Y001", "ecos_item_code": "0089000",
+        "note": "일별 종가. published_date = date. 2026-10-03 FDR(KQ11)에서 ECOS로 전환 "
+                "(FDR GitHub 캐시 2026-09-17 이후 미갱신). 코드명은 피처 호환 때문에 유지",
+    },
     "ECOS_722Y001_0101000": {
         "name": "한국은행 기준금리", "source": "ECOS", "frequency": "D", "unit": "연%",
         "ecos_stat_code": "722Y001", "ecos_item_code": "0101000",
@@ -251,7 +257,7 @@ def update_ecos_indicator(cur, indicator_code, meta, start_override=None):
 
 
 def load_ecos_indicators(cur, only_uninitialized=False):
-    """ECOS 지표 6종 전체를 처리하고 결과 dict를 반환한다.
+    """ECOS 지표 8종(KOSPI/KOSDAQ + 거시지표 6종) 전체를 처리하고 결과 dict를 반환한다.
     only_uninitialized=True면 아직 한 번도 적재 안 된 지표만 대상으로 한다(초기적재용).
     ECOS_API_KEY가 없으면 이 섹션 전체를 건너뛰고 명확히 경고한다(FDR 쪽은 계속 진행)."""
     if not Config.ECOS_API_KEY:
@@ -286,6 +292,40 @@ def _print_section_summary(section_name, results):
         if r["status"].startswith("실패"):
             print(f"  ⚠️ {code}: 적재 실패 — 확인 필요")
 
+
+
+# ── 일별 지표 신선도 점검(2026-10-03) ─────────────────────────────────────
+# 배경: 소스가 빈 결과를 돌려줘도 증분 적재는 "0건 적재"로 정상 종료해서, FDR 지수 캐시가 멈춘
+# 2026-09-17 이후 9거래일 동안 GitHub Actions가 계속 초록불이었다. 적재가 모두 끝난 뒤 지표별
+# 최신 날짜가 거래일 캘린더보다 몇 거래일 뒤처졌는지(lag)를 세서 한도를 넘으면 실패로 보고한다.
+# - 거래일 캘린더는 daily_stock_prices의 날짜를 쓴다(같은 워크플로에서 주가 수집이 먼저 돈다).
+#   주말·공휴일·연휴(추석 5일 공백 등)는 캘린더에 없으므로 lag에 세지 않는다 — 오탐 방지.
+# - 한도 = 구조적 공백 + 당일 공표 지연 허용 1 + 1. 구조적 공백은 2025-09~2026-09 255거래일 실측:
+#   KOSPI/KOSDAQ/ECOS 일별 3종 최대 0, USD_KRW 최대 1(Yahoo가 금요일 세션을 일요일 날짜로 붙임).
+#   lag가 1 이상이면 경고만, 한도 이상이면 실패.
+# - 월별 지표(CPI·M2·선행지수)는 공표 주기가 달라 대상에서 뺀다.
+DAILY_LAG_LIMITS = {
+    "KOSPI": 2, "KOSDAQ": 2, "USD_KRW": 3,
+    "ECOS_722Y001_0101000": 2, "ECOS_817Y002_010200000": 2, "ECOS_817Y002_010210000": 2,
+}
+
+
+def check_daily_indicator_lag(cur, limits=DAILY_LAG_LIMITS):
+    """지표별 {last_date, ref_date, lag, limit, status} dict를 반환한다. status: "정상"/"경고"/"실패"."""
+    cur.execute("SELECT MAX(date) FROM daily_stock_prices")
+    ref_date = cur.fetchone()[0]
+    results = {}
+    for code, limit in limits.items():
+        last = get_last_date(cur, code)
+        if last is None or ref_date is None:
+            results[code] = {"last_date": last, "ref_date": ref_date, "lag": None, "limit": limit, "status": "실패"}
+            continue
+        cur.execute("SELECT COUNT(DISTINCT date) FROM daily_stock_prices WHERE date > %s AND date <= %s",
+                    (last, ref_date))
+        lag = cur.fetchone()[0]
+        status = "실패" if lag >= limit else ("경고" if lag >= 1 else "정상")
+        results[code] = {"last_date": last, "ref_date": ref_date, "lag": lag, "limit": limit, "status": status}
+    return results
 
 
 # ── 기간 지정 강제 재수집(2026-09-27) ────────────────────────────────────

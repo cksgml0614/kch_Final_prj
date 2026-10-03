@@ -6,13 +6,18 @@
 # 덮어쓴다(지표_공통.force_refetch_indicator 참고). 인자 없이 실행하면 기존 증분 동작 그대로
 # (GitHub Actions daily_data_collection.yml은 인자 없이 호출).
 #   예) python -m 시장지표.지표_일일수집 --force --start 2026-09-17 --codes KOSPI KOSDAQ --dry-run
+#
+# 2026-10-03: 증분 적재가 모두 끝난 뒤 일별 지표 신선도를 점검해(지표_공통.check_daily_indicator_lag),
+# 적재 실패나 한도 이상 뒤처진 지표가 있으면 마지막에 exit 1로 끝낸다. 한 지표의 문제가 다른
+# 지표 저장을 막지 않도록 판정은 모든 upsert·commit 이후에만 한다.
 
 import argparse
+import sys
 from datetime import date
 
 from db_manager import get_db_connection
 from 시장지표.지표_공통 import (
-    ECOS_INDICATOR_META, FDR_INDICATOR_MAP, _print_section_summary,
+    ECOS_INDICATOR_META, FDR_INDICATOR_MAP, _print_section_summary, check_daily_indicator_lag,
     force_refetch_indicator, load_ecos_indicators, load_fdr_indicators,
 )
 
@@ -84,6 +89,31 @@ def run_incremental():
 
         _print_section_summary("FDR", fdr_results)
         _print_section_summary("ECOS", ecos_results)
+
+        problems = []
+        if not fdr_results:
+            problems.append("FDR 섹션 전체 실패")
+        if not ecos_results:
+            problems.append("ECOS 섹션 전체 실패")
+        for code, r in {**fdr_results, **ecos_results}.items():
+            if r["status"].startswith("실패"):
+                problems.append(f"{code}: {r['status']}")
+
+        with conn.cursor() as cur:
+            lag = check_daily_indicator_lag(cur)
+        conn.rollback()  # 조회만 했으므로 트랜잭션만 닫는다
+        print("\n=== 일별 지표 신선도 (기준: daily_stock_prices 최신 거래일) ===")
+        for code, r in lag.items():
+            print(f"{code}: {r['status']} | 최신={r['last_date']} 기준={r['ref_date']} "
+                  f"lag={r['lag']}거래일 (실패 한도 {r['limit']})")
+            if r["status"] == "실패":
+                problems.append(f"{code}: {r['lag']}거래일 뒤처짐(최신 {r['last_date']})")
+
+    if problems:
+        print("\n❌ 지표 수집 문제 — 저장은 모두 끝났고, 종료 코드만 실패로 남긴다:")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
