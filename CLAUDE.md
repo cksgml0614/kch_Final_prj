@@ -603,9 +603,8 @@ search_backfill 14,077, 재크롤링 전 기준)의 합계였고 학습 정본 �
 ## 프로젝트 구조
 ```
 kch_Final_prj/
-├── config.py              # .env 로드, DB_URL / NAVER API 키 관리
+├── config.py              # .env 로드, DB_URL(NEON_DB_URL) / ECOS API 키 관리
 ├── db_manager.py          # get_db_connection() - 중앙 DB 커넥션 함수
-├── docker-compose.yml     # PostgreSQL 16 (stock_db 컨테이너, stockflow_db)
 ├── requirements.txt
 ├── TASK_개정판_데이터_재구축.md      # 뉴스/감성 트랙 지시서 (Task A~D, 완료 아카이브)
 ├── TASK_EF_라벨링_비교실험.md        # 뉴스/감성 트랙 지시서 (Task E~F, 2026-08-29 분리)
@@ -1149,13 +1148,13 @@ garch_sigma 0.35 / hl_range_ratio 0.33은 전체 기간판 수치로 보이며, 
 ## 환경
 - Python 3.12, venv `.venv` (Windows 호스트, PyCharm + Claude Code CLI)
 - GPU: RTX 4070, torch 2.5.1+cu121 (pip 번들형, CUDA 툴킷 시스템 설치 아님)
-- DB: Docker Postgres 16만 구동, 앱 코드는 컨테이너 밖 Windows 호스트
+- DB: Neon(클라우드 Postgres) 단일 DB(`NEON_DB_URL`). 로컬 Docker Postgres는 2026-10-03 폐기 —
+  폐기 직전 덤프는 `C:\kch_backup\pre-cleanup-20261003\`(local_stockflow_db.dump, 저장소 밖)
 
 ---
 
 ## 규칙
-- DB 접속 정보·API 키는 `.env`에서만 관리. 코드/compose 하드코딩 금지
-- `docker-compose.yml` 환경변수는 `${VAR}` 형식으로 `.env` 참조
+- DB 접속 정보·API 키는 `.env`(로컬)와 GitHub Actions secrets(클라우드)에서만 관리. 코드 하드코딩 금지
 - `requirements.txt`는 `pip freeze`로 최신 유지
 - `Database/{도메인}/테이블_삭제.sql` 실행 시 해당 도메인 테이블 DROP — 반드시 확인 후 실행
 - **스키마 변경은 운영 DB에 `ALTER TABLE`로 적용하고, 같은 내용을 `Database/{도메인}/테이블_생성.sql`에도
