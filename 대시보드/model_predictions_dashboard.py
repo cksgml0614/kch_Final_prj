@@ -2,10 +2,7 @@
 # (2026-09-20). 상시 서버로 띄우지 않고 필요할 때 로컬에서 실행한다:
 #   streamlit run 대시보드/model_predictions_dashboard.py
 #
-# ⚠️ config.py의 USE_CLOUD_DB 토글과 무관하게 항상 NEON_DB_URL(pooled)로 직접 접속한다 —
-# 이 대시보드는 "지금 로컬 개발 환경이 어느 DB를 보고 있는지"와 상관없이 항상 운영(클라우드)
-# 데이터를 보여주는 것이 목적이라, db_manager.get_db_connection()의 로컬/클라우드 분기를
-# 거치지 않고 os.getenv("NEON_DB_URL")을 바로 쓴다.
+# ⚠️ db_manager를 거치지 않고 os.getenv("NEON_DB_URL")로 운영(Neon) DB에 직접 접속한다.
 #
 # actual_volatility 백필(가격예측/actual_volatility_백필.py)이 일일 파이프라인에 아직
 # 안 물려있어(CLAUDE.md "알려진 이슈" 참고) 최근 며칠 target_date는 항상 NULL로 보인다 —

@@ -23,7 +23,6 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     env:
-      USE_CLOUD_DB: "true"
       NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
       ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
     steps:

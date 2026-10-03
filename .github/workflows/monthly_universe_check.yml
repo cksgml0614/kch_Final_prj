@@ -24,7 +24,6 @@ jobs:
   check:
     runs-on: ubuntu-latest
     env:
-      USE_CLOUD_DB: "true"
       NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
     steps:
       - name: 저장소 체크아웃
