@@ -16,6 +16,8 @@
 - **자동화**: 가격·거시지표 수집은 클라우드(Neon DB + GitHub Actions `daily_data_collection.yml`, 19:54 KST 매일).
   학습·예측은 로컬 Windows 작업 스케줄러 "Daily Pipeline"(매일 05:00, 절전 해제)에서 돈다. 9/25 무인 실행이
   성공했다. `daily_pipeline.bat`은 MLflow가 없으면 스스로 띄우고, 로컬 수집 단계는 없다(CP949 인코딩 유지).
+  월간 유니버스 점검 워크플로(`monthly_universe_check.yml`)는 2026-10-05부터 job 비활성(`if: ${{ false }}`) —
+  `--dry-run`의 DB 적재 문제 수정 후 해제.
 - **대시보드**: `streamlit run 대시보드/model_predictions_dashboard.py`. (d) 패널에서 날짜별 전 종목 예측,
   상위 10종목, 게이트 통과·입력 오염 여부를 본다.
 - **Neon 전송량 절감(2026-10-05, 커밋 `7a030d0`·`0ab06b5`·`d72b231`)**: 무료 한도 5GB/월을 소진해 접속이 막힌 원인은
@@ -344,7 +346,8 @@ GitHub Actions 데이터 수집 스케줄이 20:00 전후라 19:00엔 당일 데
 3. 크론/스케줄러 등록 — ✅ **완료(2026-09-24, 실제 무인 실행 검증만 남음)**. DB를 클라우드(Neon)로 이전하고
    `.github/workflows/daily_data_collection.yml`(매일, 가격+거시지표 수집)과
    `.github/workflows/monthly_universe_check.yml`(매월 1일, 종목 유니버스 점검)을 GitHub
-   Actions로 등록해 둘 다 `workflow_dispatch` 수동 실행으로 성공 확인했다. **종목 유니버스
+   Actions로 등록해 둘 다 `workflow_dispatch` 수동 실행으로 성공 확인했다(2026-10-05: 월간 워크플로는
+   dry-run의 DB 적재 문제로 비활성화됨 — 위 상태 요약 참고). **종목 유니버스
    점검은 GitHub Actions로 자동화(dry-run만), 실제 적용(`--apply`)은 매달 로그를 사람이
    확인한 뒤 로컬에서 수동 실행**한다 — `--apply`는 어떤 워크플로에도 넣지 않는다(안전장치
    유지). ⚠️ **`--apply`를 로컬에서 실행한 직후에는 반드시 그 자리에서 `constants.py`를
@@ -913,7 +916,8 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   dry-run은 constants.py는 바꾸지 않지만, 게이팅 판정을 위해 `ensure_price_data()`로 후보 종목의 전체 주가를
   Neon `daily_stock_prices`에 적재한다. 2026-10-01 실행에서 유니버스 밖 종목(011790 등)이 들어와 날짜별 종목 수가
   101로 보였다. 2026-10-03에 유니버스 밖 5종목(000990, 011790, 0126Z0, 062040, 064400) 4,426행을 삭제했지만,
-  로직을 고치기 전까지는 매월 1일 다시 생길 수 있다. 운영 학습은 `ACTIVE_TICKERS`만 읽으므로 예측에는 영향이 없다.
+  로직을 고치기 전까지는 매월 1일 다시 생길 수 있다 → 2026-10-05부터 워크플로 job을 비활성화해 재발을 막았다(수정 후
+  `if: ${{ false }}` 제거). 운영 학습은 `ACTIVE_TICKERS`만 읽으므로 예측에는 영향이 없다.
 - ✅ **KOSPI/KOSDAQ 9/17 이후 결측 — 해결(2026-10-03, ECOS 전환, 커밋 `4ed292b`)** — FDR이 지수(KS11/KQ11)를 읽는
   GitHub 캐시가 2026-09-17 12:22 장중 스냅숏 이후 갱신을 멈췄다(캐시 저장소 이슈 #4, 최신 FDR 0.9.202도 같은 캐시를 읽음).
   KOSPI/KOSDAQ 소스를 ECOS 802Y001(0001000/0089000)로 영구 전환했다. 코드명 `KOSPI`/`KOSDAQ`는 피처 호환 때문에 유지하고
