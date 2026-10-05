@@ -80,13 +80,16 @@ def build_stationary_features(raw):
     return df
 
 
-def build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None):
+def build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None, precomputed_prices=None):
     """build_base_dataset과 동일한 t-1 정렬 방식이되, build_stationary_features로 재설계한
     피처 세트를 쓴다. target 정의는 동일 — close 레벨은 target 계산에만 쓰고 피처에서는 뺀다.
 
     precomputed_indicators(선택, 2026-09-20): get_features()에 그대로 전달 — 시장지표.
-    feature_loader.load_indicator_cache(end_date) 참고. None이면 기존과 동일."""
-    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators)
+    feature_loader.load_indicator_cache(end_date) 참고. None이면 기존과 동일.
+    precomputed_prices(선택, 2026-10-05): get_features()에 그대로 전달 — 시장지표.feature_loader.
+    load_price_cache() 참고. None이면 기존과 동일."""
+    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
+                       precomputed_prices=precomputed_prices)
     if raw.empty:
         raise RuntimeError(f"{ticker}: {start_date}~{end_date} 구간에 가격 데이터 없음")
 
@@ -103,7 +106,8 @@ def build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=N
     return combined, raw
 
 
-def build_base_dataset_v2_volatility(ticker, start_date, end_date, vol_window=20, precomputed_indicators=None):
+def build_base_dataset_v2_volatility(ticker, start_date, end_date, vol_window=20, precomputed_indicators=None,
+                                     precomputed_prices=None):
     """V2 변동성 예측용 데이터셋(2026-09-06, Task T 변동성 예측 — GARCH baseline과 비교).
     build_base_dataset_v2와 피처 계산 기반은 동일(build_stationary_features 재사용 — 방향
     모델과 완전히 공유)하되 두 가지가 다르다:
@@ -124,8 +128,11 @@ def build_base_dataset_v2_volatility(ticker, start_date, end_date, vol_window=20
     반환: combined(피처+target), raw — build_base_dataset_v2와 동일한 형태(단 target 의미가 다름).
 
     precomputed_indicators(선택, 2026-09-20): get_features()에 그대로 전달. None이면 기존과 동일.
+    precomputed_prices(선택, 2026-10-05): get_features()에 그대로 전달 — 시장지표.feature_loader.
+    load_price_cache() 참고. None이면 기존과 동일.
     """
-    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators)
+    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
+                       precomputed_prices=precomputed_prices)
     if raw.empty:
         raise RuntimeError(f"{ticker}: {start_date}~{end_date} 구간에 가격 데이터 없음")
 

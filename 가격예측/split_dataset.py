@@ -52,7 +52,8 @@ def build_merged_dataset(ticker, start_date, end_date):
                      "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
 
 
-def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None):
+def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
+                            precomputed_prices=None):
     """build_merged_dataset과 동일하나 build_base_dataset_v2(정상성 재설계 피처)를 쓴다.
     momentum(excess_return_z_lag1)은 이미 정상성 있는 z-score라 변경 없이 그대로 재사용.
 
@@ -66,7 +67,8 @@ def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators
     build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators)와 정확히
     같은 값이기 때문(캐시가 있든 없든 get_features()의 반환값은 동일함이 캐시 추가 시점에
     검증됨). 둘 다 None이면 기존과 완전히 동일하게 동작한다."""
-    base, raw = build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators)
+    base, raw = build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
+                                      precomputed_prices=precomputed_prices)
     momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
 
     merged = base.copy()
@@ -79,7 +81,8 @@ def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators
                      "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
 
 
-def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None):
+def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
+                                       precomputed_prices=None):
     """build_merged_dataset_v2의 변동성 버전(2026-09-06, Task T 변동성 예측). target이
     |로그수익률x100|이고 피처에 recent_vol_ma20이 추가된 build_base_dataset_v2_volatility를
     쓴다는 점만 다르다 — momentum(excess_return_z_lag1)은 방향/변동성 어느 쪽이든 "종목의
@@ -89,7 +92,8 @@ def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed
     precomputed_indicators/true_kospi(선택, 2026-09-20): build_merged_dataset_v2와 동일한
     성능 최적화 — get_features() 종목당 중복 호출 제거. 둘 다 None이면 기존과 동일."""
     base, raw = build_base_dataset_v2_volatility(ticker, start_date, end_date,
-                                                  precomputed_indicators=precomputed_indicators)
+                                                  precomputed_indicators=precomputed_indicators,
+                                                  precomputed_prices=precomputed_prices)
     momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
 
     merged = base.copy()
@@ -104,7 +108,8 @@ def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed
 
 def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, train_end,
                                                precomputed_sigma=None, garch_params=None,
-                                               precomputed_indicators=None, true_kospi=None):
+                                               precomputed_indicators=None, true_kospi=None,
+                                               precomputed_prices=None):
     """build_merged_dataset_v2_volatility(14피처) + GARCH(1,1) 조건부 σ를 15번째 피처로
     추가한 하이브리드 버전(2026-09-06) — GARCH가 이미 잡아낸 "어제 변동성→오늘 변동성"
     persistence 신호를 Transformer가 처음부터 재학습하지 않고 그대로 입력받게 하기 위함.
@@ -131,6 +136,7 @@ def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, trai
     merged, meta = build_merged_dataset_v2_volatility(
         ticker, start_date, end_date,
         precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
+        precomputed_prices=precomputed_prices,
     )
 
     if precomputed_sigma is not None:
@@ -186,7 +192,8 @@ def build_next_day_merged_window(ticker, start_date, end_date, lookback):
 
 
 def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date, lookback, garch_params,
-                                                   precomputed_indicators=None, true_kospi=None):
+                                                   precomputed_indicators=None, true_kospi=None,
+                                                   precomputed_prices=None):
     """서빙(추론) 전용 — 변동성 하이브리드 모델(15피처)의 다음 거래일 예측 시퀀스를 만든다
     (2026-09-06, 가격예측_변동성_일일수집.py용). build_next_day_feature_window_volatility()
     (13개: base 12 + recent_vol_ma20) + momentum(1개, build_next_day_merged_window()와 동일
@@ -217,7 +224,8 @@ def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date,
         forecast_with_fixed_params,
     )
 
-    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators)
+    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
+                       precomputed_prices=precomputed_prices)
     base_window, last_confirmed_date = build_next_day_feature_window_volatility(
         ticker, start_date, end_date, lookback, raw=raw,
     )

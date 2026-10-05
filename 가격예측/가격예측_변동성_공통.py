@@ -57,7 +57,7 @@ from 가격예측.train_common import (
     train_pooled_lstm,
     train_pooled_transformer,
 )
-from 시장지표.feature_loader import load_indicator_cache
+from 시장지표.feature_loader import load_indicator_cache, load_price_cache
 
 LOOKBACK = 20
 
@@ -218,7 +218,7 @@ def compute_full_period_sigma_cached(returns, params):
 
 # ── baseline 3종: val 구간 RMSE(게이트용) + 다음 거래일 점예측(감사 컬럼용) ──────────────
 
-def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end):
+def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, prices=None):
     """종목 1개의 GARCH 파라미터를 캐시에서 가져오거나 새로 적합하고, 그 파라미터로:
       (a) 전체 구간 σ(하이브리드 피처용 — build_merged_dataset_v2_volatility_hybrid의
           precomputed_sigma로 그대로 재사용, 내부에서 다시 적합하지 않음)
@@ -227,15 +227,24 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end):
     을 한 번에 계산한다 — 세 용도를 따로 호출하면 종목당 GARCH 적합/재귀계산을 최대 3번
     반복하게 되어 여기서 합쳤다.
 
+    prices(선택, 2026-10-05): 시장지표.feature_loader.load_price_cache(...)[ticker]. 주면
+    load_close_prices/load_high_low 대신 여기서 close·high·low를 꺼낸다 — 두 함수와 같은 테이블·
+    같은 구간(ticker, date BETWEEN start_date AND end_date, ORDER BY date)·같은 float 변환이다.
+
     반환 dict: params, sigma_full, val_rmse(garch/sma20/parkinson dict), n_val_valid,
     next_day(garch/sma20/parkinson dict)."""
-    close = load_close_prices(ticker, start_date, end_date)
+    if prices is not None:
+        prices_by_date = prices.set_index("date")
+        close = prices_by_date["close"]
+        hl = prices_by_date[["high", "low"]]
+    else:
+        close = load_close_prices(ticker, start_date, end_date)
+        hl = load_high_low(ticker, start_date, end_date)
     returns = compute_log_returns_pct(close)
     params, refit = get_or_fit_garch_params(ticker, returns, train_end)
     sigma_full = compute_full_period_sigma_cached(returns, params)
 
     sma_full = compute_sma_baseline(returns)
-    hl = load_high_low(ticker, start_date, end_date)
     park_raw = compute_parkinson_vol_pct(hl["high"], hl["low"])
     park_ma20 = park_raw.rolling(PARK_WINDOW, min_periods=PARK_WINDOW).mean().shift(1)
 
@@ -273,13 +282,16 @@ def load_shared_cache(start_date, end_date):
     }
 
 
-def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_cache=None):
+def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_cache=None, prices_by_ticker=None):
     """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(쓰래기통/
     가격예측_공통.py의 run_daily_pipeline 주석과 동일 근거: 파라미터 규모가 작아 재학습
     자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
 
     shared_cache(선택, 2026-10-05): load_shared_cache(start_date, end_date) 결과. None이면 여기서
     로드한다(검증용 스크립트 등 기존 호출부 호환).
+    prices_by_ticker(선택, 2026-10-05): load_price_cache(tickers, start_date, end_date) 결과. None이면
+    여기서 한 번에 로드한다 — 예전에는 종목마다 baseline용(종가, 고가·저가)과 피처용(OHLCV)으로
+    같은 구간을 세 번 읽었다.
 
     반환: model, scaler, feature_cols, ticker_to_id, device, gate, baselines_by_ticker,
     train_end/val_end, n_train/n_val, n_train_by_ticker, history/best_epoch/best_val_loss/
@@ -290,13 +302,18 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
 
     if shared_cache is None:
         shared_cache = load_shared_cache(start_date, end_date)
+    if prices_by_ticker is None:
+        prices_by_ticker = load_price_cache(tickers, start_date, end_date)
 
-    ref, _ = build_merged_dataset_v2(tickers[0], start_date, end_date, **shared_cache)
+    ref, _ = build_merged_dataset_v2(tickers[0], start_date, end_date, **shared_cache,
+                                     precomputed_prices=prices_by_ticker[tickers[0]])
     train_end, val_end = compute_global_split_dates(ref.index)
 
     baselines_by_ticker = {}
     for ticker in tickers:
-        baselines_by_ticker[ticker] = compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end)
+        baselines_by_ticker[ticker] = compute_ticker_baselines(
+            ticker, start_date, end_date, train_end, val_end, prices=prices_by_ticker[ticker],
+        )
 
     def hybrid_build_fn(ticker, s, e, precomputed_indicators=None, true_kospi=None):
         # precomputed_indicators/true_kospi(2026-09-20): pooled_dataset.build_pooled_sequences가
@@ -306,6 +323,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
         return build_merged_dataset_v2_volatility_hybrid(
             ticker, s, e, train_end, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
             precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
+            precomputed_prices=prices_by_ticker[ticker],
         )
 
     splits, feature_cols, ticker_to_id, (train_end2, val_end2) = build_pooled_sequences(
@@ -449,16 +467,19 @@ def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
 
 def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, feature_cols,
                                  ticker_to_id, device, version, gate, baselines_by_ticker,
-                                 input_data_suspect=False, shared_cache=None):
+                                 input_data_suspect=False, shared_cache=None,
+                                 prices=None):
     """pooled 하이브리드 모델로 한 종목의 다음 거래일 변동성을 예측하고 model_predictions에
     저장한다. run_isolated로 감싸 호출하는 것을 전제로 예외를 그대로 던진다(격리 책임은
     호출부에 있음).
 
     shared_cache(선택, 2026-10-05): load_shared_cache() 결과. None이면 종목마다 거시지표·KOSPI를
-    다시 조회한다(예전 동작 — 일일 실행 전송량의 대부분을 차지했던 경로)."""
+    다시 조회한다(예전 동작 — 일일 실행 전송량의 대부분을 차지했던 경로).
+    prices(선택, 2026-10-05): load_price_cache(...)[ticker]. None이면 가격을 직접 조회한다."""
     params = baselines_by_ticker[ticker]["params"]
     window_df, last_confirmed_date = build_next_day_merged_window_volatility_hybrid(
         ticker, start_date, end_date, LOOKBACK, params, **(shared_cache or {}),
+        precomputed_prices=prices,
     )
     X_next = window_df[feature_cols].values[np.newaxis, :, :].astype(np.float32)
     X_next_s = scaler.transform(X_next)
@@ -623,9 +644,11 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     무관하게 항상 수행하는 기존 동작 그대로."""
     # 지수 결측이 있으면 이번 실행의 예측 전부를 input_data_suspect=True로 기록한다(2026-09-27).
     input_data_suspect = any(n > 0 for n in check_market_index_freshness(end_date).values())
-    # 거시지표·KOSPI는 실행 시작 시 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다(2026-10-05).
+    # 거시지표·KOSPI·종목 가격은 실행 시작 시 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다(2026-10-05).
     shared_cache = load_shared_cache(start_date, end_date)
-    train_out = train_daily_pooled_model(tickers, start_date, end_date, shared_cache=shared_cache)
+    prices_by_ticker = load_price_cache(tickers, start_date, end_date)
+    train_out = train_daily_pooled_model(tickers, start_date, end_date, shared_cache=shared_cache,
+                                         prices_by_ticker=prices_by_ticker)
     model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
     ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
     baselines_by_ticker = train_out["baselines_by_ticker"]
@@ -668,7 +691,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         r = run_isolated(
             predict_and_save_for_ticker, ticker, start_date, end_date,
             model, scaler, feature_cols, ticker_to_id, device, version, gate, baselines_by_ticker,
-            input_data_suspect=input_data_suspect, shared_cache=shared_cache, label=ticker, log_dir=LOG_DIR,
+            input_data_suspect=input_data_suspect, shared_cache=shared_cache,
+            prices=prices_by_ticker[ticker], label=ticker, log_dir=LOG_DIR,
         )
         results[ticker] = r["result"] if r["status"] == "success" else f"실패 ({r['error']})"
 

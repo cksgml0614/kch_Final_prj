@@ -36,7 +36,12 @@ def _load_prices(cur, ticker, start_date, end_date):
         """,
         (ticker, start_date, end_date),
     )
-    rows = cur.fetchall()
+    return _prices_frame(cur.fetchall())
+
+
+def _prices_frame(rows):
+    """(date, open, high, low, close, volume) 행 목록 -> DataFrame. _load_prices와
+    load_price_cache가 같은 변환을 쓰도록 분리했다(2026-10-05)."""
     df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
     if df.empty:
         return df
@@ -45,6 +50,38 @@ def _load_prices(cur, ticker, start_date, end_date):
         df[col] = df[col].astype(float)
     df["date"] = pd.to_datetime(df["date"])
     return df
+
+
+def load_price_cache(tickers, start_date, end_date):
+    """여러 종목의 daily_stock_prices를 쿼리 한 번(ticker = ANY)으로 읽어 {ticker: DataFrame}으로
+    반환한다(2026-10-05, Neon 전송량 절감 — 예전에는 같은 종목·같은 구간을 get_features,
+    load_close_prices, load_high_low가 각자 다시 읽었다). 각 DataFrame은 _load_prices와 같은
+    스키마·변환이고, attrs에 (start_date, end_date)를 기록해 get_features()가 다른 구간 요청에
+    잘못 쓰지 않도록 한다. 데이터가 없는 종목은 빈 DataFrame으로 넣는다."""
+    with get_db_connection() as conn:
+        if not conn:
+            raise RuntimeError("DB 연결 실패")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, date, open, high, low, close, volume
+                FROM daily_stock_prices
+                WHERE ticker = ANY(%s) AND date BETWEEN %s AND %s
+                ORDER BY ticker, date
+                """,
+                (list(tickers), start_date, end_date),
+            )
+            rows = cur.fetchall()
+    rows_by_ticker = {t: [] for t in tickers}
+    for r in rows:
+        rows_by_ticker[r[0]].append(r[1:])
+    span = (str(pd.Timestamp(start_date).date()), str(pd.Timestamp(end_date).date()))
+    cache = {}
+    for t, t_rows in rows_by_ticker.items():
+        df = _prices_frame(t_rows)
+        df.attrs["span"] = span
+        cache[t] = df
+    return cache
 
 
 def _load_indicator_series(cur, indicator_code, end_date, start_date=None):
@@ -158,7 +195,7 @@ def load_indicator_cache(end_date, start_date=None):
     return cache
 
 
-def get_features(ticker, start_date, end_date, precomputed_indicators=None):
+def get_features(ticker, start_date, end_date, precomputed_indicators=None, precomputed_prices=None):
     """미래 정보 누수 없이 종목 OHLCV + 시장지표 9종을 결합한 피처 행렬을 반환한다.
 
     인덱스: 거래일 (daily_stock_prices 기준)
@@ -168,30 +205,49 @@ def get_features(ticker, start_date, end_date, precomputed_indicators=None):
     precomputed_indicators(선택, 2026-09-20 추가): load_indicator_cache(end_date)의 반환값을
     그대로 넘기면 지표 9종의 DB 조회를 생략하고 캐시를 재사용한다 — 조인 로직(_asof_join,
     종목별 trading_dates 기준)은 동일하게 그대로 수행되므로 결과는 완전히 동일하다. None이면
-    기존과 똑같이 매번 새로 조회한다(하위 호환, 기본값)."""
+    기존과 똑같이 매번 새로 조회한다(하위 호환, 기본값).
+
+    precomputed_prices(선택, 2026-10-05): load_price_cache(tickers, start_date, end_date)[ticker].
+    구간(attrs["span"])이 이 호출의 start_date/end_date와 다르면 예외를 낸다. 두 캐시를 모두
+    넘기면 DB에 접속하지 않는다."""
+    if precomputed_indicators is not None and precomputed_prices is not None:
+        return _assemble_features(None, ticker, start_date, end_date, precomputed_indicators, precomputed_prices)
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패")
         with conn.cursor() as cur:
-            prices = _load_prices(cur, ticker, start_date, end_date)
-            if prices.empty:
-                return prices.set_index("date")
+            return _assemble_features(cur, ticker, start_date, end_date, precomputed_indicators, precomputed_prices)
 
-            features = prices.set_index("date")
-            trading_dates = pd.Series(features.index)
 
-            for code in INDICATOR_CODES:
-                if precomputed_indicators is not None:
-                    indicator_df = precomputed_indicators[code]
-                    cache_start = indicator_df.attrs.get("start_date")
-                    if cache_start is not None and pd.Timestamp(cache_start) > pd.Timestamp(start_date):
-                        raise ValueError(
-                            f"{code}: 지표 캐시 하한({cache_start})이 요청 start_date({start_date})보다 늦음 — "
-                            f"load_indicator_cache(end_date, start_date)를 같은 start_date로 다시 만들 것"
-                        )
-                else:
-                    indicator_df = _load_indicator_series(cur, code, end_date, start_date)
-                features[code] = _asof_join(trading_dates, indicator_df).values
+def _assemble_features(cur, ticker, start_date, end_date, precomputed_indicators, precomputed_prices):
+    """get_features 본체. cur는 캐시가 없는 쪽(가격 또는 지표)을 조회할 때만 쓴다."""
+    if precomputed_prices is not None:
+        requested = (str(pd.Timestamp(start_date).date()), str(pd.Timestamp(end_date).date()))
+        if precomputed_prices.attrs.get("span") != requested:
+            raise ValueError(
+                f"{ticker}: 가격 캐시 구간({precomputed_prices.attrs.get('span')})이 요청 구간({requested})과 다름"
+            )
+        prices = precomputed_prices
+    else:
+        prices = _load_prices(cur, ticker, start_date, end_date)
+    if prices.empty:
+        return prices.set_index("date")
+
+    features = prices.set_index("date")
+    trading_dates = pd.Series(features.index)
+
+    for code in INDICATOR_CODES:
+        if precomputed_indicators is not None:
+            indicator_df = precomputed_indicators[code]
+            cache_start = indicator_df.attrs.get("start_date")
+            if cache_start is not None and pd.Timestamp(cache_start) > pd.Timestamp(start_date):
+                raise ValueError(
+                    f"{code}: 지표 캐시 하한({cache_start})이 요청 start_date({start_date})보다 늦음 — "
+                    f"load_indicator_cache(end_date, start_date)를 같은 start_date로 다시 만들 것"
+                )
+        else:
+            indicator_df = _load_indicator_series(cur, code, end_date, start_date)
+        features[code] = _asof_join(trading_dates, indicator_df).values
 
     return features
 
