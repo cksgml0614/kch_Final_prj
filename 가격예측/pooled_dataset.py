@@ -121,7 +121,7 @@ def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=
             }
         else:
             shared_cache_kwargs = {
-                "precomputed_indicators": load_indicator_cache(end_date),
+                "precomputed_indicators": load_indicator_cache(end_date, start_date),
                 "true_kospi": load_true_kospi(start_date, end_date),
             }
 
@@ -189,7 +189,7 @@ def build_pooled_sequences_with_split(tickers, start_date, end_date, train_end, 
     shared_cache_kwargs = {}
     if _build_fn_accepts_shared_cache(build_fn):
         shared_cache_kwargs = {
-            "precomputed_indicators": load_indicator_cache(end_date),
+            "precomputed_indicators": load_indicator_cache(end_date, start_date),
             "true_kospi": load_true_kospi(start_date, end_date),
         }
 

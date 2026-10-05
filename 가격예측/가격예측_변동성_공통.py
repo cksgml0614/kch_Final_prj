@@ -268,7 +268,7 @@ def load_shared_cache(start_date, end_date):
     """종목과 무관한 거시지표 9종·KOSPI 원자료를 한 번 읽어 학습·예측이 함께 쓰게 한다(2026-10-05,
     Neon 전송량 절감). 반환 dict의 키는 build_merged_dataset_v2 계열의 키워드 인자 이름과 같다."""
     return {
-        "precomputed_indicators": load_indicator_cache(end_date),
+        "precomputed_indicators": load_indicator_cache(end_date, start_date),
         "true_kospi": load_true_kospi(start_date, end_date),
     }
 

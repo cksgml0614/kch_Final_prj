@@ -47,18 +47,39 @@ def _load_prices(cur, ticker, start_date, end_date):
     return df
 
 
-def _load_indicator_series(cur, indicator_code, end_date):
-    """지표 1건의 전체 히스토리(하한 없이 end_date까지)를 published_date 오름차순으로 로드.
-    DB에서 값을 읽어온 직후 float으로 캐스팅한다 (G-2와 동일한 패턴)."""
-    cur.execute(
-        """
-        SELECT date AS ref_date, value, published_date AS pub_date
-        FROM market_indicators
-        WHERE indicator_code = %s AND published_date <= %s
-        ORDER BY published_date
-        """,
-        (indicator_code, end_date),
-    )
+def _load_indicator_series(cur, indicator_code, end_date, start_date=None):
+    """지표 1건의 히스토리(end_date까지)를 published_date 오름차순으로 로드.
+    DB에서 값을 읽어온 직후 float으로 캐스팅한다 (G-2와 동일한 패턴).
+
+    start_date(선택, 2026-10-05, Neon 전송량 절감): 주면 "published_date < start_date인 행 중
+    가장 늦은 published_date" 이상만 읽는다. _asof_join은 거래일 D(>= start_date)마다
+    published_date < D인 마지막 행만 쓰므로, 그보다 앞선 행은 결과에 영향이 없다 — 지표별 공표
+    간격을 가정하지 않는 정확한 하한이다(시작일 이전 행이 없으면 하한 없이 전부 읽는다).
+    None이면 하한 없이 전체 히스토리(기존 동작, get_indicator_level_series 등)."""
+    if start_date is None:
+        cur.execute(
+            """
+            SELECT date AS ref_date, value, published_date AS pub_date
+            FROM market_indicators
+            WHERE indicator_code = %s AND published_date <= %s
+            ORDER BY published_date
+            """,
+            (indicator_code, end_date),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT date AS ref_date, value, published_date AS pub_date
+            FROM market_indicators
+            WHERE indicator_code = %s AND published_date <= %s
+              AND published_date >= COALESCE(
+                  (SELECT MAX(published_date) FROM market_indicators
+                   WHERE indicator_code = %s AND published_date < %s),
+                  '-infinity'::date)
+            ORDER BY published_date
+            """,
+            (indicator_code, end_date, indicator_code, start_date),
+        )
     rows = cur.fetchall()
     df = pd.DataFrame(rows, columns=["ref_date", "value", "pub_date"])
     if df.empty:
@@ -111,7 +132,7 @@ def get_indicator_level_series(indicator_code, end_date):
     )
 
 
-def load_indicator_cache(end_date):
+def load_indicator_cache(end_date, start_date=None):
     """INDICATOR_CODES 9종 전체의 원자료(_load_indicator_series 결과)를 한 번에 조회해
     {code: DataFrame} 딕셔너리로 반환한다(2026-09-20, 100종목 pooled 파이프라인 성능
     최적화용 — 거시지표는 종목과 무관해 매 종목 재조회가 낭비였다).
@@ -121,12 +142,20 @@ def load_indicator_cache(end_date):
     end_date 일치 여부를 검증하지 않으므로 호출부(pooled_dataset.py 등, 100종목이 전부 같은
     start_date/end_date를 쓰는 경우)가 책임진다.
 
+    start_date(선택, 2026-10-05): _load_indicator_series의 하한. 주면 각 DataFrame의
+    attrs["start_date"]에 기록하고, get_features()가 이보다 이른 start_date로 이 캐시를 쓰려
+    하면 예외를 낸다(하한 밖 구간이 조용히 NaN이 되는 것 방지). None이면 기존과 동일.
+
     반환: {indicator_code: DataFrame(_load_indicator_series와 동일 스키마)}"""
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패")
         with conn.cursor() as cur:
-            return {code: _load_indicator_series(cur, code, end_date) for code in INDICATOR_CODES}
+            cache = {code: _load_indicator_series(cur, code, end_date, start_date) for code in INDICATOR_CODES}
+    if start_date is not None:
+        for df in cache.values():
+            df.attrs["start_date"] = str(pd.Timestamp(start_date).date())
+    return cache
 
 
 def get_features(ticker, start_date, end_date, precomputed_indicators=None):
@@ -154,8 +183,14 @@ def get_features(ticker, start_date, end_date, precomputed_indicators=None):
             for code in INDICATOR_CODES:
                 if precomputed_indicators is not None:
                     indicator_df = precomputed_indicators[code]
+                    cache_start = indicator_df.attrs.get("start_date")
+                    if cache_start is not None and pd.Timestamp(cache_start) > pd.Timestamp(start_date):
+                        raise ValueError(
+                            f"{code}: 지표 캐시 하한({cache_start})이 요청 start_date({start_date})보다 늦음 — "
+                            f"load_indicator_cache(end_date, start_date)를 같은 start_date로 다시 만들 것"
+                        )
                 else:
-                    indicator_df = _load_indicator_series(cur, code, end_date)
+                    indicator_df = _load_indicator_series(cur, code, end_date, start_date)
                 features[code] = _asof_join(trading_dates, indicator_df).values
 
     return features
