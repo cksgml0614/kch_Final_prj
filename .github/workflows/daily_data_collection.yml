@@ -9,22 +9,37 @@
 #
 # 의존성은 requirements.txt가 아니라 requirements-ci.txt를 쓴다(그 파일 상단 주석 참고 —
 # requirements.txt의 torch+cu121 GPU 전용 빌드가 이 러너에서 설치 자체가 안 됨).
+#
+# 안전장치(2026-10-05):
+#   - permissions: contents: read — 이 워크플로는 저장소에 쓰지 않는다.
+#   - concurrency: 수동 실행과 스케줄 실행이 겹쳐도 동시에 DB에 쓰지 않도록 직렬화(진행 중인 실행은 취소하지 않음).
+#   - timeout-minutes: 30 — 2026-09-20~10-04 실행 17회의 소요 시간이 5.0~9.6분(대부분 설치 1분 + 주가 수집
+#     4~7분)이라 최대치의 약 3배로 잡았다.
+#   - 시크릿은 필요한 단계에만 붙인다. 주가 수집은 NEON_DB_URL만 쓴다(config.py는 ECOS_API_KEY를 import
+#     시점에 os.getenv로 읽기만 하고 검사하지 않는다). 지표 수집은 NEON_DB_URL + ECOS_API_KEY.
+#   - 지표 수집은 주가 수집이 실패해도 실행한다(if: !cancelled()). 앞 단계가 실패했으면 job은 그대로 실패로 끝난다.
 
 name: 일일 시세/거시지표 수집
 
 on:
   schedule:
-    # UTC 11:00 = KST 20:00 (로컬에서 실측한 "FDR 종가 데이터가 안정적으로 조회된 시각
-    # 19:40대"보다 여유를 둠 — CLAUDE.md "일일 파이프라인 통합 실행 스크립트" 절 참고)
+    # UTC 10:54 = KST 19:54 (로컬에서 실측한 "FDR 종가 데이터가 안정적으로 조회된 시각
+    # 19:40대"보다 여유를 둠 — CLAUDE.md "일일 파이프라인 통합 실행 스크립트" 절 참고).
+    # 실제 시작은 GitHub 스케줄 지연으로 수 시간 늦어질 수 있다(CLAUDE.md 알려진 이슈).
     - cron: "54 10 * * *"
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-data-collection
+  cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
-    env:
-      NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
-      ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
+    timeout-minutes: 30
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
@@ -38,7 +53,13 @@ jobs:
         run: pip install -r requirements-ci.txt
 
       - name: 주가 일일수집
+        env:
+          NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
         run: python -m 주가데이터.주가_일일수집
 
-      - name: 지표 일일수집 (FDR 3종 + ECOS 6종)
+      - name: 지표 일일수집
+        if: ${{ !cancelled() }}
+        env:
+          NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
+          ECOS_API_KEY: ${{ secrets.ECOS_API_KEY }}
         run: python -m 시장지표.지표_일일수집
