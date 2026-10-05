@@ -27,6 +27,7 @@ from 가격예측.dataset_builder import (
     build_next_day_feature_window_volatility,
 )
 from 가격예측.momentum_feature import build_momentum_feature
+from 시장지표.feature_loader import get_features
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -184,7 +185,8 @@ def build_next_day_merged_window(ticker, start_date, end_date, lookback):
     return window, last_confirmed_date
 
 
-def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date, lookback, garch_params):
+def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date, lookback, garch_params,
+                                                   precomputed_indicators=None, true_kospi=None):
     """서빙(추론) 전용 — 변동성 하이브리드 모델(15피처)의 다음 거래일 예측 시퀀스를 만든다
     (2026-09-06, 가격예측_변동성_일일수집.py용). build_next_day_feature_window_volatility()
     (13개: base 12 + recent_vol_ma20) + momentum(1개, build_next_day_merged_window()와 동일
@@ -200,24 +202,34 @@ def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date,
     어긋난다).
 
     반환: (window, last_confirmed_date) — window 컬럼 15개(순서는 feature_cols와 다를 수
-    있으니 호출부는 반드시 컬럼명으로 인덱싱할 것)."""
+    있으니 호출부는 반드시 컬럼명으로 인덱싱할 것).
+
+    precomputed_indicators/true_kospi(선택, 2026-10-05, Neon 전송량 절감): build_merged_dataset_v2와
+    같은 공유 캐시. 예전에는 이 함수가 종목마다 get_features()를 두 번(base window용, momentum용)
+    캐시 없이 불러 거시지표 9종 전체 이력을 종목당 2회 읽었고, 그게 일일 실행 전송량의 대부분이었다.
+    이제 get_features()를 한 번만 부르고 그 raw를 base window·momentum·GARCH 수익률이 함께 쓴다.
+    raw["close"]는 예전 load_close_prices()와 같은 쿼리 조건(daily_stock_prices, ticker,
+    date BETWEEN start_date AND end_date, ORDER BY date)·같은 float 변환이라 값이 같다.
+    둘 다 None이면 거시지표·KOSPI를 예전처럼 직접 조회한다."""
     from 가격예측.garch_baseline import (  # 순환 임포트 방지(지연 임포트)
         compute_log_returns_pct,
         forecast_next_day_sigma,
         forecast_with_fixed_params,
-        load_close_prices,
     )
 
-    base_window, last_confirmed_date = build_next_day_feature_window_volatility(ticker, start_date, end_date, lookback)
+    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators)
+    base_window, last_confirmed_date = build_next_day_feature_window_volatility(
+        ticker, start_date, end_date, lookback, raw=raw,
+    )
 
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date)
+    momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
     momentum_next = diag["z"].iloc[-1]
     if pd.isna(momentum_next):
         raise RuntimeError(f"{ticker}: 최신 momentum 값이 NaN — 가격 이력이 window보다 짧을 수 있음")
     past_momentum = momentum.tail(lookback - 1).values
     momentum_col = list(past_momentum) + [float(momentum_next)]
 
-    close = load_close_prices(ticker, start_date, end_date)
+    close = raw["close"]
     returns = compute_log_returns_pct(close)
 
     past_dates = base_window.index[:-1]  # window 마지막 행(오늘=T+1용) 제외 (lookback-1)개 날짜

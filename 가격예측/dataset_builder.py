@@ -186,13 +186,18 @@ def build_next_day_feature_window(ticker, start_date, end_date, lookback):
     return window, last_confirmed_date
 
 
-def build_next_day_feature_window_volatility(ticker, start_date, end_date, lookback, vol_window=20):
+def build_next_day_feature_window_volatility(ticker, start_date, end_date, lookback, vol_window=20, raw=None):
     """build_next_day_feature_window()의 변동성 버전(2026-09-06, 가격예측_변동성_일일수집.py용)
     — base V2 12개 + recent_vol_ma20(13개)로 다음 거래일 예측 시퀀스를 만든다. momentum/
     garch_sigma는 이 함수 밖(split_dataset.build_next_day_merged_window_volatility_hybrid)
     에서 합친다. 원리는 build_next_day_feature_window()와 완전히 동일 — 오늘(T)의 원값을
-    'T+1행'의 피처로 취급한다."""
-    raw = get_features(ticker, start_date, end_date)
+    'T+1행'의 피처로 취급한다.
+
+    raw(선택, 2026-10-05): 호출부가 이미 계산한 get_features(ticker, start_date, end_date)
+    결과를 넘기면 다시 조회하지 않는다(momentum_feature.build_momentum_feature의 raw 인자와 같은
+    방식, 같은 인자로 계산된 것이어야 한다 — 호출부 책임). None이면 기존과 동일."""
+    if raw is None:
+        raw = get_features(ticker, start_date, end_date)
     if raw.empty:
         raise RuntimeError(f"{ticker}: {start_date}~{end_date} 구간에 가격 데이터 없음")
     if len(raw) < lookback:

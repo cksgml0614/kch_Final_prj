@@ -80,13 +80,19 @@ def _build_fn_accepts_shared_cache(build_fn):
     return "precomputed_indicators" in params and "true_kospi" in params
 
 
-def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=build_merged_dataset_v2):
+def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=build_merged_dataset_v2,
+                           shared_cache=None):
     """종목별 V2 피처 계산 + 종목별 시퀀스 구성 + 전역 날짜 컷 분할 + pooling.
 
     build_fn: 종목 하나의 (merged, meta)를 반환하는 함수(기본 build_merged_dataset_v2, 방향
     예측용). 2026-09-06 변동성 예측 실험에서 build_merged_dataset_v2_volatility를 넘겨
     재사용할 수 있도록 매개변수화했다 — 기본값을 그대로 두면 기존 호출부(가격예측_통합모델.py,
     test_evaluation_pooled.py)는 동작이 전혀 바뀌지 않는다.
+
+    shared_cache(선택, 2026-10-05): {"precomputed_indicators": load_indicator_cache(...),
+    "true_kospi": load_true_kospi(start_date, end_date)}를 호출부가 이미 로드했으면 그대로 넘긴다
+    — 같은 실행의 예측 단계와 캐시를 함께 써서 거시지표를 한 번만 읽기 위함. 같은 start_date/
+    end_date로 만든 것이어야 한다(호출부 책임). None이면 여기서 새로 로드한다(기존 동작).
 
     반환
     -------
@@ -108,10 +114,16 @@ def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=
 
     shared_cache_kwargs = {}
     if _build_fn_accepts_shared_cache(build_fn):
-        shared_cache_kwargs = {
-            "precomputed_indicators": load_indicator_cache(end_date),
-            "true_kospi": load_true_kospi(start_date, end_date),
-        }
+        if shared_cache is not None:
+            shared_cache_kwargs = {
+                "precomputed_indicators": shared_cache["precomputed_indicators"],
+                "true_kospi": shared_cache["true_kospi"],
+            }
+        else:
+            shared_cache_kwargs = {
+                "precomputed_indicators": load_indicator_cache(end_date),
+                "true_kospi": load_true_kospi(start_date, end_date),
+            }
 
     for ticker in tickers:
         merged, _ = build_fn(ticker, start_date, end_date, **shared_cache_kwargs)
