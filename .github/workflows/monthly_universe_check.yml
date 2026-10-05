@@ -1,8 +1,12 @@
 # .github/workflows/monthly_universe_check.yml — 종목 유니버스 점검(dry-run 전용, 2026-09-20)
 #
 # ⚠️ --apply는 이 워크플로 어디에도 넣지 않는다. 종목_월간갱신.py가 스스로 "자동 적용은
-# 보류, 사람 검토 유지"라고 못박아둔 안전장치를 그대로 지킨다 — 이 워크플로는 결과를 로그로
-# 남기기만 하고, constants.py 반영(--apply)은 사람이 로그를 보고 수동으로 실행한다.
+# 보류, 사람 검토 유지"라고 못박아둔 안전장치를 그대로 지킨다 — constants.py 반영(--apply)은
+# 사람이 로그를 보고 로컬에서 수동으로 실행한다.
+#
+# ⚠️ --dry-run도 DB에 쓴다: constants.py는 바꾸지 않지만, 신규 진입 후보의 train 시퀀스 수를 세기
+# 위해 ensure_price_data()가 후보 종목의 전체 주가를 Neon daily_stock_prices에 적재한다(CLAUDE.md
+# 알려진 이슈 "월간 유니버스 점검 --dry-run이 DB에 쓴다"). 그래서 아래 job을 비활성화해 두었다.
 #
 # daily_data_collection.yml과 동일하게 클라우드(Neon) DB + requirements-ci.txt를 그대로
 # 재사용한다(사람 지시) — 종목_월간갱신.py가 가격예측_변동성_공통.py를 import하면서 torch/
@@ -11,6 +15,9 @@
 #
 # 결과(신규 진입/이탈/보류 후보, 게이팅 통과 여부)는 스크립트의 print 출력이 그대로 Actions
 # 실행 로그에 남으므로 별도 아티팩트 저장은 하지 않는다.
+#
+# timeout-minutes: 15 — 실행 2회(2026-09-20 수동, 2026-10-01 스케줄)가 2.7~3.1분이었고, 신규 후보가 많으면
+# 초기적재로 길어질 수 있어 약 5배로 잡았다.
 
 name: 종목 유니버스 점검 (dry-run)
 
@@ -20,11 +27,16 @@ on:
     - cron: "0 2 1 * *"
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 jobs:
   check:
+    # 2026-10-05 비활성화: --dry-run이 후보 종목 주가를 Neon에 적재하는 문제(CLAUDE.md 알려진 이슈) 수정 전까지
+    # 스케줄·수동 모두 비활성. 수정 후 제거.
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    env:
-      NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
+    timeout-minutes: 15
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
@@ -38,4 +50,6 @@ jobs:
         run: pip install -r requirements-ci.txt
 
       - name: 종목 유니버스 점검 (--dry-run, --apply 절대 넣지 않음)
+        env:
+          NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
         run: python -m 가격예측.종목_월간갱신 --dry-run
