@@ -1,0 +1,481 @@
+{
+  "H0": "2025-10-10",
+  "calendar": [
+    "2020-01-02",
+    "2026-10-08",
+    1660
+  ],
+  "h": {
+    "3": {
+      "leak_check_anchors": 30,
+      "excluded_corporate_action": 544,
+      "dev_rows": 123878,
+      "holdout_rows(라벨 미개봉)": 23930,
+      "dev_up_ratio": {
+        "abs": 0.494,
+        "excess": 0.478
+      },
+      "dev_up_ratio_by_year": {
+        "2020": {
+          "abs": 0.5207,
+          "excess": 0.4248,
+          "rows": 11282
+        },
+        "2021": {
+          "abs": 0.4766,
+          "excess": 0.4773,
+          "rows": 22647
+        },
+        "2022": {
+          "abs": 0.4676,
+          "excess": 0.5016,
+          "rows": 23702
+        },
+        "2023": {
+          "abs": 0.498,
+          "excess": 0.4754,
+          "rows": 24010
+        },
+        "2024": {
+          "abs": 0.4898,
+          "excess": 0.4969,
+          "rows": 24037
+        },
+        "2025": {
+          "abs": 0.5337,
+          "excess": 0.4593,
+          "rows": 18200
+        }
+      },
+      "overlap": {
+        "label_window_days": 3,
+        "overlapping_neighbors_per_label": 2,
+        "dev_eval_rows": 89949,
+        "grid_dates": 306,
+        "grid_rows": 30015,
+        "grid_up_ratio_abs": 0.4964,
+        "grid_up_ratio_excess": 0.4847
+      },
+      "ticker_rows": {
+        "min": 221.0,
+        "50%": 1293.0,
+        "max": 1293.0
+      },
+      "short_history_tickers(<1000 dev rows)": {
+        "259960": 894,
+        "278470": 268,
+        "323410": 896,
+        "329180": 867,
+        "373220": 779,
+        "377300": 839,
+        "402340": 821,
+        "443060": 221
+      },
+      "folds": [
+        {
+          "k": 0,
+          "train_end": "2021-09-17",
+          "val_start": "2021-09-28",
+          "eval_start": "2022-01-03",
+          "eval_end": "2022-06-30",
+          "n_train": 27581,
+          "n_val": 5796,
+          "n_eval": 11469
+        },
+        {
+          "k": 1,
+          "train_end": "2022-03-22",
+          "val_start": "2022-03-28",
+          "eval_start": "2022-07-01",
+          "eval_end": "2022-12-29",
+          "n_train": 38775,
+          "n_val": 6047,
+          "n_eval": 12233
+        },
+        {
+          "k": 2,
+          "train_end": "2022-09-21",
+          "val_start": "2022-09-27",
+          "eval_start": "2023-01-02",
+          "eval_end": "2023-06-30",
+          "n_train": 50869,
+          "n_val": 6174,
+          "n_eval": 12054
+        },
+        {
+          "k": 3,
+          "train_end": "2023-03-21",
+          "val_start": "2023-03-27",
+          "eval_start": "2023-07-03",
+          "eval_end": "2023-12-28",
+          "n_train": 62923,
+          "n_val": 6174,
+          "n_eval": 11956
+        },
+        {
+          "k": 4,
+          "train_end": "2023-09-14",
+          "val_start": "2023-09-20",
+          "eval_start": "2024-01-02",
+          "eval_end": "2024-06-28",
+          "n_train": 74879,
+          "n_val": 6174,
+          "n_eval": 11858
+        },
+        {
+          "k": 5,
+          "train_end": "2024-03-18",
+          "val_start": "2024-03-22",
+          "eval_start": "2024-07-01",
+          "eval_end": "2024-12-30",
+          "n_train": 86737,
+          "n_val": 6174,
+          "n_eval": 12179
+        },
+        {
+          "k": 6,
+          "train_end": "2024-09-13",
+          "val_start": "2024-09-24",
+          "eval_start": "2025-01-02",
+          "eval_end": "2025-06-30",
+          "n_train": 98808,
+          "n_val": 6273,
+          "n_eval": 11800
+        },
+        {
+          "k": 7,
+          "train_end": "2025-03-18",
+          "val_start": "2025-03-24",
+          "eval_start": "2025-07-01",
+          "eval_end": "2025-09-29",
+          "n_train": 110578,
+          "n_val": 6300,
+          "n_eval": 6400
+        }
+      ]
+    },
+    "7": {
+      "leak_check_anchors": 30,
+      "excluded_corporate_action": 560,
+      "dev_rows": 123470,
+      "holdout_rows(라벨 미개봉)": 23526,
+      "dev_up_ratio": {
+        "abs": 0.508,
+        "excess": 0.4865
+      },
+      "dev_up_ratio_by_year": {
+        "2020": {
+          "abs": 0.5592,
+          "excess": 0.425,
+          "rows": 11274
+        },
+        "2021": {
+          "abs": 0.4833,
+          "excess": 0.4875,
+          "rows": 22647
+        },
+        "2022": {
+          "abs": 0.4637,
+          "excess": 0.5174,
+          "rows": 23702
+        },
+        "2023": {
+          "abs": 0.517,
+          "excess": 0.475,
+          "rows": 24010
+        },
+        "2024": {
+          "abs": 0.5013,
+          "excess": 0.5104,
+          "rows": 24037
+        },
+        "2025": {
+          "abs": 0.563,
+          "excess": 0.466,
+          "rows": 17800
+        }
+      },
+      "overlap": {
+        "label_window_days": 7,
+        "overlapping_neighbors_per_label": 6,
+        "dev_eval_rows": 89549,
+        "grid_dates": 131,
+        "grid_rows": 12846,
+        "grid_up_ratio_abs": 0.5083,
+        "grid_up_ratio_excess": 0.4956
+      },
+      "ticker_rows": {
+        "min": 217.0,
+        "50%": 1289.0,
+        "max": 1289.0
+      },
+      "short_history_tickers(<1000 dev rows)": {
+        "259960": 890,
+        "278470": 264,
+        "323410": 892,
+        "329180": 863,
+        "373220": 775,
+        "377300": 835,
+        "402340": 817,
+        "443060": 217
+      },
+      "folds": [
+        {
+          "k": 0,
+          "train_end": "2021-09-07",
+          "val_start": "2021-09-17",
+          "eval_start": "2022-01-03",
+          "eval_end": "2022-06-30",
+          "n_train": 26837,
+          "n_val": 5796,
+          "n_eval": 11469
+        },
+        {
+          "k": 1,
+          "train_end": "2022-03-10",
+          "val_start": "2022-03-22",
+          "eval_start": "2022-07-01",
+          "eval_end": "2022-12-29",
+          "n_train": 38013,
+          "n_val": 6039,
+          "n_eval": 12233
+        },
+        {
+          "k": 2,
+          "train_end": "2022-09-07",
+          "val_start": "2022-09-21",
+          "eval_start": "2023-01-02",
+          "eval_end": "2023-06-30",
+          "n_train": 50077,
+          "n_val": 6174,
+          "n_eval": 12054
+        },
+        {
+          "k": 3,
+          "train_end": "2023-03-09",
+          "val_start": "2023-03-21",
+          "eval_start": "2023-07-03",
+          "eval_end": "2023-12-28",
+          "n_train": 62131,
+          "n_val": 6174,
+          "n_eval": 11956
+        },
+        {
+          "k": 4,
+          "train_end": "2023-09-04",
+          "val_start": "2023-09-14",
+          "eval_start": "2024-01-02",
+          "eval_end": "2024-06-28",
+          "n_train": 74087,
+          "n_val": 6174,
+          "n_eval": 11858
+        },
+        {
+          "k": 5,
+          "train_end": "2024-03-06",
+          "val_start": "2024-03-18",
+          "eval_start": "2024-07-01",
+          "eval_end": "2024-12-30",
+          "n_train": 85945,
+          "n_val": 6174,
+          "n_eval": 12179
+        },
+        {
+          "k": 6,
+          "train_end": "2024-09-03",
+          "val_start": "2024-09-13",
+          "eval_start": "2025-01-02",
+          "eval_end": "2025-06-30",
+          "n_train": 98008,
+          "n_val": 6269,
+          "n_eval": 11800
+        },
+        {
+          "k": 7,
+          "train_end": "2025-03-06",
+          "val_start": "2025-03-18",
+          "eval_start": "2025-07-01",
+          "eval_end": "2025-09-23",
+          "n_train": 109770,
+          "n_val": 6300,
+          "n_eval": 6000
+        }
+      ]
+    },
+    "30": {
+      "leak_check_anchors": 30,
+      "excluded_corporate_action": 652,
+      "dev_rows": 121137,
+      "holdout_rows(라벨 미개봉)": 21207,
+      "dev_up_ratio": {
+        "abs": 0.5269,
+        "excess": 0.5023
+      },
+      "dev_up_ratio_by_year": {
+        "2020": {
+          "abs": 0.6692,
+          "excess": 0.4267,
+          "rows": 11241
+        },
+        "2021": {
+          "abs": 0.459,
+          "excess": 0.5172,
+          "rows": 22647
+        },
+        "2022": {
+          "abs": 0.4681,
+          "excess": 0.5391,
+          "rows": 23702
+        },
+        "2023": {
+          "abs": 0.5229,
+          "excess": 0.4775,
+          "rows": 24010
+        },
+        "2024": {
+          "abs": 0.5274,
+          "excess": 0.538,
+          "rows": 24037
+        },
+        "2025": {
+          "abs": 0.618,
+          "excess": 0.4617,
+          "rows": 15500
+        }
+      },
+      "overlap": {
+        "label_window_days": 30,
+        "overlapping_neighbors_per_label": 29,
+        "dev_eval_rows": 87249,
+        "grid_dates": 30,
+        "grid_rows": 2938,
+        "grid_up_ratio_abs": 0.531,
+        "grid_up_ratio_excess": 0.5187
+      },
+      "ticker_rows": {
+        "min": 194.0,
+        "50%": 1266.0,
+        "max": 1266.0
+      },
+      "short_history_tickers(<1000 dev rows)": {
+        "259960": 867,
+        "278470": 241,
+        "323410": 869,
+        "329180": 840,
+        "373220": 752,
+        "377300": 812,
+        "402340": 794,
+        "443060": 194
+      },
+      "folds": [
+        {
+          "k": 0,
+          "train_end": "2021-07-02",
+          "val_start": "2021-08-17",
+          "eval_start": "2022-01-03",
+          "eval_end": "2022-06-30",
+          "n_train": 22572,
+          "n_val": 5796,
+          "n_eval": 11469
+        },
+        {
+          "k": 1,
+          "train_end": "2021-12-28",
+          "val_start": "2022-02-15",
+          "eval_start": "2022-07-01",
+          "eval_end": "2022-12-29",
+          "n_train": 33704,
+          "n_val": 5976,
+          "n_eval": 12233
+        },
+        {
+          "k": 2,
+          "train_end": "2022-07-04",
+          "val_start": "2022-08-17",
+          "eval_start": "2023-01-02",
+          "eval_end": "2023-06-30",
+          "n_train": 45551,
+          "n_val": 6174,
+          "n_eval": 12054
+        },
+        {
+          "k": 3,
+          "train_end": "2022-12-29",
+          "val_start": "2023-02-15",
+          "eval_start": "2023-07-03",
+          "eval_end": "2023-12-28",
+          "n_train": 57590,
+          "n_val": 6174,
+          "n_eval": 11956
+        },
+        {
+          "k": 4,
+          "train_end": "2023-06-29",
+          "val_start": "2023-08-11",
+          "eval_start": "2024-01-02",
+          "eval_end": "2024-06-28",
+          "n_train": 69546,
+          "n_val": 6174,
+          "n_eval": 11858
+        },
+        {
+          "k": 5,
+          "train_end": "2023-12-26",
+          "val_start": "2024-02-13",
+          "eval_start": "2024-07-01",
+          "eval_end": "2024-12-30",
+          "n_train": 81404,
+          "n_val": 6174,
+          "n_eval": 12179
+        },
+        {
+          "k": 6,
+          "train_end": "2024-06-28",
+          "val_start": "2024-08-12",
+          "eval_start": "2025-01-02",
+          "eval_end": "2025-06-30",
+          "n_train": 93458,
+          "n_val": 6239,
+          "n_eval": 11800
+        },
+        {
+          "k": 7,
+          "train_end": "2024-12-20",
+          "val_start": "2025-02-12",
+          "eval_start": "2025-07-01",
+          "eval_end": "2025-08-21",
+          "n_train": 105137,
+          "n_val": 6300,
+          "n_eval": 3700
+        }
+      ]
+    }
+  },
+  "limit_move_days(|r|>30%)": [
+    [
+      "000150",
+      "2026-07-31",
+      0.3
+    ],
+    [
+      "001440",
+      "2020-11-20",
+      0.301
+    ],
+    [
+      "034020",
+      "2020-07-21",
+      0.3
+    ],
+    [
+      "272210",
+      "2026-03-05",
+      0.3
+    ],
+    [
+      "326030",
+      "2020-07-06",
+      0.3
+    ]
+  ]
+}
