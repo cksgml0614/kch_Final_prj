@@ -17,6 +17,7 @@ import FinanceDataReader as fdr
 import requests
 
 from config import Config
+from constants import last_storable_date
 from db_manager import get_db_connection
 from 시장지표.db_utils import get_last_date, upsert_indicator_meta, upsert_market_indicators
 
@@ -48,6 +49,7 @@ def fetch_fdr_indicator_data(indicator_code, start_date=None):
 
     df.index.name = "Date"
     df = df.reset_index()
+    df = df[df["Date"].dt.date <= last_storable_date()]  # 확정 전 KST 오늘 행 제외(주가와 같은 컷오프)
     df = df.dropna(subset=["Close"])
 
     return [
@@ -60,7 +62,7 @@ def update_fdr_indicator(cur, indicator_code, start_date=None):
     """FDR 지표 1건 증분 적재. start_date가 주어지면(초기적재용) 그 날짜부터, 아니면 last_date+1부터."""
     last_date = get_last_date(cur, indicator_code)
 
-    if last_date == date.today():
+    if last_date and last_date >= last_storable_date():
         return {"status": "스킵 (이미 최신)", "rows_fetched": 0, "inserted": 0, "updated": 0}
 
     if start_date:
@@ -340,6 +342,7 @@ def check_daily_indicator_lag(cur, limits=DAILY_LAG_LIMITS):
 def _fetch_indicator_range(indicator_code, start, end):
     """지표 1건을 [start, end](date) 구간으로 소스에서 다시 조회해 적재용 records로 반환."""
     if indicator_code in FDR_INDICATOR_MAP:
+        end = min(end, last_storable_date())  # --force도 확정 전 KST 오늘 행은 쓰지 않는다
         df = fdr.DataReader(FDR_INDICATOR_MAP[indicator_code], start.isoformat(), end.isoformat())
         if df.empty:
             return []

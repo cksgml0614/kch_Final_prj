@@ -1,5 +1,7 @@
 # constants.py
 from collections import namedtuple
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 # Task T(가격+거시지표 트랜스포머 베이스라인) 전용 스트레스 구간 경계.
 # ⚠️ 자동 재탐지 금지 — 갱신은 사람이 analysis/detect_stress_period.py 수동 재실행 후 값을 직접 교체. 상세는 CLAUDE.md 참조.
@@ -8,6 +10,27 @@ STRESS_PERIOD_END = "2026-07-31"
 
 # 주가 초기적재(주가_초기적재.py) 시작일
 STOCK_INITIAL_LOAD_START = "2020-01-01"
+
+# 수집 확정 컷오프(2026-10-10). KST 오늘 날짜 행은 이 시각 전에는 장중 잠정값이라 저장하지 않는다
+# (주가 증분·--force, USD_KRW 증분·--force).
+# - 근거: FDR 종가가 안정적으로 조회된 시각 19:40대(2026-09-14 수동 실행 관측 1회,
+#   결과_파이프라인_실행순서_감사.md). 측정이 더 쌓이면 이 상수만 바꾼다.
+# - cron과의 관계: daily_data_collection.yml의 cron은 19:54 KST(UTC 10:54)라 제시간에 돌면 컷오프 뒤여서
+#   당일분을 받는다. 실행이 자정을 넘겨 밀리면 KST 날짜가 바뀌어 전날분만 받는다(정상). 컷오프 전에 돈 실행
+#   (예: 장중 수동 Re-run)은 어제까지만 저장하고, 오늘분은 다음 실행이 MAX(date)+1부터 다시 받는다.
+#   cron을 이 시각보다 앞으로 옮기면 정시 실행이 매일 당일분을 놓치므로, 옮길 때 함께 볼 것.
+# - 사고: 2026-10-08 10:30 KST Re-run이 장중 주가 100종목·USD_KRW를 10/08 행으로 저장했다.
+# - GitHub Actions 러너는 UTC라 date.today()가 KST 날짜와 다를 수 있어 KST를 명시한다.
+KST = ZoneInfo("Asia/Seoul")
+CLOSE_FINAL_CUTOFF_KST = time(19, 40)
+
+
+def last_storable_date(now=None):
+    """저장해도 되는 마지막 날짜(KST). 컷오프 전이면 어제, 이후면 오늘."""
+    now = now or datetime.now(KST)
+    today = now.date()
+    return today if now.time() >= CLOSE_FINAL_CUTOFF_KST else today - timedelta(days=1)
+
 
 # 종목 마스터. 배경은 CLAUDE.md 참조.
 Stock = namedtuple("Stock", ["ticker", "name", "active"])

@@ -4,7 +4,7 @@
 
 import FinanceDataReader as fdr
 from datetime import timedelta, date
-from constants import ACTIVE_TICKERS
+from constants import ACTIVE_TICKERS, last_storable_date
 from db_manager import get_db_connection
 
 TICKERS = ACTIVE_TICKERS  # 종목 마스터는 constants.py로 중앙화(2026-08-30). 이름은 하위 호환 유지
@@ -47,14 +47,19 @@ def update_stock_data(ticker, start_date_override=None):
                 print(f"⚠️ {ticker}: 저장된 데이터가 없습니다 — 일일수집 대상 아님. 주가_초기적재.py를 먼저 실행하세요.")
                 return "스킵 (초기적재 필요)"
 
-            if last_date == date.today():
-                print(f"✅ {ticker}: 이미 최신 데이터입니다.")
+            # 컷오프(constants.CLOSE_FINAL_CUTOFF_KST) 전 KST 오늘 행은 장중 잠정값이라 받지 않는다.
+            # 저장하지 않으면 MAX(date)가 어제에 머물러 다음 실행이 MAX+1부터 확정값을 다시 받는다.
+            last_ok = last_storable_date()
+            if last_date and last_date >= last_ok:
+                print(f"✅ {ticker}: 이미 최신 데이터입니다(저장 가능 마지막 날짜 {last_ok}).")
                 return "스킵 (이미 최신)"
 
             df = fdr.DataReader(ticker, start_date)
+            if not df.empty:
+                df = df[df.index.date <= last_ok]
 
             if df.empty:
-                print(f"📍 {ticker}: 새로 추가할 데이터가 없습니다 (주말/휴장일 등).")
+                print(f"📍 {ticker}: 새로 추가할 데이터가 없습니다 (주말/휴장일 또는 확정 전).")
                 return "스킵 (신규 데이터 없음)"
 
             df = df.reset_index()
@@ -87,6 +92,7 @@ _PRICE_COLS = ("open", "high", "low", "close", "volume", "change_rate")
 
 
 def force_refetch_stock(cur, ticker, start, end, dry_run=False):
+    end = min(end, last_storable_date())  # --force도 확정 전 KST 오늘 행은 쓰지 않는다
     df = fdr.DataReader(ticker, start.isoformat(), end.isoformat())
     records = []
     if not df.empty:
