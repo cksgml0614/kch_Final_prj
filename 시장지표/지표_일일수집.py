@@ -15,6 +15,7 @@ import argparse
 import sys
 from datetime import date
 
+from config import redact
 from db_manager import get_db_connection
 from 시장지표.지표_공통 import (
     ECOS_INDICATOR_META, FDR_INDICATOR_MAP, _print_section_summary, check_daily_indicator_lag,
@@ -54,8 +55,8 @@ def run_force(args):
                 try:
                     results[code] = force_refetch_indicator(cur, code, args.start, end, dry_run=args.dry_run)
                 except Exception as e:
-                    print(f"❌ {code}: 강제 재수집 실패: {e}")
-                    results[code] = {"status": f"실패 ({e})", "rows_fetched": 0, "inserted": 0, "updated": 0}
+                    print(f"❌ {code}: 강제 재수집 실패: {redact(e)}")
+                    results[code] = {"status": f"실패 ({redact(e)})", "rows_fetched": 0, "inserted": 0, "updated": 0}
             if args.dry_run:
                 conn.rollback()
             else:

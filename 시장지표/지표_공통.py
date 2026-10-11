@@ -16,7 +16,7 @@ from datetime import date, timedelta
 import FinanceDataReader as fdr
 import requests
 
-from config import Config
+from config import Config, redact
 from constants import last_storable_date
 from db_manager import get_db_connection
 from 시장지표.db_utils import get_last_date, upsert_indicator_meta, upsert_market_indicators
@@ -169,9 +169,17 @@ def fetch_ecos_series(stat_code, item_code, cycle, start, end):
         end_idx = begin + PAGE_SIZE - 1
         url = (f"{ECOS_BASE_URL}/{Config.ECOS_API_KEY}/json/kr/{begin}/{end_idx}/"
                f"{stat_code}/{cycle}/{start}/{end}/{item_code}")
-        r = requests.get(url, timeout=30)
-        r.encoding = "utf-8"
-        data = r.json()
+        try:
+            r = requests.get(url, timeout=30)
+            r.encoding = "utf-8"
+            data = r.json()
+        except requests.RequestException as e:
+            # requests 예외 문자열에는 요청 URL(API 키가 든 경로)이 들어간다(2026-10-11 가짜 키로 재현).
+            # 예외 클래스명과 요청 식별자만 남기고, 원 예외는 traceback에 붙이지 않는다(from None).
+            raise RuntimeError(
+                f"ECOS 요청 실패({type(e).__name__}): stat={stat_code} item={item_code} "
+                f"cycle={cycle} {start}~{end} rows={begin}~{end_idx}"
+            ) from None
 
         if "RESULT" in data:
             code = data["RESULT"].get("CODE", "")
@@ -277,8 +285,8 @@ def load_ecos_indicators(cur, only_uninitialized=False):
                 continue
             results[code] = update_ecos_indicator(cur, code, meta)
         except Exception as e:
-            print(f"❌ [ECOS] {code}: 적재 실패: {e}")
-            results[code] = {"status": f"실패 ({e})", "rows_fetched": 0, "inserted": 0, "updated": 0}
+            print(f"❌ [ECOS] {code}: 적재 실패: {redact(e)}")
+            results[code] = {"status": f"실패 ({redact(e)})", "rows_fetched": 0, "inserted": 0, "updated": 0}
     return results
 
 

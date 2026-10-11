@@ -16,3 +16,12 @@ class Config:
 
     # API 설정
     ECOS_API_KEY = os.getenv("ECOS_API_KEY")
+
+
+def redact(text):
+    """로그·상태 문자열에서 비밀값을 ***로 바꾼다(2026-10-11). 예외 메시지를 출력·저장하기 전에 쓴다."""
+    s = str(text)
+    for secret in (Config.ECOS_API_KEY, Config.DB_URL):
+        if secret:
+            s = s.replace(secret, "***")
+    return s
