@@ -123,6 +123,11 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
 11. **10/08 잠정값 사고 후속(2026-10-10)**: 주가 최근 7일 `--force`(거래량 사후 정정 대응) 여부, 10/04 Actions 실행 실패
     원인 확인, USD_KRW 주말 날짜 라벨 문제 — 미조치. 하지 않기로 한 것(inserted_at 컬럼, USD_KRW 7일 재조회, 확정 시각
     측정 스크립트)은 아래 "알려진 이슈"의 해당 항목 참고.
+12. **`가격예측/종목_월간갱신.py:237` lookback 하드코딩 정리(2026-10-11)**: 신규 종목 게이팅이
+    `count_train_sequences(..., lookback=20)`으로 20을 직접 쓴다. 지금은 운영 `LOOKBACK`(`가격예측_변동성_공통.py:63`)도
+    20이라 결과가 같지만(확인), LOOKBACK을 바꾸면 게이팅과 실제 학습의 시퀀스 수가 어긋난다. 이미 import하는
+    `MIN_TRAIN_SEQUENCES`처럼 `LOOKBACK`을 import해 쓰도록 고친다. LOOKBACK은 월간 튜닝 범위에서 뺐다(2026-10-11 사람 결정,
+    아래 로드맵 "하이퍼파라미터 월간 튜닝").
 
 ---
 
@@ -1084,6 +1089,47 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   변형을 ***로 치환해 ECOS 경로 except 4곳에 적용. 키 재발급은 하지 않음(사람 결정). **확인하지 못한 곳**: GitHub Actions
   실행 로그(gh 미인증. Actions는 시크릿 원문을 자동 마스킹한다 — 인코딩 변형 마스킹 여부는 미확인), git unreachable
   객체, `C:\kch_backup\...\env.bak`(키 원본 보관 파일이라 열지 않음).
+- 📘 **MLflow 읽는 법(2026-10-11)** — 실험: `일일_자동화`(운영), `백테스트`(9/14 D-4).
+  - **하이브리드 게이트 RMSE 합치는 규칙**: 값 = `hybrid_rmse_tickermean`(커밋 `00c7fe3` 이후 run).
+    이 지표가 없으면 version ≥ `20260928_085818`인 run의 `hybrid_rmse`를 쓴다(이 구간은 이미 종목평균).
+    version < `20260928_085818`인 run의 `hybrid_rmse`는 **pooled 집계(게이트 집계 버그 시절)라 같은 축에
+    그리지 않는다**. `garch_rmse`/`sma_rmse`/`parkinson_rmse`는 처음부터 종목평균이라 그대로 이어 읽는다.
+  - **모델 계열**: 새 run은 태그 `model_family`. 없는 run은 `model_registry`(체크포인트 meta)로 판정한다 —
+    version ≤ `20260927_002802` transformer, ≥ `20260928_085818` lstm(체크포인트 meta·MLflow 태그·git 커밋 일치 확인).
+    9/28~10/11 LSTM run의 params `D_MODEL`·`NHEAD`·`DIM_FEEDFORWARD`는 의미 없음(실제 hidden = D_MODEL, 층 수 = NUM_LAYERS).
+  - **같은 prediction_date의 최종 run** = 태그 `prediction_date`가 같은 run 중 (`run_date`, `version`)이 가장 늦은
+    run. 그 version이 `model_predictions.model_version`(그 prediction_date 행)과 같아야 한다 — 다르면 DB 행은
+    MLflow 기록을 건너뛰었거나 실패한 실행, 또는 백테스트가 만든 것이다. `run_date`는 실행 PC 날짜(KST), version은 UTC.
+    태그가 없는 옛 run(~10/11)은 version을 model_predictions에 조인해서만 prediction_date를 알 수 있고,
+    덮어써진 실행의 prediction_date는 알 수 없다. `n_tickers` < 100인 run은 시험 실행이다.
+  - **run이 없는 날**: 실행이 없었던 날일 수도 있고, 실행은 했지만 **MLflow 기록을 건너뛴 날**일 수도 있다(커밋
+    `0e79d8f`부터 `_log_mlflow_run`이 `/health`를 3초 안에 확인하고, 응답이 없으면 기록하지 않는다). 그날 로그
+    `logs/daily_*.log`에서 줄 맨 앞 `[MLFLOW-SKIP]`(건너뜀) 또는 `⚠️ MLflow 로깅 실패`(확인 통과 후 실패)를 찾는다.
+    예측은 그 전에 DB에 저장되므로 model_predictions에는 행이 있다.
+  - **지연 상한**: MLflow HTTP 기본값(`MLFLOW_HTTP_REQUEST_MAX_RETRIES`=7, `MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR`=2,
+    `MLFLOW_HTTP_REQUEST_BACKOFF_JITTER`=1.0, `MLFLOW_HTTP_REQUEST_TIMEOUT`=120초 — 설치된 mlflow 3.16 코드와 공식 문서로
+    확인)이면 서버가 없을 때 파이프라인 끝에서 **약 4분 24초**(2026-10-11 실측 263.8초: 대기 244초 + Windows 연결 거부
+    2.05초×8회로 계산이 실측과 일치), 멈춤 시 약 20분(추정)을 기다렸다. 지금은 `_log_mlflow_run`이 재시도 3·계수 1·타임아웃
+    15초를 setdefault로 넣는다(환경변수로 덮어쓸 수 있음). 실측 상한(스크래치 서버, 커밋 `0e79d8f` 검증): 서버 없음 2.05초,
+    응답 없는 소켓 3.01초, /health 통과 후 API 500 7.09초, /health 통과 후 API 멈춤 66.99초. run이 열린 뒤 멈추면 종료
+    요청까지 최대 약 140초(추정, 미측정). 정상 서버에서 /health 확인 비용은 중앙값 0.016초(실측). 대가로 재기동 중처럼
+    수십 초 걸리는 끊김에서는 기록을 잃을 수 있다(로그 경고로 드러남).
+- 🔧 **MLflow 서버 띄우기·끄기(2026-10-11)**
+  - 서버는 **일반 권한 창에서만** 띄운다(관리자 창 금지, 사람 결정). 바인딩은 `127.0.0.1:5000`(커밋 `4acc6e6`) — 확인:
+    재기동 후 `/health` 200, `127.0.0.1:5000`만 LISTEN(2026-10-11 사람 확인).
+  - 끌 때는 `taskkill /PID <부모PID> /T /F`로 **프로세스 트리**를 종료한다. 부모만 종료하면 작업(worker) 프로세스가 포트를
+    계속 쥔다 — 확인: 2026-10-11 스크래치 서버(포트 5995) 시험에서 부모(7064)를 종료한 뒤에도 작업 프로세스 4개가 포트를 쥐고
+    있었다. 운영 서버에서 죽은 PID가 소켓을 쥐고 있던 현상도 같은 종류로 **추정**한다(미확인).
+- ⛔ **`가격예측/백테스트_월간.py` 실행 금지 — 백테스트 전용 테이블로 분리하기 전까지(2026-10-11)** — 이 스크립트는
+  `run_pooled_volatility_pipeline()`을 그대로 불러 ① `model_predictions`에 (ticker, target_date) UPSERT한다:
+  기간을 최근 22거래일(9/04~10/08)로 바꾸고 `PRODUCTION_CUTOFF`(9/14) 가드를 빼면 **실시간 LSTM 800행 전부(사전 예측
+  400·trusted 300 포함)를 포함해 1,502행을 덮어쓰고** 600행을 새로 넣는다. 하드코딩된 8/14~9/11 그대로면 D-4 1,900행
+  (Transformer)을 지금의 기본값 LSTM 값으로 덮어쓴다. ② D마다 운영 GARCH 캐시(`checkpoints/garch_params/`)를 비우고 다시
+  적합하므로, 끝나면 **마지막 D 기준 파라미터가 fitted_at=오늘로 남아 일일 실행이 30일간 재사용**한다. ③ 체크포인트를 운영
+  디렉터리와 `latest.txt`에 쓴다. (①~③은 2026-10-11 코드와 운영 DB 조회로 확인, 행 수는 그날 기준.) 해제 조건: 저장 대상·
+  GARCH 캐시·체크포인트 경로가 운영과 분리될 것 — 분리 방식은 인자 추가(`garch_cache_dir`, `checkpoint_dir`), 저장 테이블은
+  `model_predictions_backtest`(PK `(backtest_run_id, ticker, prediction_date)`) + `backtest_runs`, 백테스트의
+  `is_early_warning`은 NULL로 정했다(2026-10-11 사람 결정, DDL·코드 미적용).
 
 ---
 
@@ -1315,6 +1361,19 @@ garch_sigma 0.35 / hl_range_ratio 0.33은 전체 기간판 수치로 보이며, 
 남는다. `close_prev`를 찾을 때 이미 쓰고 있는 "가장 가까운 실제 거래일" 패턴을 `target_date`
 매칭에도 동일하게 적용하는 방안을 검토한다 — 단, `next_weekday()` 자체(예측 시점의 근사
 로직)는 그대로 유지한다(지우면 매주 금요일마다 더 큰 구멍이 생긴다).
+
+### 하이퍼파라미터 월간 튜닝 — 원칙만(2026-10-11, 설계 전)
+- **튜닝 검증은 train 구간 안의 expanding-window 폴드로만 한다.** 게이트 val(현재 2024-10-21~2025-10-16, 실행마다
+  70/15/15로 하루씩 밀림)과 그 뒤 구간은 튜닝 선택에 쓰지 않는다 — 같은 val로 고르면 게이트가 낙관적으로 된다
+  (위 상태 요약 4번 McLean & Pontiff 항목과 같은 이유). 폴드 경계 사이에는 LOOKBACK 이상 퍼지를 둔다. 선례:
+  `가격예측/검증용/ablation_walkforward_folds.py`.
+- **LOOKBACK은 튜닝 범위에서 뺀다**(구조 파라미터: 표본 집합·종목 게이팅·Transformer 위치 임베딩에 함께 영향, 2026-10-11
+  사람 결정). 필요하면 별도 일회성 실험으로 하고, 그 전에 `종목_월간갱신.py:237` 하드코딩부터 고친다(상태 요약 6번 12).
+- 바뀐 하이퍼파라미터는 `hyperparameter_ref`로 체크포인트 meta·MLflow·model_registry에 남긴다(구현 전).
+- 이미 효과 없음이 확인된 범위(LSTM dropout·wd 4조합 (0.3,1e-4)/(0.15,1e-4)/(0.15,1e-5)/(0.1,0))는 반복하지 않는다.
+  근거: 61행(상태 요약 "**3. 급변 구간 과소예측 — ✅ 완결, 재시도 불필요**" 표의 "규제 완화" 행)과 312~314행(날짜순 상세
+  기록 "**⚠️ 게이트 집계 버그 발견·수정**(2026-09-27)" 절의 "LSTM 규제 완화 — ❌ 효과 없음" 항목), 상세는
+  `결과_TaskT_급변구간_손실함수_시도.md` [11].
 
 ### 기타 정리 항목
 
