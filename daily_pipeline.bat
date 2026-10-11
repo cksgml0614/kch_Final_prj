@@ -25,7 +25,7 @@ echo [%date% %time%] daily pipeline start >> %LOGFILE%
 
 rem MLflow self-start: do not depend on the separate "MLflow Server" (ONLOGON) task.
 rem If nothing answers on port 5000, launch mlflow_server_start.bat in the background
-rem and wait (max ~60s) until /health responds. "ping" is used as the sleep because
+rem and wait (max ~2 min: 30 x (2s ping + ~2s refused curl)) until /health responds. "ping" is used as the sleep because
 rem "timeout" fails when stdin is not a console (Task Scheduler).
 set MLFLOW_URL=http://127.0.0.1:5000/health
 curl -s -o NUL --max-time 3 %MLFLOW_URL%
@@ -42,7 +42,7 @@ if errorlevel 1 (
     if !MLFLOW_UP!==1 (
         echo [mlflow] server is up >> %LOGFILE%
     ) else (
-        echo [mlflow] WARNING: server did not respond within ~60s - continuing without it >> %LOGFILE%
+        echo [mlflow] WARNING: server did not respond within ~2 min - continuing without it >> %LOGFILE%
     )
 ) else (
     echo [mlflow] already running on port 5000 >> %LOGFILE%

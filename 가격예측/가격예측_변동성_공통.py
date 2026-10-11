@@ -32,6 +32,7 @@ from datetime import date, timedelta
 import mlflow
 import numpy as np
 import pandas as pd
+import requests
 import torch
 from arch import arch_model
 
@@ -147,6 +148,25 @@ LOG_DIR = os.path.join(_HERE, "logs")
 # 대응 가능하게 함.
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 MLFLOW_EXPERIMENT_NAME = "일일_자동화"
+# 2026-10-11: 로깅 직전 서버 확인 타임아웃(초). 서버가 없거나 멈췄으면 기록을 건너뛴다(_log_mlflow_run).
+MLFLOW_HEALTH_TIMEOUT_SEC = 3
+# MLflow HTTP 재시도 상한(setdefault — 사람이 환경변수로 덮어쓸 수 있다). MLflow 기본값(재시도 7, 대기 계수 2,
+# 타임아웃 120초)이면 서버가 없을 때 약 4분 24초(2026-10-11 실측), 멈췄을 때 약 20분(추정)을 기다린다.
+MLFLOW_HTTP_LIMITS = {
+    "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
+    "MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR": "1",
+    "MLFLOW_HTTP_REQUEST_TIMEOUT": "15",
+}
+
+
+def _mlflow_health_problem(uri):
+    """MLflow 서버 /health를 MLFLOW_HEALTH_TIMEOUT_SEC 안에 확인한다(2026-10-11). 정상(HTTP 200)이면 None,
+    아니면 원인 요약(예외 클래스명 또는 HTTP 상태)을 돌려준다. URL·예외 원문은 돌려주지 않는다."""
+    try:
+        r = requests.get(uri.rstrip("/") + "/health", timeout=MLFLOW_HEALTH_TIMEOUT_SEC)
+    except requests.RequestException as e:
+        return type(e).__name__
+    return None if r.status_code == 200 else f"HTTP {r.status_code}"
 
 
 def _model_kwargs(num_stocks):
@@ -550,8 +570,20 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
     - tag model_family = MODEL_ARCHITECTURE 값('lstm'/'transformer'), model_registry.model_family와 같은 어휘.
     - 하이브리드 게이트 RMSE는 hybrid_rmse_tickermean으로만 기록한다. 옛 이름 hybrid_rmse는 2026-09-28
       실행부터 pooled에서 종목평균으로 정의가 바뀌어 한 줄로 읽으면 안 된다.
-    - input_data_suspect는 실행 단위 플래그라 n_input_suspect는 0 또는 저장 성공 종목 수다."""
+    - input_data_suspect는 실행 단위 플래그라 n_input_suspect는 0 또는 저장 성공 종목 수다.
+
+    2026-10-11 지연 상한: 시작할 때 /health를 3초 안에 확인하고, 응답이 없으면 줄 맨 앞에 [MLFLOW-SKIP]을 붙인
+    경고를 출력한 뒤 기록 없이 돌아간다(except를 거치지 않으므로 여기서 직접 출력한다). 확인을 통과한 뒤 실패해도
+    MLFLOW_HTTP_LIMITS로 재시도를 줄여 상한을 둔다. 둘 다 예측 저장 이후라 결과·종료 코드에는 영향이 없다."""
     try:
+        for k, v in MLFLOW_HTTP_LIMITS.items():
+            os.environ.setdefault(k, v)
+        if MLFLOW_TRACKING_URI.startswith("http"):
+            problem = _mlflow_health_problem(MLFLOW_TRACKING_URI)
+            if problem:
+                print(f"[MLFLOW-SKIP] ⚠️ MLflow 서버 응답 없음 — 기록 건너뜀({problem}). "
+                      f"예측 저장은 끝났고, 이번 실행의 MLflow run은 남지 않는다.")
+                return
         pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
         pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
