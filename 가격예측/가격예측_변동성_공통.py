@@ -523,7 +523,7 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, fea
     }
 
 
-def _log_mlflow_run(tickers, version, train_out, gate, prediction_results):
+def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input_data_suspect=False):
     """일일 실행 결과(학습 곡선, 게이트 판정, 종목별 예측 성공/실패 수)를 MLflow
     "일일_자동화" experiment에 기록한다. 게이트 통과/미통과 여부와 무관하게 항상 호출된다
     — MLflow는 "무슨 일이 있었는지 전부 보는" 관측 도구이기 때문(2026-09-14, MLflow 통합
@@ -540,18 +540,35 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results):
     파이프라인 본체(학습/예측/DB저장)는 절대 중단되면 안 된다는 요구사항 때문. A-2의
     예측값 sanity check(잘못된 예측값 자체를 막는 것)와는 성격이 다른 방어 코드다: 이쪽은
     "로깅이라는 부가 기능의 실패를 흡수"하는 것이 목적이라 실패해도 예외를 다시 던지지
-    않고 경고만 출력한다."""
+    않고 경고만 출력한다.
+
+    2026-10-11 기록 정정(과거 run은 고치지 않는다, 읽는 법은 CLAUDE.md "MLflow 읽는 법"):
+    - run 이름: 실행일(date.today()) 대신 "pd<prediction_date>_v<체크포인트 버전>". 실행일은 run_date 태그.
+    - params: 운영 아키텍처의 실제 생성자 인자(_model_kwargs — 체크포인트 meta와 같은 출처)와
+      MODEL_ARCHITECTURE. 예전에는 LSTM 운영 중에도 Transformer 전용 값(NHEAD, DIM_FEEDFORWARD)이 찍혔다.
+    - tag model_family = MODEL_ARCHITECTURE 값('lstm'/'transformer'), model_registry.model_family와 같은 어휘.
+    - 하이브리드 게이트 RMSE는 hybrid_rmse_tickermean으로만 기록한다. 옛 이름 hybrid_rmse는 2026-09-28
+      실행부터 pooled에서 종목평균으로 정의가 바뀌어 한 줄로 읽으면 안 된다.
+    - input_data_suspect는 실행 단위 플래그라 n_input_suspect는 0 또는 저장 성공 종목 수다."""
     try:
+        pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
+        pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        with mlflow.start_run(run_name=date.today().isoformat()):
-            mlflow.set_tags({"n_tickers": len(tickers), "version": version})
+        with mlflow.start_run(run_name=f"pd{pred_date_tag}_v{version}"):
+            mlflow.set_tags({
+                "n_tickers": len(tickers), "version": version,
+                "model_family": MODEL_ARCHITECTURE,
+                "prediction_date": pred_date_tag,
+                "run_date": date.today().isoformat(),
+                "input_data_suspect": str(bool(input_data_suspect)).lower(),
+            })
             mlflow.log_params({
-                "LOOKBACK": LOOKBACK, "D_MODEL": D_MODEL, "NHEAD": NHEAD,
-                "NUM_LAYERS": NUM_LAYERS, "DIM_FEEDFORWARD": DIM_FEEDFORWARD,
-                "DROPOUT": DROPOUT, "EMBEDDING_DIM": EMBEDDING_DIM,
+                "MODEL_ARCHITECTURE": MODEL_ARCHITECTURE,
+                "model_class": _get_architecture_config(MODEL_ARCHITECTURE)["model_class_name"],
+                **{f"model_{k}": v for k, v in _model_kwargs(len(tickers)).items()},
                 "BATCH_SIZE": BATCH_SIZE, "LR": LR, "WEIGHT_DECAY": WEIGHT_DECAY,
-                "MAX_EPOCHS": MAX_EPOCHS, "PATIENCE": PATIENCE, "SEED": SEED,
+                "SMOKE_EPOCHS": SMOKE_EPOCHS, "MAX_EPOCHS": MAX_EPOCHS, "PATIENCE": PATIENCE, "SEED": SEED,
             })
             for epoch, train_loss, val_loss in train_out["history"]:
                 mlflow.log_metric("train_loss", train_loss, step=epoch)
@@ -559,7 +576,7 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results):
             mlflow.log_metrics({
                 "best_val_loss": train_out["best_val_loss"],
                 "overfit_ratio_at_end": train_out["overfit_ratio_at_end"],
-                "hybrid_rmse": gate["hybrid_rmse"],
+                "hybrid_rmse_tickermean": gate["hybrid_rmse"],
                 "garch_rmse": gate["garch_rmse"],
                 "sma_rmse": gate["sma_rmse"],
                 "parkinson_rmse": gate["parkinson_rmse"],
@@ -567,7 +584,10 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results):
             })
             n_failed = sum(1 for v in prediction_results.values() if isinstance(v, str) and v.startswith("실패"))
             n_success = len(prediction_results) - n_failed
-            mlflow.log_metrics({"n_predictions_success": n_success, "n_predictions_failed": n_failed})
+            mlflow.log_metrics({
+                "n_predictions_success": n_success, "n_predictions_failed": n_failed,
+                "n_input_suspect": n_success if input_data_suspect else 0,
+            })
     except Exception as e:
         print(f"⚠️ MLflow 로깅 실패(파이프라인은 계속 진행됩니다) — {e}")
 
@@ -703,5 +723,5 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     if n_failed:
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
-    _log_mlflow_run(tickers, version, train_out, gate, results)
+    _log_mlflow_run(tickers, version, train_out, gate, results, input_data_suspect=input_data_suspect)
     return {"version": version, "gate": gate, "predictions": results}
