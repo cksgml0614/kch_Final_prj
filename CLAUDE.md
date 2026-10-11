@@ -1426,6 +1426,7 @@ garch_sigma 0.35 / hl_range_ratio 0.33은 전체 기간판 수치로 보이며, 
 - GPU: RTX 4070, torch 2.5.1+cu121 (pip 번들형, CUDA 툴킷 시스템 설치 아님)
 - DB: Neon(클라우드 Postgres) 단일 DB(`NEON_DB_URL`). 로컬 Docker Postgres는 2026-10-03 폐기 —
   폐기 직전 덤프는 `C:\kch_backup\pre-cleanup-20261003\`(local_stockflow_db.dump, 저장소 밖)
+  Neon 백업 브랜치 `pre-cleanup-1003`은 2026-10-11 사람이 삭제했다(정리 후 파이프라인 정상 실행과 Actions 정상 수집 확인 뒤). 로컬 폴더 `C:\kch_backup\pre-cleanup-20261003\`과는 다른 것이다.
 
 ---
 
