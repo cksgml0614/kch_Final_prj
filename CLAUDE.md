@@ -1089,19 +1089,41 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   변형을 ***로 치환해 ECOS 경로 except 4곳에 적용. 키 재발급은 하지 않음(사람 결정). **확인하지 못한 곳**: GitHub Actions
   실행 로그(gh 미인증. Actions는 시크릿 원문을 자동 마스킹한다 — 인코딩 변형 마스킹 여부는 미확인), git unreachable
   객체, `C:\kch_backup\...\env.bak`(키 원본 보관 파일이라 열지 않음).
-- 📘 **MLflow 읽는 법(2026-10-11)** — 실험: `일일_자동화`(운영), `백테스트`(9/14 D-4).
+- ⚠️ **model_registry에 새 version이 자동으로 등록되지 않는다(2026-10-11, 자동 등록 설계 대기)** — 2026-10-11에 체크포인트
+  meta 53개 + `20260914_132800`(inferred)로 54행을 일괄 적재했다(커밋 `851af65`, 마지막 version `20261011_035645`, 행 없는
+  live 20개와 133952에 추정 note). 그 뒤 일일 실행이 만드는 version은 등록되지 않는다. 그래서 registry 조인으로 model_family를
+  판정하는 쿼리는 새 행을 빠뜨린다 — LEFT JOIN 후 `r.model_version IS NULL`인 행을 따로 확인하고, 계열은 체크포인트
+  `meta.json`의 `model_class`로 판정한다.
+  - 로그 읽는 법(자동 등록 적용 후, `logs/daily_*.log` 줄 맨 앞 마커): `[registry]` 정상 등록 / `[REGISTRY-SKIP]` 등록 실패(그
+    version은 수동 등록 필요) / `[REGISTRY-MISSING]` registry에 없는 version 목록(경고만, 자동 보충 등록은 하지 않는다 — 사람
+    결정) / `[REGISTRY-OFF]` 환경변수 `MODEL_REGISTRY_AUTO=0`으로 꺼짐.
+- 📘 **MLflow 읽는 법(2026-10-11)** — 실험 3개: `old_daily_until_20261011`(id 1, 2026-10-11까지의 운영 기록),
+  `일일_자동화`(새 운영 기록, 다음 운영 실행 때 자동 생성), `백테스트`(id 2, 9/14 D-4).
+  - **실험 분리(2026-10-11, 사람이 MLflow UI에서 변경)**: 옛 `일일_자동화`(id 1)의 이름을 `old_daily_until_20261011`로 바꿨다.
+    2026-10-11까지의 운영 run은 전부 여기 있다. 새 형식(태그, `hybrid_rmse_tickermean`)으로 기록된 첫 run
+    `pd2026-10-08_v20261011_035645`(10/11 12:54 실행) **한 개도 옛 실험에 남아 있다**. 다음 운영 실행에서 코드가 같은 이름
+    `일일_자동화`로 `set_experiment`를 부르면 MLflow가 새 실험을 만든다(새 id는 그 실행 뒤 확인해 적을 것). 코드는 실험을
+    **이름으로만** 찾으므로(`MLFLOW_EXPERIMENT_NAME`, 백테스트는 `"백테스트"`) 새 실험의 id가 무엇이든 영향이 없다
+    (2026-10-11 grep 확인: 저장소 코드에 실험 id 하드코딩 없음). 옛 로그(`logs/daily_*.log`)의 "View run" 링크
+    `#/experiments/1/...`는 옛 실험을 가리킨다.
   - **하이브리드 게이트 RMSE 합치는 규칙**: 값 = `hybrid_rmse_tickermean`(커밋 `00c7fe3` 이후 run).
     이 지표가 없으면 version ≥ `20260928_085818`인 run의 `hybrid_rmse`를 쓴다(이 구간은 이미 종목평균).
     version < `20260928_085818`인 run의 `hybrid_rmse`는 **pooled 집계(게이트 집계 버그 시절)라 같은 축에
     그리지 않는다**. `garch_rmse`/`sma_rmse`/`parkinson_rmse`는 처음부터 종목평균이라 그대로 이어 읽는다.
+    **이 규칙은 `old_daily_until_20261011`을 읽을 때만 필요하다.** 새 `일일_자동화`의 run은 모두 `hybrid_rmse_tickermean`만
+    기록하므로 합칠 필요가 없다.
   - **모델 계열**: 새 run은 태그 `model_family`. 없는 run은 `model_registry`(체크포인트 meta)로 판정한다 —
     version ≤ `20260927_002802` transformer, ≥ `20260928_085818` lstm(체크포인트 meta·MLflow 태그·git 커밋 일치 확인).
     9/28~10/11 LSTM run의 params `D_MODEL`·`NHEAD`·`DIM_FEEDFORWARD`는 의미 없음(실제 hidden = D_MODEL, 층 수 = NUM_LAYERS).
+    ⚠️ 한계: model_registry는 2026-10-11 일괄 적재분(54행, 마지막 `20261011_035645`)뿐이고 새 version은 자동으로 등록되지
+    않는다(위 "model_registry" 항목). 그 뒤 version은 registry에 없을 수 있다. 태그가 있는 새 run은 태그로,
+    그 밖에는 체크포인트 `meta.json`의 `model_class`로 판정한다.
   - **같은 prediction_date의 최종 run** = 태그 `prediction_date`가 같은 run 중 (`run_date`, `version`)이 가장 늦은
     run. 그 version이 `model_predictions.model_version`(그 prediction_date 행)과 같아야 한다 — 다르면 DB 행은
     MLflow 기록을 건너뛰었거나 실패한 실행, 또는 백테스트가 만든 것이다. `run_date`는 실행 PC 날짜(KST), version은 UTC.
     태그가 없는 옛 run(~10/11)은 version을 model_predictions에 조인해서만 prediction_date를 알 수 있고,
     덮어써진 실행의 prediction_date는 알 수 없다. `n_tickers` < 100인 run은 시험 실행이다.
+    두 실험에 걸칠 수 있으므로(예: pd 10/08은 옛 실험에 여러 run이 있고 새 실험에도 생길 수 있음) 두 실험을 함께 검색한다.
   - **run이 없는 날**: 실행이 없었던 날일 수도 있고, 실행은 했지만 **MLflow 기록을 건너뛴 날**일 수도 있다(커밋
     `0e79d8f`부터 `_log_mlflow_run`이 `/health`를 3초 안에 확인하고, 응답이 없으면 기록하지 않는다). 그날 로그
     `logs/daily_*.log`에서 줄 맨 앞 `[MLFLOW-SKIP]`(건너뜀) 또는 `⚠️ MLflow 로깅 실패`(확인 통과 후 실패)를 찾는다.
@@ -1130,6 +1152,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   GARCH 캐시·체크포인트 경로가 운영과 분리될 것 — 분리 방식은 인자 추가(`garch_cache_dir`, `checkpoint_dir`), 저장 테이블은
   `model_predictions_backtest`(PK `(backtest_run_id, ticker, prediction_date)`) + `backtest_runs`, 백테스트의
   `is_early_warning`은 NULL로 정했다(2026-10-11 사람 결정, DDL·코드 미적용).
+  자동 registry 등록(도입 시)은 source='live'로 고정이라, 백테스트 분리 때 source를 인자로 받게 함께 바꿔야 한다.
 
 ---
 
