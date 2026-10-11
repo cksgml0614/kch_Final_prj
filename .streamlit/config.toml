@@ -6,3 +6,19 @@ address = "127.0.0.1"
 [client]
 # 예외가 나도 브라우저에는 일반 메시지만 보인다(오류 원문·traceback은 콘솔에만 남는다).
 showErrorDetails = "none"
+# 헤더의 Deploy 버튼과 ⋮ 메뉴(Rerun·Settings 테마 선택·Clear cache)를 숨긴다 — 밝은 테마 고정 보조(2026-10-11).
+toolbarMode = "minimal"
+
+# 디자인 토큰(2026-10-11, 사람 결정). 색 값은 대시보드/테마.py와 같다(참고 이미지에서 추출).
+# 파랑은 차트 데이터에만 — primaryColor(위젯 강조)는 중립 진회색으로 둔다.
+[theme]
+base = "light"
+primaryColor = "#383B42"
+backgroundColor = "#F2F3F5"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#383B42"
+borderColor = "#EEF0F3"
+showSidebarBorder = false
+baseRadius = "1rem"
+font = "'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif"
+chartCategoricalColors = ["#4673D8", "#5FC3B9", "#F7C846", "#E17331", "#D3A5E1"]
