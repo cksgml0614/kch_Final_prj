@@ -2,7 +2,7 @@
 # Chrome --screenshot 한 방으로는 Streamlit이 웹소켓으로 그리기 전 스켈레톤만 찍혀서, (d) 패널 h3와 plotly 그래프 3개가
 # 뜰 때까지 기다린 뒤 전체 페이지와 (d) 패널 영역을 저장한다. 산출물은 대시보드/screenshots/(gitignore) 권장.
 # 사용: streamlit run 대시보드/model_predictions_dashboard.py --server.port 8599 --server.headless true 실행 후
-#       python 대시보드/capture_screenshot.py "http://localhost:8599/?date=2026-09-21" 대시보드/screenshots/dash.png
+#       python 대시보드/capture_screenshot.py "http://127.0.0.1:8599/?date=2026-09-21" 대시보드/screenshots/dash.png
 
 import asyncio, base64, json, subprocess, sys, time, urllib.request
 import websockets

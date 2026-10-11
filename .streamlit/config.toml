@@ -1,0 +1,8 @@
+# 2026-10-11: 대시보드는 이 PC에서만 연다. 프로젝트 루트에서 `streamlit run 대시보드/...`로 실행할 때만
+# 적용된다(Streamlit은 실행 위치의 .streamlit/config.toml을 읽는다). 전역 설정은 쓰지 않는다.
+[server]
+address = "127.0.0.1"
+
+[client]
+# 예외가 나도 브라우저에는 일반 메시지만 보인다(오류 원문·traceback은 콘솔에만 남는다).
+showErrorDetails = "none"

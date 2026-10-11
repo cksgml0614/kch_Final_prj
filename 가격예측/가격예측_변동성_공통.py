@@ -141,9 +141,10 @@ GARCH_PARAM_CACHE_DIR = os.path.join(_HERE, "checkpoints", "garch_params")
 LOG_DIR = os.path.join(_HERE, "logs")
 
 # MLflow 일일 자동화 로깅 (2026-09-14 신규). 자동화 스크립트는 서버와 같은 컴퓨터에서
-# 돌기 때문에 기본값은 localhost — Tailscale 등 외부 경유는 노트북에서 UI로 조회할 때만
-# 필요하고 이 파이프라인 자체와는 무관하다. 환경변수로 덮어쓸 수 있게 해 서버 위치가
-# 바뀌어도 코드 수정 없이 대응 가능하게 함.
+# 돌기 때문에 기본값은 127.0.0.1이다. 2026-10-11부터 서버를 127.0.0.1에만 바인딩하므로
+# (mlflow_server_start.bat) 다른 기기에서는 UI에 접속할 수 없다 — 원격 조회가 필요하면 인증을
+# 갖춘 터널을 따로 검토한다. 환경변수로 덮어쓸 수 있게 해 서버 위치가 바뀌어도 코드 수정 없이
+# 대응 가능하게 함.
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 MLFLOW_EXPERIMENT_NAME = "일일_자동화"
 
