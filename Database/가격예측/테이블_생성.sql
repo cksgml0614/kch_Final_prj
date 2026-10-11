@@ -66,3 +66,25 @@ CREATE INDEX IF NOT EXISTS idx_model_predictions_prediction_date ON model_predic
 -- UPDATE model_predictions SET input_data_suspect = true WHERE prediction_date IN ('2026-09-18', '2026-09-23');
 -- (같은 날 추가) 9/14 주가 장중 수집 오염(84종목 종가, --force로 정정) — 9/14 입력을 쓴 예측 2행도 표시:
 -- UPDATE model_predictions SET input_data_suspect = true WHERE prediction_date = '2026-09-14';
+
+-- 2026-10-11: 모델 버전(체크포인트) 목록. model_predictions.model_version의 계열·출처를 판정한다(CLAUDE.md "MLflow 읽는 법").
+-- 최초 적재 54행: 체크포인트 meta 53개(family_basis='checkpoint_meta') + 20260914_132800 1행(체크포인트 없음, 'inferred').
+-- source 규칙: n_train < 10000 → 'test', saved_at 2026-09-14 13:39~15:02 UTC이면서 train_end < 2026-09-14 →
+-- 'backtest_d4_20260914', 나머지 → 'live'. gate_definition: version < 20260928_085818 → 'pooled', 이후 → 'tickermean'.
+-- 새 version 자동 등록은 아직 없다(파이프라인 미연동).
+-- FK는 걸지 않는다: 일일 파이프라인이 registry 등록 전에 model_predictions에 쓰므로 FK가 있으면 저장이 실패한다.
+CREATE TABLE IF NOT EXISTS model_registry (
+    model_version       VARCHAR(32)  PRIMARY KEY,                -- model_predictions.model_version과 같은 형식(UTC)
+    model_family        VARCHAR(16)  NOT NULL CHECK (model_family IN ('transformer', 'lstm')),
+    model_class         VARCHAR(64),                              -- 체크포인트 meta model_class
+    family_basis        VARCHAR(16)  NOT NULL CHECK (family_basis IN ('checkpoint_meta', 'inferred')),
+    source              VARCHAR(32)  NOT NULL,                    -- 'live' / 'backtest_d4_20260914' / 'test'
+    gate_definition     VARCHAR(16)  NOT NULL CHECK (gate_definition IN ('pooled', 'tickermean')),
+    train_end           DATE,                                     -- meta train_end(실행 end, KST 날짜)
+    split_train_end     DATE,
+    split_val_end       DATE,
+    n_train             INTEGER,
+    hyperparameter_ref  VARCHAR(64),                              -- 지금은 NULL(월간 튜닝 도입 시)
+    note                TEXT,
+    registered_at       TIMESTAMPTZ  NOT NULL DEFAULT now()
+);

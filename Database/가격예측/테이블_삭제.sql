@@ -1,3 +1,6 @@
 -- model_predictions 테이블 자체를 삭제한다. 다른 테이블이 이를 FK로 참조하지 않으므로 CASCADE 불필요.
 
 DROP TABLE IF EXISTS model_predictions;
+
+-- model_registry(2026-10-11)는 다른 테이블과 FK가 없어 순서 무관.
+DROP TABLE IF EXISTS model_registry;
