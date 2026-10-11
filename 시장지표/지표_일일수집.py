@@ -84,7 +84,7 @@ def run_incremental():
             try:
                 ecos_results = load_ecos_indicators(cur)
             except Exception as e:
-                print(f"❌ [ECOS] 섹션 전체 실패: {e}")
+                print(f"❌ [ECOS] 섹션 전체 실패: {redact(e)}")
                 ecos_results = {}
         conn.commit()
 

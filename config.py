@@ -1,5 +1,7 @@
 # config.py
 import os
+from urllib.parse import quote, quote_plus
+
 from dotenv import load_dotenv
 
 # .env 파일 로드
@@ -22,6 +24,9 @@ def redact(text):
     """로그·상태 문자열에서 비밀값을 ***로 바꾼다(2026-10-11). 예외 메시지를 출력·저장하기 전에 쓴다."""
     s = str(text)
     for secret in (Config.ECOS_API_KEY, Config.DB_URL):
-        if secret:
-            s = s.replace(secret, "***")
+        if not secret:
+            continue
+        # URL 인코딩 변형까지 가린다(긴 것부터 치환). requests는 대문자 %XX를 쓴다.
+        for v in sorted({secret, quote(secret), quote(secret, safe=""), quote_plus(secret)}, key=len, reverse=True):
+            s = s.replace(v, "***")
     return s

@@ -4,6 +4,7 @@
 # 그 자체이므로(고정 시작일 상수 없음, 사람 확인), only_uninitialized=True로 호출해
 # 아직 한 번도 적재 안 된 지표만 대상으로 삼는다.
 
+from config import redact
 from db_manager import get_db_connection
 from 시장지표.지표_공통 import load_ecos_indicators, load_fdr_indicators, _print_section_summary
 
@@ -24,7 +25,7 @@ if __name__ == "__main__":
             try:
                 ecos_results = load_ecos_indicators(cur, only_uninitialized=True)
             except Exception as e:
-                print(f"❌ [ECOS] 초기적재 섹션 전체 실패: {e}")
+                print(f"❌ [ECOS] 초기적재 섹션 전체 실패: {redact(e)}")
                 ecos_results = {}
         conn.commit()
 
