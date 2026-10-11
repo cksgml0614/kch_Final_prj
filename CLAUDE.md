@@ -18,7 +18,9 @@
   성공했다. `daily_pipeline.bat`은 MLflow가 없으면 스스로 띄우고, 로컬 수집 단계는 없다(CP949 인코딩 유지).
   월간 유니버스 점검 워크플로(`monthly_universe_check.yml`)는 2026-10-05부터 job 비활성(`if: ${{ false }}`) —
   `--dry-run`의 DB 적재 문제 수정 후 해제.
-- **대시보드**: `streamlit run 대시보드/model_predictions_dashboard.py`. (d) 패널에서 날짜별 전 종목 예측,
+- **대시보드**: 새 대시보드 `streamlit run 대시보드/운영_대시보드.py`(작업 중, 패널 A → 레벨 피처 트랙 → 패널 B →
+  백테스트 분리 → 패널 C 순서, 2026-10-11 사람 결정). 옛 대시보드는 `쓰래기통/대시보드/`로 옮겼다(폴백: 루트에서
+  `streamlit run 쓰래기통/대시보드/model_predictions_dashboard.py`). 옛 대시보드 (d) 패널에서 날짜별 전 종목 예측,
   상위 10종목, 게이트 통과·입력 오염 여부를 본다.
 - **Neon 전송량 절감(2026-10-05, 커밋 `7a030d0`·`0ab06b5`·`d72b231`)**: 무료 한도 5GB/월을 소진해 접속이 막힌 원인은
   예측 단계가 종목마다 거시지표 9종 전체 이력을 캐시 없이 두 번씩 읽은 것이었다(실행당 약 0.4GB, 추정).
@@ -696,7 +698,8 @@ kch_Final_prj/
 
 > 2026-09-27 추가: `가격예측/검증용/regime_eval.py`(급변/평상 그룹·종목평균 게이트·오라클 가격 환산 공용 평가 함수),
 > `가격예측/검증용/실험_20260927/`(그날 실험 스크립트 아카이브 + README, 데이터는 로컬 전용), `발표자료/`(발표 그래프·EDA
-> 스크립트), `대시보드/capture_screenshot.py`(Chrome DevTools로 Streamlit 렌더 후 캡처, 산출물은 `대시보드/screenshots/`).
+> 스크립트), `대시보드/capture_screenshot.py`(Chrome DevTools로 Streamlit 렌더 후 캡처, 옛·새 대시보드 공용 — 3·4번째 인자로
+> 대기 h3 글자와 최소 plotly 수, 산출물은 `대시보드/screenshots/`).
 
 > 2026-09-12: 위 트리의 `뉴스데이터/`, `감성분석/`, `라벨/`, `빅카인즈/`는 코드 의존성 검증 후
 > `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
@@ -893,6 +896,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   실제로 binary 구현(`psycopg.pq.__impl__ == 'binary'`)으로 동작하므로 `psycopg-binary`는 반드시 유지
 - `market_indicators.unit` DEPRECATED — 적재 시 NULL로 두고 `indicator_meta.unit` 사용
 - `쓰래기통/` 폴더명 오타는 의도된 것("안 쓰는 코드 보관용")
+- `쓰래기통/`은 2026-10-03 `a4a10c9`로 삭제됐다가 2026-10-11에 옛 대시보드 보관용으로 다시 만들었다.
 - ⚠️ **GARCH 파라미터 캐시의 시점 무결성 문제 (2026-09-12 발견, 중요)** —
   `가격예측_변동성_공통.py`의 `get_or_fit_garch_params()`는 캐시(`가격예측/checkpoints/
   garch_params/<ticker>.json`) 재사용 여부를 **`fitted_at` 기준 경과일수(30일 이내)만**

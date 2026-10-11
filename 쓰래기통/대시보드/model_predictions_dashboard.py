@@ -1,6 +1,7 @@
-# 대시보드/model_predictions_dashboard.py — model_predictions 조회 전용 Streamlit 대시보드
-# (2026-09-20). 상시 서버로 띄우지 않고 필요할 때 로컬에서 실행한다:
-#   streamlit run 대시보드/model_predictions_dashboard.py
+# 쓰래기통/대시보드/model_predictions_dashboard.py — 옛 model_predictions 대시보드(2026-09-20, 2026-10-11 보관 이동).
+# 새 대시보드(대시보드/운영_대시보드.py)가 패널을 갖추기 전까지의 폴백. 프로젝트 루트에서 실행해야
+# .streamlit/config.toml이 적용된다:
+#   streamlit run 쓰래기통/대시보드/model_predictions_dashboard.py
 #
 # ⚠️ db_manager를 거치지 않고 os.getenv("NEON_DB_URL")로 운영(Neon) DB에 직접 접속한다.
 #
@@ -21,7 +22,7 @@ load_dotenv()
 
 # `streamlit run 대시보드/...`로 실행하면 sys.path에 대시보드/만 들어가므로 프로젝트 루트를 추가한다
 # (constants.STOCK_NAMES 종목명 표시용, 2026-09-27).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # 쓰래기통/대시보드/ → 루트
 from constants import STOCK_NAMES  # noqa: E402
 
 st.set_page_config(page_title="변동성 예측 대시보드", layout="wide")
