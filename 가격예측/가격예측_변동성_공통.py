@@ -36,6 +36,7 @@ import requests
 import torch
 from arch import arch_model
 
+from config import redact
 from db_manager import get_db_connection
 from 가격예측.garch_baseline import (
     compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
@@ -157,6 +158,52 @@ MLFLOW_HTTP_LIMITS = {
     "MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR": "1",
     "MLFLOW_HTTP_REQUEST_TIMEOUT": "15",
 }
+
+# 2026-10-11: 체크포인트를 저장한 직후 그 version을 model_registry에 등록한다(_register_model_version).
+# 일일 경로 전용 값이다. 백테스트 분리 때는 source를 인자로 받게 바꾼다(백테스트_월간.py는 지금 실행 금지).
+# 끄려면 환경변수 MODEL_REGISTRY_AUTO=0.
+REGISTRY_SOURCE = "live"
+REGISTRY_GATE_DEFINITION = "tickermean"
+REGISTRY_MISSING_SHOW = 10  # [REGISTRY-MISSING] 줄에 보여줄 최대 version 수
+
+
+def _register_model_version(version):
+    """체크포인트 meta.json으로 model_registry에 1행을 INSERT ... ON CONFLICT DO NOTHING 한다(2026-10-11).
+    이어서 로컬 체크포인트 version과 model_predictions의 version 중 registry에 없는 것을 찾아 경고한다
+    (자동 보충 등록은 하지 않는다 — 시험 실행 체크포인트를 'live'로 잘못 넣을 수 있어 사람이 보고 넣는다).
+    부가 기록이라 실패해도 예외를 던지지 않는다. 줄 맨 앞 [REGISTRY-SKIP]을 붙인 경고만 남기고 돌아간다.
+    경고에는 예외 클래스명만 넣고(원문에 접속 정보가 섞일 수 있음), 출력 전에 redact를 거친다."""
+    try:
+        if os.environ.get("MODEL_REGISTRY_AUTO", "1") == "0":
+            print(f"[REGISTRY-OFF] model_registry 자동 등록 꺼짐(MODEL_REGISTRY_AUTO=0) — version {version} 등록 안 함")
+            return
+        with open(os.path.join(CHECKPOINT_DIR, version, "meta.json"), encoding="utf-8") as f:
+            meta = json.load(f)
+        family = next(k for k, v in _ARCHITECTURES.items() if v["model_class_name"] == meta["model_class"])
+        row = (version, family, meta["model_class"], "checkpoint_meta", REGISTRY_SOURCE, REGISTRY_GATE_DEFINITION,
+               meta["train_end"], meta["split_train_end"], meta["split_val_end"], meta["n_train"])
+        local_versions = {d for d in os.listdir(CHECKPOINT_DIR)
+                          if os.path.isfile(os.path.join(CHECKPOINT_DIR, d, "meta.json"))}
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO model_registry (model_version, model_family, model_class, family_basis, source, "
+                    "gate_definition, train_end, split_train_end, split_val_end, n_train) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (model_version) DO NOTHING", row)
+                inserted = cur.rowcount
+                cur.execute("SELECT model_version FROM model_registry")
+                registered = {r[0] for r in cur.fetchall()}
+                cur.execute("SELECT DISTINCT model_version FROM model_predictions")
+                predicted = {r[0] for r in cur.fetchall()}
+            conn.commit()
+        print(f"[registry] {version} {'신규 등록' if inserted == 1 else '이미 등록돼 있음'}({family})")
+        missing = sorted((local_versions | predicted) - registered)
+        if missing:
+            shown = ", ".join(missing[:REGISTRY_MISSING_SHOW]) + (" …" if len(missing) > REGISTRY_MISSING_SHOW else "")
+            print(f"[REGISTRY-MISSING] ⚠️ model_registry에 없는 version {len(missing)}개: {shown}")
+    except Exception as e:
+        print(redact(f"[REGISTRY-SKIP] ⚠️ model_registry 등록 실패({type(e).__name__}) — 예측·저장은 계속된다. "
+                     f"version {version}은 registry에 없으므로 수동 등록이 필요하다."))
 
 
 def _mlflow_health_problem(uri):
@@ -719,6 +766,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
             "split_val_end": str(train_out["val_end"].date()),
         },
     )
+    _register_model_version(version)
 
     gate_str = "통과" if gate["passed"] else "미통과"
     print(f"\n📊 pooled 하이브리드 변동성 모델 학습 완료(버전 {version}, "
