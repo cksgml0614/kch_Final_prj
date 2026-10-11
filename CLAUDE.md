@@ -913,6 +913,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   않아, 최근 며칠치 `model_predictions.actual_volatility`는 항상 수동 실행 전까지 NULL로
   남아있다(대시보드 등에서 봤을 때 버그처럼 보일 수 있음 — 정상 상태). 다음 세션 과제로
   남김.
+  평가·표시는 `model_predictions_realized` 뷰로 대체 가능(2026-10-11, 아래 "휴장일 target_date" 항목 참고).
 - ⚠️ **`daily_pipeline.bat`은 CP949로 저장돼 있다 — UTF-8로 다시 저장하지 말 것(2026-09-24,
   커밋 `98aae71`)** — 더블클릭 실행 시 한글 텍스트가 깨져 명령어로 오인되는 에러
   (`'◆◆령으로' is not recognized...`)로 세 스크립트가 시작도 못 하던 문제. **원인은 BOM이
@@ -1056,6 +1057,33 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   - **207940**: 9/08~10/01의 16일 종가가 DB/소스 0.776% 일정 비율로 다르고 거래량도 0.992배로 일정하다. 소스의 사후
     수정주가 조정으로 추정한다(미확인). 10/02 이후는 일치한다.
   - **003490(9/30)·175330(10/02)**: 종가 1호가(50원) 차이, 거래량은 99.6% 이상 같다. 원인 미확인.
+- ⚠️ **휴장일 target_date → actual_volatility 영구 NULL(2026-10-11 확인, 우회 적용)** — `next_weekday()`는 주말만 건너뛰고
+  공휴일을 몰라, 휴장일을 target_date로 저장한다(8/17·9/24·10/5·10/9, 400행). 백필은 target_date 종가를 찾으므로 이 행들은
+  영원히 NULL이고, 실제 다음 거래일을 target으로 한 행은 생기지 않는다. 우회: `model_predictions_realized` 뷰
+  (`Database/가격예측/뷰_생성.sql`, 커밋 `9b2c629`)가 prediction_date 뒤 그 종목의 첫 거래일로 실측을 계산한다
+  (realized_date/realized_volatility/realized_status/target_halted). 기존 actual_volatility 2,002행과 불일치 0. target_date
+  계산 자체는 미수정(거래일 달력 필요).
+- ⚠️ **같은 키 재계산 시 이력 소실(2026-10-11 기록, 미조치)** — `save_prediction()`은 (ticker, target_date) UPSERT라, 같은
+  prediction_date를 다시 계산하면(휴장일·주말 실행, 보충 실행, 수동 재실행) 예측값·model_version·게이트·suspect가 덮어써지고
+  이전 값은 남지 않는다. 예: prediction_date 10/08은 10/9·10/10·10/11 실행이 세 번 덮어씀, 10/02의 첫 trusted 기록은 10/6
+  07:38 실행으로 교체됨. **`created_at`은 최초 INSERT 시각이라 덮어써도 바뀌지 않는다 — 현재 값의 계산 시각이 아니다.**
+  현재 값의 계산 시각은 `model_version`(UTC, `YYYYMMDD_HHMMSS`, 체크포인트 저장 시각이라 실제 저장보다 최대 약 11분 이르다).
+- ⚠️ **빠진 날 소급 예측 없음(2026-10-11 기록, 미조치)** — 파이프라인은 실행 시점의 최신 거래일만 예측한다. 실행이 없던 날
+  (예: 9/30 → prediction_date 9/29)의 예측은 이후에도 만들어지지 않는다.
+- ⚠️ **"사전에 만든 예측"이 아닌 행(2026-10-11 확인)** — 보충 실행·백테스트로 일부 행은 realized_date 장 시작(09:00 KST)
+  뒤에 계산됐다. 입력에 그날 종가는 없어 데이터 누수는 아니지만 실시간 예측 평가에는 쓰면 안 된다. 원칙은
+  **`model_version`(UTC→KST) < realized_date 09:00 KST**인 행이다. 다만 model_version이 실제 저장보다 최대 약 11분 이르므로,
+  **실제 평가에는 안전 여유를 두어 model_version(KST) < realized_date 08:30 KST인 행만 쓴다.** created_at은 위 이유로
+  부적합하다(09:00 기준으로 created_at이면 702행, model_version이면 602행. 차이 100행은 9/23→9/28: created_at 9/24 10:27,
+  실제 계산 9/28 17:58). confirmed 2,802행 중 1,900행(prediction_date 8/14~9/10)은 9/14 백테스트(D-4) 산출물, 나머지 비사전
+  행은 9/28·9/30 보충 실행분이다.
+- ✅ **ECOS 키 노출 점검·차단(2026-10-11, 커밋 `d047b28`·`2521bd5`)** — 점검: `logs/`(`.gitignore` `/logs/`)·`가격예측/logs/`
+  (`*.log`)는 git 미추적·이력 0건, 작업 트리(.env·.venv 제외)·로컬 로그·git 이력 전체(`log -p --all`)에서 키 0회. 원인 경로:
+  ECOS는 키를 URL 경로에 넣고 requests 예외 문자열은 URL을 포함한다(가짜 키로 재현). 조치: `fetch_ecos_series`가
+  RequestException을 클래스명·요청 식별자만 담은 RuntimeError로 바꾸고(`from None`), `config.redact()`가 비밀값과 그 URL 인코딩
+  변형을 ***로 치환해 ECOS 경로 except 4곳에 적용. 키 재발급은 하지 않음(사람 결정). **확인하지 못한 곳**: GitHub Actions
+  실행 로그(gh 미인증. Actions는 시크릿 원문을 자동 마스킹한다 — 인코딩 변형 마스킹 여부는 미확인), git unreachable
+  객체, `C:\kch_backup\...\env.bak`(키 원본 보관 파일이라 열지 않음).
 
 ---
 
