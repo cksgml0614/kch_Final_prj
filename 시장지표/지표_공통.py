@@ -18,7 +18,6 @@ import requests
 
 from config import Config, redact
 from constants import last_storable_date
-from db_manager import get_db_connection
 from 시장지표.db_utils import get_last_date, upsert_indicator_meta, upsert_market_indicators
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":

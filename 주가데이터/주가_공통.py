@@ -3,7 +3,7 @@
 # 뉴스_공통.py 패턴과 통일). 두 파일 모두 이 파일만 import하고 서로를 참조하지 않는다.
 
 import FinanceDataReader as fdr
-from datetime import timedelta, date
+from datetime import timedelta
 from constants import ACTIVE_TICKERS, last_storable_date
 from db_manager import get_db_connection
 

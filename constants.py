@@ -170,8 +170,5 @@ STOCKS = [
     Stock("052690", "한전기술", True),          # 대체(원래 순위는 062040 산일전기)
 ]
 
-# 종목코드 -> 회사명 매핑 (비활성 포함 전체, 대시보드 표시용)
-STOCK_NAMES = {s.ticker: s.name for s in STOCKS}
-
 # 활성 종목코드만 (주가 로더 등 "무엇을 수집할지"만 필요한 쪽에서 사용)
 ACTIVE_TICKERS = [s.ticker for s in STOCKS if s.active]

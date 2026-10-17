@@ -270,8 +270,8 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
         shared_cache=shared_cache,
     )
     assert train_end2 == train_end and val_end2 == val_end
-    X_train, y_train, tid_train, d_train, _ = splits["train"]
-    X_val, y_val, tid_val, d_val, _ = splits["val"]
+    X_train, y_train, tid_train, _, _ = splits["train"]
+    X_val, y_val, tid_val, _, _ = splits["val"]
 
     n_train_by_ticker = {t: int((tid_train == tid).sum()) for t, tid in ticker_to_id.items()}
     thin = {t: n for t, n in n_train_by_ticker.items() if n < MIN_TRAIN_SEQUENCES}

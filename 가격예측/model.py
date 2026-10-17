@@ -42,7 +42,7 @@ class PooledLSTMRegressor(nn.Module):
 
     def forward(self, x, ticker_ids):
         # x: (B, L, F), ticker_ids: (B,) 정수 텐서
-        B, L, _ = x.shape
+        _, L, _ = x.shape
         emb = self.stock_embedding(ticker_ids)             # (B, E)
         emb = emb.unsqueeze(1).expand(-1, L, -1)            # (B, L, E) — 매 타임스텝에 동일 종목 임베딩 broadcast
         h = torch.cat([x, emb], dim=-1)                     # (B, L, F+E)

@@ -9,7 +9,6 @@ import html
 import streamlit as st
 
 # ── 중립색 ──
-PAGE_BG = "#F2F3F5"
 CARD_BG = "#FFFFFF"
 SUBTLE_BG = "#F8F9FB"     # 표 머리·줄무늬
 BORDER = "#EEF0F3"
