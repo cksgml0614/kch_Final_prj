@@ -7,9 +7,9 @@
 
 ### 📌 현재 상태 요약 — 2026-10-05 기준 (여기만 읽어도 되게 압축. 아래는 날짜순 상세 기록)
 
-**0. 코드 정리(2026-10-17, 브랜치 `cleanup/pipeline-stages` — main에 아직 합치지 않음)**
+**0. 코드 정리(2026-10-17, 브랜치 `cleanup/pipeline-stages` — 10/17 main 병합, 10/18 정리 3단계 추가 병합, 아래 "병합·검증")**
 - **기준점**: 정리 전 코드는 git 태그 `pre-cleanup`(커밋 `739e6ea`, main)에 있다. 지운 파일·함수는 `git show pre-cleanup:<경로>`로 본다.
-  정리는 작업 트리 `C:\kch_cleanup`(브랜치 `cleanup/pipeline-stages`)에서 했고 운영 폴더 `C:\kch_Final_prj`(main)는 그대로다.
+  정리는 작업 트리 `C:\kch_cleanup`(브랜치 `cleanup/pipeline-stages`)에서 했다.
 - **지운 것**: Transformer 계열(TransformerRegressor·PooledTransformerRegressor·train_pooled_transformer·_ARCHITECTURES·
   MODEL_ARCHITECTURE 환경변수 — **Transformer로 되돌리는 경로는 없어졌다**), 1세대 단일 종목 방향 함수, 방향 target
   데이터셋(build_merged_dataset_v2 등), 3세대 급변 손실 실험(가중 MSE·pinball), DEAD 코드, `가격예측/검증용/` 전체,
@@ -24,8 +24,8 @@
   코드·훅·워크플로는 이 해시를 검증하지 않고, 파이프라인은 이 파일들을 읽지 않는다.
 - **새 구조(단계 축, 파일 이름은 그대로)**: 수집(`주가데이터/`·`시장지표/`, 변경 없음) → 입력 점검(`가격예측_변동성_공통`:
   가격 정렬·지수 신선도) → 피처(`dataset_builder`: 기본 피처·recent_vol·target / `momentum_feature`: excess_return_z /
-  `split_dataset`: 학습 frame·서빙 창을 같은 `_lagged_features`로 조립, `valid_feature_dates` / `garch_baseline`:
-  `garch_sigma_series` 등) → 시퀀스(`pooled_dataset`·`sequence_dataset`) → 학습(`train_common.train_model(..., TrainConfig)`,
+  `split_dataset`: 학습 frame·서빙 창을 같은 `_lagged_features`로 조립, `valid_feature_dates` / `baselines`:
+  GARCH σ·GARCH 캐시·SMA20·Parkinson baseline, 2026-10-18 통합) → 시퀀스(`pooled_dataset`·`sequence_dataset`) → 학습(`train_common.train_model(..., TrainConfig)`,
   하이퍼파라미터는 설정 객체, 기본값 = 운영값) → 평가(`evaluate.evaluate_gate`) → 저장+예측(`store`: 체크포인트·
   model_registry·model_predictions·MLflow, Sink 3종 `DbSink`/`MlflowSink`/`CollectSink`). 오케스트레이터
   `가격예측_변동성_공통.run_pooled_volatility_pipeline`은 기본 인자만 쓰면 운영 동작 그대로이고, `sinks=[store.CollectSink()]`,
@@ -46,6 +46,21 @@
   지웠다. 이 문서 곳곳의 "상세: …md" 참조는 "pre-cleanup 태그 시점의 …"로 표시했고, 상세 수치·표는 `git show pre-cleanup:<파일명>`으로 본다.
   이 문서에 적힌 요약·결론은 그대로 유효하다. ⚠️ `Database/가격예측/테이블_생성.sql` 주석(3·11행)의 결과 문서 참조는 Database SQL을
   바꾸지 않는 원칙에 따라 그대로 남겼다. 판정기준 해시 3개 파일은 이 문서들을 참조하지 않는다.
+- **병합·검증(2026-10-17~18)**:
+  - 1차: `cleanup/pipeline-stages`를 10/17 병합 커밋 `a433ead`로 main에 합쳤다. 10/18(일) 05:00 무인 실행(a433ead)이 10/17 수동
+    실행과 예측 100행·게이트·플래그·baseline·state_dict SHA256 `cec251d4…`까지 같았다. 입력 차이는 Actions가 넣은 USD_KRW
+    2026-10-17(토) 1행뿐이었고(기존 행 변경 0) 예측에는 영향이 없었다. suspect=false, `[PRICE-ALIGN]` 100/100 일치.
+  - 2차(10/18): 정리 3단계를 fast-forward로 합쳐 **main = `d666dff`**. `cleanup/tidy-after-merge`(미사용 상수·함수·import 삭제,
+    모듈 간 비공개 이름 공개화), `cleanup/baselines-merge`(`garch_baseline.py`·`parkinson_baseline.py`·GARCH 캐시를
+    `가격예측/baselines.py`로 이동만), `cleanup/comments`(주석·docstring 정리, 코드 변경 없음 + `가격예측/결정기록.md` — 코드 주석에
+    흩어진 운영 결정 16개). 로컬 태그 `pre-tidy-merge`(= `a433ead`). **push하지 않았다 — origin/main은 `a433ead`, 로컬 main이
+    6커밋 앞선다.** bat·`.github/workflows`는 이 6커밋에서 바뀌지 않았다.
+  - d666dff 검증: py_compile·pyflakes 경고 0, import 스모크 15/15(삭제된 두 모듈의 `__pycache__` 잔여 .pyc는 import되지 않음),
+    골든 G1 41/41·G2(예측 100행, 게이트, state_dict SHA256 `cec251d4…`, MLflow params·metrics·epoch 기록) 정확 일치, DB 지문 전후
+    같음, 운영 GARCH 캐시·checkpoints 변화 없음. 하네스는 운영 폴더를 대상으로 돌지 못하게 막혀 있어(`assert tree != PROD`) 같은
+    커밋의 worktree `C:\kch_comments`로 돌렸다. 하네스·기준 파일·결과는 저장소 밖 `C:\kch_snap\scratchpad_1017\`(이번 결과는
+    `post_merge\`, 일요일 점검 지문·스냅샷은 `C:\kch_snap\`).
+  - 되돌릴 때(사람 지시가 있을 때만): `git reset --hard pre-tidy-merge`(로컬 main만, push 전이라 원격 영향 없음).
 
 **1. 운영 시스템 — 완성·가동 중**
 - **모델**: 100종목 pooled **LSTM**(15피처, hidden 32·2층, dropout 0.3, wd 1e-4, 종목 임베딩). 2026-09-27에 기본값을
@@ -67,7 +82,7 @@
   데이터 연결, `대시보드/패널A_데이터.py`)는 보류** — 다음 세션에 diff 재제시(열 = 예측 기준일, Actions는 시작 KST
   12시 전이면 전날 귀속, 새로고침은 DB·로컬 캐시만 비움). 옛 대시보드(날짜별 전 종목 예측·상위 10종목·게이트 통과·입력 오염 여부를
   보던 (d) 패널)는 정리 브랜치에서 지웠다(pre-cleanup 태그 시점의 `쓰래기통/대시보드/model_predictions_dashboard.py`). 새 대시보드
-  패널 A가 연결될 때까지는 DB를 직접 조회해야 한다(main에는 아직 옛 대시보드가 있다).
+  패널 A가 연결될 때까지는 DB를 직접 조회해야 한다(10/17 병합으로 main에서도 옛 대시보드는 지워졌다).
 - **Neon 전송량 절감(2026-10-05, 커밋 `7a030d0`·`0ab06b5`·`d72b231`)**: 무료 한도 5GB/월을 소진해 접속이 막힌 원인은
   예측 단계가 종목마다 거시지표 9종 전체 이력을 캐시 없이 두 번씩 읽은 것이었다(실행당 약 0.4GB, 추정).
   ① 거시지표·KOSPI를 실행 시작 시 한 번만 읽어 학습·예측이 공유, ② 지표 조회 하한을 "시작일 이전 마지막 공표일"로
@@ -189,8 +204,8 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
     D+1 00:43~02:56). ③ **기준금리(722Y001) 알람은 소스 정체다**(ECOS가 10/08 이후 값을 내지 않음, DB와 일치 — 수집기 문제
     아님). 10/22 금통위 이후 ECOS 갱신 여부를 다시 보고, 그때까지 Actions·로컬 지표 수집의 exit 1은 이 알람이다
     (DAILY_LAG_LIMITS는 바꾸지 않음). ④ 10/14 05:00 실행 누락 원인 미확정(아래 알려진 이슈).
-15. **정리 브랜치 후속(2026-10-17)**: ① `cleanup/pipeline-stages`를 main에 합칠지 사람이 결정한다(합칠 때는 주말에, 첫 05:00 실행
-    로그·DB 행 확인). ② **거래정지일 행(시가·고가·저가=0, 거래량 0, 종가=직전 종가) 피처 처리**: 활성 11종목 112행(예: 017670
+15. **정리 브랜치 후속(2026-10-17)**: ① ~~`cleanup/pipeline-stages`를 main에 합칠지 결정~~ — 10/17·10/18 병합 완료(상태 요약 0번
+    "병합·검증", 남은 일은 16번). ② **거래정지일 행(시가·고가·저가=0, 거래량 0, 종가=직전 종가) 피처 처리**: 활성 11종목 112행(예: 017670
     2021-10~11 24행, 012450 2024-08~09 18행, 최근 377300 2025-06-24~26). 그날 `open_gap_ratio=-1`, `hl_range_ratio=0`,
     Parkinson `ln(0/0)`=NaN(이후 20일 baseline NaN). 대부분 train 구간 — 처리 방식은 재학습·게이트 재평가가 필요하다.
     ③ **기준 달력(005930 하드코딩) 대체**: 분할 경계는 ACTIVE_TICKERS[0](현재 005930), 월간 유니버스 점검은 `"005930"` 문자열로
@@ -200,6 +215,12 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
     `monthly_universe_check.yml` 55행·문서를 함께 고친다. ⑤ 백테스트를 다시 만들 때는 `run_pooled_volatility_pipeline`의
     `sinks`·`checkpoint_dir`·`garch_cache_dir`·`garch_read_only`와 `store.DbSink(registry_source=...)`로 운영과 분리한다
     (2026-10-11 결정한 `model_predictions_backtest`·`backtest_runs` 테이블은 아직 없음).
+16. **병합 후속(2026-10-18)**: ① 10/19(월) 05:00이 `d666dff`로 도는 첫 무인 실행이다 — 로그의 `[collect]`·`[PRICE-ALIGN]`·
+    `[registry]`·MLflow run과 DB 행을 확인한다(PC는 종료 말고 절전, AC 전원 유지 — 작업에 배터리 조건이 있다). ② 확인 뒤 worktree 4개
+    (`C:\kch_cleanup`·`C:\kch_tidy`·`C:\kch_baselines`·`C:\kch_comments`)와 정리 브랜치를 정리하고, push 여부를 사람이 정한다.
+    ③ **운영 GARCH 캐시(fitted_at 2026-09-20 전 종목)는 10/21 실행부터 30일을 넘겨 100종목을 다시 적합한다**(`baselines.
+    get_or_fit_garch_params`, `age_days <= 30`이면 재사용). 그날은 캐시 파일이 새로 쓰이고 GARCH baseline·σ 피처가 바뀌어 예측이 전날
+    모델과 같은 기준이 아니다. 골든 하네스도 GARCH 복사본이 만료되는 10/20까지만 유효하다.
 
 ---
 
@@ -774,9 +795,9 @@ kch_Final_prj/
 > 스크립트) — 셋 다 2026-10-17 정리 브랜치에서 삭제. `대시보드/capture_screenshot.py`(Chrome DevTools로 Streamlit 렌더 후 캡처
 > — 3·4번째 인자로 대기 h3 글자와 최소 plotly 수, 산출물은 `대시보드/screenshots/`).
 
-> 2026-10-17 정리 브랜치의 `가격예측/`(운영 경로만): `가격예측_변동성_일일수집.py`(CLI 진입점) · `가격예측_변동성_공통.py`(오케스트레이터·
-> 설정·입력 점검·GARCH 캐시·baseline) · `dataset_builder.py` · `momentum_feature.py` · `split_dataset.py`(학습 frame·서빙 창) ·
-> `garch_baseline.py` · `parkinson_baseline.py` · `sequence_dataset.py` · `pooled_dataset.py` · `train_common.py`(TrainConfig·train_model) ·
+> 2026-10-18 main(`d666dff`)의 `가격예측/`(운영 경로만): `가격예측_변동성_일일수집.py`(CLI 진입점) · `가격예측_변동성_공통.py`(오케스트레이터·
+> 설정·입력 점검) · `dataset_builder.py` · `momentum_feature.py` · `split_dataset.py`(학습 frame·서빙 창) ·
+> `baselines.py`(GARCH·SMA20·Parkinson baseline, GARCH 캐시) · `결정기록.md`(운영 결정 16개) · `sequence_dataset.py` · `pooled_dataset.py` · `train_common.py`(TrainConfig·train_model) ·
 > `model.py`(PooledLSTMRegressor·MODEL_FAMILY) · `evaluate.py`(게이트) · `store.py`(체크포인트·registry·예측·MLflow·Sink) ·
 > `종목_월간갱신.py`. 위 상태 요약 0번 참고.
 
@@ -978,7 +999,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
 - `쓰래기통/`은 2026-10-03 `a4a10c9`로 삭제됐다가 2026-10-11에 옛 대시보드 보관용으로 다시 만들었고, 2026-10-17 정리 브랜치에서
   옛 대시보드와 함께 다시 지웠다(pre-cleanup 태그 시점에 있음).
 - ⚠️ **GARCH 파라미터 캐시의 시점 무결성 문제 (2026-09-12 발견, 중요)** —
-  `가격예측_변동성_공통.py`의 `get_or_fit_garch_params()`는 캐시(`가격예측/checkpoints/
+  `가격예측/baselines.py`(2026-10-18 이전엔 `가격예측_변동성_공통.py`)의 `get_or_fit_garch_params()`는 캐시(`가격예측/checkpoints/
   garch_params/<ticker>.json`) 재사용 여부를 **`fitted_at` 기준 경과일수(30일 이내)만**
   확인하고, 캐시된 파라미터가 **지금 요청된 `train_end` 기준으로 적합된 것인지는 검증하지
   않는다.** 매일 "오늘" 기준으로 실행하는 정상 운영 경로에서는 `train_end`가 계속
