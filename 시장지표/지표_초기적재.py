@@ -6,7 +6,7 @@
 
 from config import redact
 from db_manager import get_db_connection
-from 시장지표.지표_공통 import load_ecos_indicators, load_fdr_indicators, _print_section_summary
+from 시장지표.지표_공통 import load_ecos_indicators, load_fdr_indicators, print_section_summary
 
 if __name__ == "__main__":
     with get_db_connection() as conn:
@@ -29,5 +29,5 @@ if __name__ == "__main__":
                 ecos_results = {}
         conn.commit()
 
-        _print_section_summary("FDR", fdr_results)
-        _print_section_summary("ECOS", ecos_results)
+        print_section_summary("FDR", fdr_results)
+        print_section_summary("ECOS", ecos_results)

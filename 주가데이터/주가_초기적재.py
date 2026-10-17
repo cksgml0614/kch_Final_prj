@@ -4,13 +4,13 @@
 # 전체 적재한다.
 
 from constants import STOCK_INITIAL_LOAD_START
-from 주가데이터.주가_공통 import TICKERS, _needs_initial_load, update_stock_data
+from 주가데이터.주가_공통 import TICKERS, needs_initial_load, update_stock_data
 
 if __name__ == "__main__":
     results = {}
     for ticker in TICKERS:
         try:
-            if not _needs_initial_load(ticker):
+            if not needs_initial_load(ticker):
                 print(f"⏭️ {ticker}: 이미 데이터가 있어 초기적재 대상이 아닙니다 (주가_일일수집.py 사용).")
                 results[ticker] = "스킵 (이미 초기적재됨)"
                 continue

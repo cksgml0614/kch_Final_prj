@@ -18,7 +18,7 @@ def get_last_date(cur, ticker):
     return result
 
 
-def _needs_initial_load(ticker):
+def needs_initial_load(ticker):
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패")

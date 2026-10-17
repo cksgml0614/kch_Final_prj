@@ -528,7 +528,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=D
         )
         results[ticker] = r["result"] if r["status"] == "success" else f"실패 ({r['error']})"
 
-    n_success, n_failed, n_excluded = store._count_prediction_results(results)
+    n_success, n_failed, n_excluded = store.count_prediction_results(results)
     print(f"\n=== 종목별 예측 결과 ({n_success}/{len(tickers)} 성공, 실패 {n_failed}, 제외 {n_excluded}) ===")
     for ticker, r in results.items():
         print(f"  {ticker}: {r}")

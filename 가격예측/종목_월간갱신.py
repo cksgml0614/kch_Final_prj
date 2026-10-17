@@ -36,7 +36,7 @@ import FinanceDataReader as fdr
 from constants import ACTIVE_TICKERS, MIN_TRAIN_SEQUENCES, STOCK_INITIAL_LOAD_START, STOCKS
 from 가격예측.pooled_dataset import compute_global_split_dates
 from 가격예측.split_dataset import valid_feature_dates
-from 주가데이터.주가_공통 import _needs_initial_load, update_stock_data
+from 주가데이터.주가_공통 import needs_initial_load, update_stock_data
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -81,7 +81,7 @@ def ensure_price_data(ticker):
     """daily_stock_prices에 해당 종목 데이터가 전혀 없으면 초기적재한다(월간갱신이 신규
     종목을 완전히 자동으로 처리할 수 있도록 — 사람이 별도로 주가_초기적재.py를 먼저
     돌려줄 필요가 없게 함)."""
-    if _needs_initial_load(ticker):
+    if needs_initial_load(ticker):
         print(f"  {ticker}: 가격 데이터 없음 — {STOCK_INITIAL_LOAD_START}부터 초기적재")
         update_stock_data(ticker, start_date_override=STOCK_INITIAL_LOAD_START)
 

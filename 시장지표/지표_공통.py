@@ -289,7 +289,7 @@ def load_ecos_indicators(cur, only_uninitialized=False):
     return results
 
 
-def _print_section_summary(section_name, results):
+def print_section_summary(section_name, results):
     print(f"\n=== [{section_name}] 처리 결과 ===")
     for code, r in results.items():
         line = f"{code}: {r['status']} | fetched={r['rows_fetched']} inserted={r['inserted']} updated={r['updated']}"

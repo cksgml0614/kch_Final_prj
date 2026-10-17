@@ -18,7 +18,7 @@ from datetime import date
 from config import redact
 from db_manager import get_db_connection
 from 시장지표.지표_공통 import (
-    ECOS_INDICATOR_META, FDR_INDICATOR_MAP, _print_section_summary, check_daily_indicator_lag,
+    ECOS_INDICATOR_META, FDR_INDICATOR_MAP, print_section_summary, check_daily_indicator_lag,
     force_refetch_indicator, load_ecos_indicators, load_fdr_indicators,
 )
 
@@ -61,7 +61,7 @@ def run_force(args):
                 conn.rollback()
             else:
                 conn.commit()
-    _print_section_summary("강제 재수집", results)
+    print_section_summary("강제 재수집", results)
     for code, r in results.items():
         if r["rows_fetched"] == 0 and not r["status"].startswith("실패"):
             print(f"  ⚠️ {code}: 소스에서 받은 행이 0건 — 기간/소스 상태 확인 필요")
@@ -88,8 +88,8 @@ def run_incremental():
                 ecos_results = {}
         conn.commit()
 
-        _print_section_summary("FDR", fdr_results)
-        _print_section_summary("ECOS", ecos_results)
+        print_section_summary("FDR", fdr_results)
+        print_section_summary("ECOS", ecos_results)
 
         problems = []
         if not fdr_results:

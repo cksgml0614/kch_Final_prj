@@ -302,7 +302,7 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, lookback, model, s
     }
 
 
-def _count_prediction_results(results):
+def count_prediction_results(results):
     """종목별 결과를 (성공, 실패, 제외) 수로 센다. 성공 = dict, 실패 = "실패 ..." 문자열,
     제외 = "제외 ..." 문자열(가격 정렬 이탈로 예측을 저장하지 않은 종목, 2026-10-17)."""
     n_success = sum(1 for v in results.values() if isinstance(v, dict))
@@ -324,7 +324,7 @@ def build_run_payload(tickers, version, train_out, gate, prediction_results, mod
     cfg = train_out["train_config"]
     pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
     pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
-    n_success, n_failed, n_excluded = _count_prediction_results(prediction_results)
+    n_success, n_failed, n_excluded = count_prediction_results(prediction_results)
     return {
         "run_name": f"pd{pred_date_tag}_v{version}",
         "tags": {
