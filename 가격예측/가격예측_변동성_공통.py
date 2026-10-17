@@ -27,26 +27,18 @@
 # 남기고 재귀적 σ 계산(garch_sigma_series, 비용이 훨씬 작음)은 매일 최신 가격 이력
 # 전체에 대해 새로 돌린다.
 
-import json
 import os
 import time
-from datetime import date
 
 import numpy as np
-import pandas as pd
 import torch
-from arch import arch_model
 
 from constants import MIN_TRAIN_SEQUENCES
 from db_manager import get_db_connection
 from 가격예측 import store
+from 가격예측.baselines import compute_ticker_baselines
 from 가격예측.evaluate import evaluate_gate
-from 가격예측.garch_baseline import (
-    SMA_WINDOW, compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
-    garch_sigma_series, load_close_prices, rmse_mae,
-)
 from 가격예측.momentum_feature import load_true_kospi
-from 가격예측.parkinson_baseline import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
 from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_split_dates
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import (
@@ -66,10 +58,6 @@ LOOKBACK = 20
 # 재검토해야 한다 — 자동으로 재조정되지 않는다.
 DEFAULT_TRAIN_CONFIG = TrainConfig()
 
-# GARCH 파라미터를 이 일수 이내에 이미 재추정했으면 캐시를 그대로 재사용(월 1회 재추정 원칙,
-# 위 헤더 설명 참고).
-GARCH_REFIT_MAX_AGE_DAYS = 30
-
 
 # MIN_TRAIN_SEQUENCES(최소 train 시퀀스 수)는 2026-10-17부터 constants.py에 있다 — 종목_월간갱신.py가 이 상수
 # 하나 때문에 이 모듈(torch·mlflow)을 import하지 않게 하려고 옮겼다. 값과 근거는 constants.py 참고.
@@ -78,7 +66,6 @@ _HERE = os.path.dirname(__file__)
 CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints", "pooled_volatility_hybrid")
 # (8종목 시절 방향예측 pooled 모델의 checkpoints/pooled/ 와는 다른 디렉터리다. 운영 경로는 run_pooled_volatility_pipeline의
 # checkpoint_dir·garch_cache_dir·log_dir 인자로 바꿀 수 있다 — 기본값이 아래 세 상수다.)
-GARCH_PARAM_CACHE_DIR = os.path.join(_HERE, "checkpoints", "garch_params")
 LOG_DIR = os.path.join(_HERE, "logs")
 
 
@@ -88,122 +75,6 @@ def _model_kwargs(num_stocks, config):
         lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=config.embedding_dim,
         hidden_size=config.hidden_size, num_layers=config.num_layers, dropout=config.dropout,
     )
-
-
-# ── GARCH 파라미터 캐싱 ──────────────────────────────────────────────────────────
-
-def _garch_cache_path(ticker, cache_dir=None):
-    return os.path.join(cache_dir or GARCH_PARAM_CACHE_DIR, f"{ticker}.json")
-
-
-def _load_garch_cache(ticker, cache_dir=None):
-    path = _garch_cache_path(ticker, cache_dir)
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_garch_cache(ticker, params, train_end, cache_dir=None):
-    os.makedirs(cache_dir or GARCH_PARAM_CACHE_DIR, exist_ok=True)
-    payload = {
-        "params": {k: float(v) for k, v in params.items()},
-        "fitted_at": date.today().isoformat(),
-        "train_end": str(pd.Timestamp(train_end).date()),
-    }
-    with open(_garch_cache_path(ticker, cache_dir), "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
-
-def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT_MAX_AGE_DAYS, cache_dir=None,
-                            read_only=False):
-    """캐시가 있고 max_age_days 이내면 재사용, 없거나 오래됐으면 train_end까지 데이터로
-    새로 MLE 적합해 캐시를 갱신한다. 반환: (params: pd.Series, refit_happened: bool).
-    cache_dir(2026-10-17): 기본 GARCH_PARAM_CACHE_DIR. read_only=True면 캐시가 없거나 만료됐을 때 적합·저장하지 않고
-    예외를 낸다(같은 params로 비교해야 하는 점검·백테스트용). ⚠️ 캐시 재사용은 fitted_at만 보고 train_end는 보지 않는다
-    (CLAUDE.md "GARCH 파라미터 캐시의 시점 무결성 문제")."""
-    cached = _load_garch_cache(ticker, cache_dir)
-    if cached is not None:
-        fitted_at = date.fromisoformat(cached["fitted_at"])
-        age_days = (date.today() - fitted_at).days
-        if age_days <= max_age_days:
-            return pd.Series(cached["params"]), False
-    if read_only:
-        raise RuntimeError(f"[GARCH-READ-ONLY] {ticker}: 캐시가 없거나 {max_age_days}일 지나 만료됨 — 읽기 전용이라 적합하지 않음")
-
-    train_returns = returns[returns.index <= train_end]
-    am_train = arch_model(train_returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
-    # cov_type="classic" — 표준오차(샌드위치 공분산)는 안 쓰고 params 점추정치만 쓰므로
-    # 기본값 "robust"의 추가 계산 비용을 뺀다(2026-09-20).
-    res_train = am_train.fit(disp="off", cov_type="classic")
-    params = res_train.params
-    _save_garch_cache(ticker, params, train_end, cache_dir)
-    return params, True
-
-
-def compute_full_period_sigma_cached(returns, params):
-    """이미 가진(캐시된) params로 재적합 없이 전체 구간 GARCH σ를 재귀 계산한다
-    (garch_baseline.garch_sigma_series — 서빙 창과 같은 경로). 이름의 "cached"는 params가 캐시에서 온다는 뜻이다."""
-    return garch_sigma_series(returns, params)
-
-
-# ── baseline 3종: val 구간 RMSE(게이트용) + 다음 거래일 점예측(감사 컬럼용) ──────────────
-
-def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, prices=None, garch_cache_dir=None,
-                             garch_read_only=False):
-    """종목 1개의 GARCH 파라미터를 캐시에서 가져오거나 새로 적합하고, 그 파라미터로:
-      (a) 전체 구간 σ(하이브리드 피처용 — build_merged_dataset_v2_volatility_hybrid의
-          precomputed_sigma로 그대로 재사용, 내부에서 다시 적합하지 않음)
-      (b) val 구간 GARCH/SMA20/Parkinson-SMA20 RMSE(배포 게이트 판정용)
-      (c) 다음 거래일 GARCH/SMA20/Parkinson-SMA20 baseline 점예측(model_predictions 감사 컬럼용)
-    을 한 번에 계산한다 — 세 용도를 따로 호출하면 종목당 GARCH 적합/재귀계산을 최대 3번
-    반복하게 되어 여기서 합쳤다.
-
-    prices(선택, 2026-10-05): 시장지표.feature_loader.load_price_cache(...)[ticker]. 주면
-    load_close_prices/load_high_low 대신 여기서 close·high·low를 꺼낸다 — 두 함수와 같은 테이블·
-    같은 구간(ticker, date BETWEEN start_date AND end_date, ORDER BY date)·같은 float 변환이다.
-
-    garch_cache_dir/garch_read_only(2026-10-17): get_or_fit_garch_params에 그대로 전달.
-
-    반환 dict: params, sigma_full, val_rmse(garch/sma20/parkinson dict), n_val_valid,
-    next_day(garch/sma20/parkinson dict)."""
-    if prices is not None:
-        prices_by_date = prices.set_index("date")
-        close = prices_by_date["close"]
-        hl = prices_by_date[["high", "low"]]
-    else:
-        close = load_close_prices(ticker, start_date, end_date)
-        hl = load_high_low(ticker, start_date, end_date)
-    returns = compute_log_returns_pct(close)
-    params, refit = get_or_fit_garch_params(ticker, returns, train_end, cache_dir=garch_cache_dir,
-                                            read_only=garch_read_only)
-    sigma_full = compute_full_period_sigma_cached(returns, params)
-
-    sma_full = compute_sma_baseline(returns)
-    park_raw = compute_parkinson_vol_pct(hl["high"], hl["low"])
-    park_ma20 = park_raw.rolling(PARK_WINDOW, min_periods=PARK_WINDOW).mean().shift(1)
-
-    val_mask = (returns.index > train_end) & (returns.index <= val_end)
-    realized_val = returns.abs()[val_mask]
-    sigma_val = sigma_full.reindex(realized_val.index)
-    sma_val = sma_full.reindex(realized_val.index)
-    park_val = park_ma20.reindex(realized_val.index)
-    valid = sigma_val.notna() & sma_val.notna() & park_val.notna()
-
-    garch_rmse, _ = rmse_mae(sigma_val[valid].values, realized_val[valid].values)
-    sma_rmse, _ = rmse_mae(sma_val[valid].values, realized_val[valid].values)
-    park_rmse, _ = rmse_mae(park_val[valid].values, realized_val[valid].values)
-
-    next_garch = forecast_next_day_sigma(returns, params)
-    next_sma = float(returns.abs().tail(SMA_WINDOW).mean())
-    next_park = float(park_raw.tail(PARK_WINDOW).mean())
-
-    return {
-        "params": params, "sigma_full": sigma_full, "refit": refit,
-        "val_rmse": {"garch": garch_rmse, "sma20": sma_rmse, "parkinson": park_rmse},
-        "n_val_valid": int(valid.sum()),
-        "next_day": {"garch": next_garch, "sma20": next_sma, "parkinson": next_park},
-    }
 
 
 # ── pooled 하이브리드 학습 ────────────────────────────────────────────────────────

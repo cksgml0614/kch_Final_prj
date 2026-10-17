@@ -128,7 +128,7 @@ def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date,
     raw["close"]는 예전 load_close_prices()와 같은 쿼리 조건(daily_stock_prices, ticker,
     date BETWEEN start_date AND end_date, ORDER BY date)·같은 float 변환이라 값이 같다.
     둘 다 None이면 거시지표·KOSPI를 예전처럼 직접 조회한다."""
-    from 가격예측.garch_baseline import (  # 순환 임포트 방지(지연 임포트)
+    from 가격예측.baselines import (  # 순환 임포트 방지(지연 임포트)
         compute_log_returns_pct,
         forecast_next_day_sigma,
         garch_sigma_series,

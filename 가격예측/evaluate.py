@@ -5,7 +5,7 @@
 import numpy as np
 import torch
 
-from 가격예측.garch_baseline import rmse_mae
+from 가격예측.baselines import rmse_mae
 
 
 def evaluate_pooled_predictions(model, loader, device):

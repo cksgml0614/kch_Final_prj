@@ -60,7 +60,7 @@ def add_recent_vol(stationary, vol_window=20):
 
 
 def volatility_target(raw):
-    """target_t = |log(close_t/close_(t-1)) x 100| — garch_baseline.compute_log_returns_pct와 같은 척도(GARCH·SMA
+    """target_t = |log(close_t/close_(t-1)) x 100| — baselines.compute_log_returns_pct와 같은 척도(GARCH·SMA
     baseline과 비교하려면 반드시 같아야 한다, 2026-09-06)."""
     target = (np.log(raw["close"] / raw["close"].shift(1)) * 100).abs()
     target.name = "target"
