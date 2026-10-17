@@ -77,44 +77,28 @@ def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed
                      "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
 
 
-def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, train_end,
-                                               precomputed_sigma=None, garch_params=None,
+def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, precomputed_sigma, garch_params,
                                                precomputed_indicators=None, true_kospi=None,
                                                precomputed_prices=None):
     """build_merged_dataset_v2_volatility(14피처) + GARCH(1,1) 조건부 σ를 15번째 피처로
     추가한 하이브리드 버전(2026-09-06) — GARCH가 이미 잡아낸 "어제 변동성→오늘 변동성"
-    persistence 신호를 Transformer가 처음부터 재학습하지 않고 그대로 입력받게 하기 위함.
+    persistence 신호를 신경망이 처음부터 재학습하지 않고 그대로 입력받게 하기 위함.
 
-    train_end가 필요한 이유: GARCH 파라미터는 train 구간만으로 추정해야 하는데, 이 함수는
-    종목별로 독립 호출되므로 전역 분할 경계(pooled_dataset.compute_global_split_dates로 미리
-    계산된 값)를 호출부가 넘겨줘야 한다 — 이 함수 내부에서 새로 계산하면 대표 종목 기준과
-    어긋날 위험이 있다(2026-09-06 GARCH 실험 때 raw 인덱스 기준으로 잘못 계산해 경계가
-    한 달 가까이 어긋났던 사고 재발 방지).
-
-    precomputed_sigma/garch_params(둘 다 2026-09-06 추가, 선택): 이미 계산해둔 전체 구간
-    σ 시리즈·파라미터가 있으면 그대로 쓰고 내부에서 다시 계산하지 않는다 — 가격예측_변동성_
-    일일수집.py가 GARCH 파라미터를 월 1회만 재추정(캐싱)하도록 만들면서, 매일 실행 시
-    이 함수가 매번 재추정하면 캐싱이 무의미해지는 문제를 막기 위해 추가했다. 생략하면
-    기존과 동일하게(garch_baseline.compute_full_period_sigma()로 매번 계산) 동작한다 —
-    기존 호출부(test_evaluation_pooled_volatility_hybrid.py 등)는 값 변경 없음.
-
-    garch_baseline 함수들을 그대로 재사용한다 — 여기서 지연 임포트하는 이유는 garch_baseline.py가
-    이미 split_dataset.build_merged_dataset_v2를 임포트하고 있어(분할 경계 계산용), 모듈
-    최상단에서 서로를 임포트하면 순환 임포트가 되기 때문이다.
+    precomputed_sigma/garch_params(필수): 호출부(가격예측_변동성_공통.compute_ticker_baselines)가
+    train 구간만으로 추정(또는 캐시에서 로드)한 파라미터와 그 파라미터로 계산한 전체 구간 σ 시리즈.
+    2026-10-17: 둘 다 없을 때 검증용 함수로 GARCH를 다시 적합하던 폴백 분기와 그 분기에서만 쓰던
+    train_end 인자를 지웠다(운영은 항상 넘기고 있었다).
 
     precomputed_indicators/true_kospi(선택, 2026-09-20): build_merged_dataset_v2_volatility에
     그대로 전달(성능 최적화, 결과는 동일). None이면 기존과 동일."""
+    if precomputed_sigma is None or garch_params is None:
+        raise ValueError(f"{ticker}: precomputed_sigma와 garch_params는 필수다(GARCH 폴백 적합 경로는 없음)")
     merged, meta = build_merged_dataset_v2_volatility(
         ticker, start_date, end_date,
         precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
         precomputed_prices=precomputed_prices,
     )
-
-    if precomputed_sigma is not None:
-        sigma_full, params = precomputed_sigma, garch_params
-    else:
-        from 가격예측.검증용.garch_baseline_check import compute_full_period_sigma  # 2026-09-12: 함수가 검증용/으로 이동(경로 갱신, 순환 임포트 방지 목적은 동일)
-        sigma_full, params = compute_full_period_sigma(ticker, start_date, end_date, train_end)
+    sigma_full, params = precomputed_sigma, garch_params
 
     merged = merged.copy()
     merged["garch_sigma"] = sigma_full.reindex(merged.index)
@@ -134,8 +118,8 @@ def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date,
                                                    precomputed_prices=None):
     """서빙(추론) 전용 — 변동성 하이브리드 모델(15피처)의 다음 거래일 예측 시퀀스를 만든다
     (2026-09-06, 가격예측_변동성_일일수집.py용). build_next_day_feature_window_volatility()
-    (13개: base 12 + recent_vol_ma20) + momentum(1개, build_next_day_merged_window()와 동일
-    원리) + garch_sigma(1개, GARCH 다음 거래일 예측)를 합친다.
+    (13개: base 12 + recent_vol_ma20) + momentum(1개, 마지막 칸 = 오늘 z) + garch_sigma(1개, GARCH 다음
+    거래일 예측)를 합친다.
 
     garch_params: 월 1회 캐싱된(또는 방금 재추정한) 고정 GARCH 파라미터 — 호출부가 넘겨준다.
     이 함수 내부에서 재추정하지 않는다(캐싱 취지 유지 — 매일 예측 때마다 재추정하면 캐싱이

@@ -8,7 +8,7 @@
 # — 이 파일의 상수들은 그 검증 스크립트 값을 그대로 가져온 것이며, 검증 재현성을 위해
 # 임의로 바꾸지 않는다.
 #
-# 방향예측 파이프라인(쓰래기통/가격예측_공통.py, 가격예측_통합모델.py — 둘 다 폐기)과의 관계:
+# 방향예측 파이프라인(pre-cleanup 태그 시점의 가격예측_공통.py·가격예측_통합모델.py — 둘 다 폐기)과의 관계:
 #   - "공통/일일수집" 파일 분리, run_isolated를 통한 종목별 예측 격리, next_weekday() 근사,
 #     save_checkpoint 버전 태깅은 그대로 계승했다.
 #   - pooled(전 종목 통합) 학습이라 종목별 격리가 원천적으로 불가능하다는 점도 가격예측_
@@ -38,9 +38,10 @@ import torch
 from arch import arch_model
 
 from config import redact
+from constants import MIN_TRAIN_SEQUENCES
 from db_manager import get_db_connection
 from 가격예측.garch_baseline import (
-    compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
+    SMA_WINDOW, compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
     forecast_with_fixed_params, load_close_prices, rmse_mae,
 )
 from 가격예측.momentum_feature import load_true_kospi
@@ -95,12 +96,8 @@ MODEL_FAMILY = "lstm"
 MODEL_CLASS_NAME = "PooledLSTMRegressor"
 
 
-# 이 pooled 모델이 종목 하나를 학습에 포함시키기 위한 최소 train 시퀀스 수. 2026-09-07 100종목
-# 확장 세션 실측 기준: 443060(HD현대마린솔루션, 실제 train 시퀀스 13개)은 그대로 포함해도
-# 문제가 없었고, 0126Z0/064400(train 0개)은 애초에 종목 리스트에서 제외했다 — "13은 포함,
-# 0은 제외"라는 그 경계 사이에서 여유를 두고 10으로 정했다. 종목_월간갱신.py의 신규 진입
-# 게이팅이 이 상수를 그대로 가져다 쓴다(단일 출처 유지).
-MIN_TRAIN_SEQUENCES = 10
+# MIN_TRAIN_SEQUENCES(최소 train 시퀀스 수)는 2026-10-17부터 constants.py에 있다 — 종목_월간갱신.py가 이 상수
+# 하나 때문에 이 모듈(torch·mlflow)을 import하지 않게 하려고 옮겼다. 값과 근거는 constants.py 참고.
 
 _HERE = os.path.dirname(__file__)
 CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints", "pooled_volatility_hybrid")
@@ -128,7 +125,7 @@ MLFLOW_HTTP_LIMITS = {
 }
 
 # 2026-10-11: 체크포인트를 저장한 직후 그 version을 model_registry에 등록한다(_register_model_version).
-# 일일 경로 전용 값이다. 백테스트 분리 때는 source를 인자로 받게 바꾼다(백테스트_월간.py는 지금 실행 금지).
+# 일일 경로 전용 값이다. 백테스트를 다시 만들 때는 source를 인자로 받게 바꾼다(옛 백테스트_월간.py는 2026-10-17 삭제).
 # 끄려면 환경변수 MODEL_REGISTRY_AUTO=0.
 REGISTRY_SOURCE = "live"
 REGISTRY_GATE_DEFINITION = "tickermean"
@@ -240,10 +237,8 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
 
 
 def compute_full_period_sigma_cached(returns, params):
-    """검증용/garch_baseline_check.compute_full_period_sigma()와 동일한 결과를 내되, 이미
-    가진(캐시된) params로 재적합 없이 재귀 계산만 한다 — compute_full_period_sigma가
-    내부적으로 하는 forecast_with_fixed_params(start_pos=0) 호출과 완전히 동일, fit() 단계만
-    스킵한 것(2026-09-12: compute_full_period_sigma는 검증용/garch_baseline_check.py로 이동됨)."""
+    """이미 가진(캐시된) params로 재적합 없이 전체 구간 GARCH σ를 재귀 계산한다
+    (forecast_with_fixed_params(start_pos=0)). 이름의 "cached"는 params가 캐시에서 온다는 뜻이다."""
     return forecast_with_fixed_params(returns, params, 0)
 
 
@@ -291,7 +286,7 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, p
     park_rmse, _ = rmse_mae(park_val[valid].values, realized_val[valid].values)
 
     next_garch = forecast_next_day_sigma(returns, params)
-    next_sma = float(returns.abs().tail(PARK_WINDOW).mean())
+    next_sma = float(returns.abs().tail(SMA_WINDOW).mean())
     next_park = float(park_raw.tail(PARK_WINDOW).mean())
 
     return {
@@ -314,12 +309,10 @@ def load_shared_cache(start_date, end_date):
 
 
 def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_cache=None, prices_by_ticker=None):
-    """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(쓰래기통/
-    가격예측_공통.py의 run_daily_pipeline 주석과 동일 근거: 파라미터 규모가 작아 재학습
-    자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
+    """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(파라미터 규모가
+    작아 재학습 자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
 
-    shared_cache(선택, 2026-10-05): load_shared_cache(start_date, end_date) 결과. None이면 여기서
-    로드한다(검증용 스크립트 등 기존 호출부 호환).
+    shared_cache(선택, 2026-10-05): load_shared_cache(start_date, end_date) 결과. None이면 여기서 로드한다.
     prices_by_ticker(선택, 2026-10-05): load_price_cache(tickers, start_date, end_date) 결과. None이면
     여기서 한 번에 로드한다 — 예전에는 종목마다 baseline용(종가, 고가·저가)과 피처용(OHLCV)으로
     같은 구간을 세 번 읽었다.
@@ -349,7 +342,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
         # — 성능 최적화일 뿐 조인/계산 로직은 동일(값 변경 없음 검증 완료).
         b = baselines_by_ticker[ticker]
         return build_merged_dataset_v2_volatility_hybrid(
-            ticker, s, e, train_end, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
+            ticker, s, e, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
             precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
             precomputed_prices=prices_by_ticker[ticker],
         )
@@ -385,8 +378,8 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
     # 2026-09-27 게이트 집계 버그 수정: 아래 baseline 3종은 "종목별 val RMSE의 단순 평균"인데,
     # 하이브리드만 전체 val 행을 한데 모은(pooled) RMSE로 계산해 비교하고 있었다 — 같은 오차라도
     # 종목별 RMSE 평균 <= pooled RMSE(젠센 부등식)라 baseline에 구조적으로 유리한 비교였다(2026-09-12
-    # 첫 운영 실행부터 게이트가 계속 미통과한 원인). 100종목 검증 정본(검증용/test_evaluation_pooled100_
-    # hybrid.py:253)과 같은 방식으로 하이브리드도 종목별 RMSE 평균으로 맞춘다. 경위는 CLAUDE.md 참고.
+    # 첫 운영 실행부터 게이트가 계속 미통과한 원인). 100종목 검증 정본(pre-cleanup 태그 시점의 검증용
+    # test_evaluation_pooled100_hybrid.py:253)과 같은 방식으로 하이브리드도 종목별 RMSE 평균으로 맞춘다. 경위는 CLAUDE.md 참고.
     hybrid_val_rmse = float(np.mean([
         rmse_mae(val_preds[val_tids == tid], val_actuals[val_tids == tid])[0]
         for tid in np.unique(val_tids)
@@ -414,7 +407,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
 # ── 다음 거래일 예측 + 저장 ───────────────────────────────────────────────────────
 
 def next_weekday(d):
-    """쓰래기통/가격예측_공통.py·가격예측_통합모델.py에서 쓰던 근사를 값 변경 없이 그대로
+    """옛 방향예측 파이프라인(가격예측_공통.py·가격예측_통합모델.py)에서 쓰던 근사를 값 변경 없이 그대로
     가져옴 — 실제 거래소 캘린더가 없어 공휴일은 반영 못 한다. target_date가 실제 거래일과
     어긋나면 actual_volatility 백필 시 그냥 매치되는 실제 거래일이 없어 NULL로 남는다
     (조용히 틀린 값이 채워지는 것보다 안전한 실패 모드)."""

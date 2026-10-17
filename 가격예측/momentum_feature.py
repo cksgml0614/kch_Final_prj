@@ -1,11 +1,10 @@
-# momentum_feature.py — Task T-1 체크포인트 2
-# lag 적용 초과수익률(excess_return_z) 모멘텀 피처.
+# momentum_feature.py — lag 적용 초과수익률 z(excess_return_z_lag1) 피처. 이름은 1세대("모멘텀") 시절 것이다.
 #
 # 세션에서 승인된 두 가지 해석:
 #   1) sigma_(t-1)의 window는 [t-61, ..., t-2] — t-1 자기 자신도 제외 (CLAUDE.md D-2의
 #      "sigma_t는 t 시점 미포함" 원칙을 t→t-1로 재적용).
 #   2) KOSPI는 feature_loader의 발표일 지연 조인(published_date < 거래일) 결과를 쓰지 않는다.
-#      market_index_load.py에서 KOSPI의 published_date = date(당일 발표)이므로,
+#      KOSPI의 published_date = date(당일 발표, 2026-10-03부터 ECOS 802Y001)이므로,
 #      feature_loader가 반환하는 raw['KOSPI']는 이미 "d-1일자 값"이 d행에 들어가 있다.
 #      excess_return은 "같은 날 종목 대비 시장" 비교여야 하므로, market_indicators를
 #      date 기준으로 직접 재조회해 당일 실제 값으로 계산한다.
@@ -69,8 +68,9 @@ def build_momentum_feature(ticker, start_date, end_date, window=WINDOW, raw=None
     Returns
     -------
     momentum : Series, index=target date t, value=z_(t-1)
-    diag : dict — 검증/비교용 중간 산출물 (raw, true_kospi, excess_return, sigma, z,
-           wrong_momentum(잘못된 방식 비교용))
+    diag : dict — 중간 산출물 (raw, true_kospi, n_missing_kospi, excess_return, sigma, z). 서빙 창은 diag["z"]의
+           마지막 값을 "다음 거래일 행"의 피처로 쓴다.
+           2026-10-17: 운영에서 쓰지 않던 "잘못된 방식"(발표일 지연 KOSPI) 비교값 계산을 지웠다.
     """
     if raw is None:
         raw = get_features(ticker, start_date, end_date)
@@ -87,13 +87,6 @@ def build_momentum_feature(ticker, start_date, end_date, window=WINDOW, raw=None
     momentum = z.shift(1)
     momentum.name = "excess_return_z_lag1"
 
-    # --- 잘못된 방식(비교용): feature_loader가 반환하는, 이미 발표일 지연이 적용된 KOSPI를
-    #     그대로 사용 — d행의 값이 실제로는 d-1일자 KOSPI라 하루 밀린 채로 초과수익률이 계산됨 ---
-    wrong_kospi_cr = raw["KOSPI"].pct_change()
-    wrong_excess_return, wrong_sigma, wrong_z = _excess_return_z(stock_cr, wrong_kospi_cr, window)
-    wrong_momentum = wrong_z.shift(1)
-    wrong_momentum.name = "excess_return_z_lag1_WRONG"
-
     diag = {
         "raw": raw,
         "true_kospi": true_kospi,
@@ -101,7 +94,5 @@ def build_momentum_feature(ticker, start_date, end_date, window=WINDOW, raw=None
         "excess_return": excess_return,
         "sigma": sigma,
         "z": z,
-        "wrong_excess_return": wrong_excess_return,
-        "wrong_momentum": wrong_momentum,
     }
     return momentum, diag
