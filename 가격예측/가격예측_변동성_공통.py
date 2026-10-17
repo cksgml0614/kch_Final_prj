@@ -58,30 +58,19 @@ from 가격예측.train_common import (
     passes_deployment_gate_volatility,
     run_isolated,
     save_checkpoint,
-    train_pooled_lstm,
+    TrainConfig,
+    train_model,
 )
 from 시장지표.feature_loader import load_indicator_cache, load_price_cache
 
 LOOKBACK = 20
 
-# test_evaluation_pooled100_hybrid.py(100종목 검증 정본)와 완전히 동일한 하이퍼파라미터 —
-# 배포 모델이 검증된 설정과 달라지면 검증 결과가 더 이상 이 모델을 대변하지 못하므로 값을
-# 절대 바꾸지 않고 그대로 가져온다.
-D_MODEL = 32
-NHEAD = 2
-NUM_LAYERS = 2
-DIM_FEEDFORWARD = 64
-DROPOUT = 0.3
-BATCH_SIZE = 32
-LR = 1e-3
-WEIGHT_DECAY = 1e-4
-SMOKE_EPOCHS = 2
-MAX_EPOCHS = 60
-PATIENCE = 8
-SEED = 42
-EMBEDDING_DIM = 20  # test_evaluation_pooled100_hybrid.EMBEDDING_DIM_100과 동일값.
-# ⚠️ 종목 수(현재 100)가 크게 달라지면(종목_월간갱신.py 누적 결과) 이 값의 적정성도 사람이
+# 학습 하이퍼파라미터는 train_common.TrainConfig(2026-10-17, 모듈 상수에서 설정 객체로). 기본값은 운영값 그대로다
+# (hidden 32·2층·dropout 0.3·embedding 20·batch 32·lr 1e-3·wd 1e-4·smoke 2·max 60·patience 8·seed 42).
+# 쓰지 않던 Transformer 전용 값(NHEAD=2, DIM_FEEDFORWARD=64)은 지웠다.
+# ⚠️ 종목 수(현재 100)가 크게 달라지면(종목_월간갱신.py 누적 결과) embedding_dim의 적정성도 사람이
 # 재검토해야 한다 — 자동으로 재조정되지 않는다.
+DEFAULT_TRAIN_CONFIG = TrainConfig()
 
 # GARCH 파라미터를 이 일수 이내에 이미 재추정했으면 캐시를 그대로 재사용(월 1회 재추정 원칙,
 # 위 헤더 설명 참고).
@@ -183,11 +172,11 @@ def _mlflow_health_problem(uri):
     return None if r.status_code == 200 else f"HTTP {r.status_code}"
 
 
-def _model_kwargs(num_stocks):
+def _model_kwargs(num_stocks, config):
     # 체크포인트 meta의 model_kwargs — PooledLSTMRegressor 생성자가 받는 인자만 담는다(2026-09-27).
     return dict(
-        lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
-        hidden_size=D_MODEL, num_layers=NUM_LAYERS, dropout=DROPOUT,
+        lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=config.embedding_dim,
+        hidden_size=config.hidden_size, num_layers=config.num_layers, dropout=config.dropout,
     )
 
 
@@ -316,7 +305,8 @@ def compute_split_dates(ref_ticker, start_date, end_date, shared_cache, prices):
     return compute_global_split_dates(dates)
 
 
-def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_cache=None, prices_by_ticker=None):
+def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, shared_cache=None,
+                             prices_by_ticker=None):
     """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(파라미터 규모가
     작아 재학습 자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
 
@@ -373,12 +363,9 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
     X_val_s = scaler.transform(X_val).astype(np.float32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    result = train_pooled_lstm(
+    result = train_model(
         X_train_s, y_train, tid_train, X_val_s, y_val, tid_val,
-        len(feature_cols), LOOKBACK, len(tickers), EMBEDDING_DIM,
-        D_MODEL, NHEAD, NUM_LAYERS, DIM_FEEDFORWARD, DROPOUT,
-        BATCH_SIZE, LR, WEIGHT_DECAY, SMOKE_EPOCHS, MAX_EPOCHS, PATIENCE,
-        device, seed=seed, label="pooled-volatility-hybrid",
+        len(tickers), LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
     )
 
     val_preds, val_actuals, val_tids = evaluate_pooled_predictions(result["model"], result["val_loader"], device)
@@ -408,6 +395,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
         "history": result["history"], "best_epoch": result["best_epoch"],
         "best_val_loss": result["best_val_loss"],
         "overfit_ratio_at_end": result["overfit_ratio_at_end"],
+        "train_config": train_config,
     }
 
 
@@ -573,7 +561,8 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
     2026-10-11 기록 정정(과거 run은 고치지 않는다, 읽는 법은 CLAUDE.md "MLflow 읽는 법"):
     - run 이름: 실행일(date.today()) 대신 "pd<prediction_date>_v<체크포인트 버전>". 실행일은 run_date 태그.
     - params: 모델 생성자 인자(_model_kwargs — 체크포인트 meta와 같은 출처)와 MODEL_ARCHITECTURE(= MODEL_FAMILY).
-      예전에는 LSTM 운영 중에도 Transformer 전용 값(NHEAD, DIM_FEEDFORWARD)이 찍혔다.
+      예전에는 LSTM 운영 중에도 Transformer 전용 값(NHEAD, DIM_FEEDFORWARD)이 찍혔다. 학습 하이퍼파라미터는
+      train_out["train_config"](TrainConfig)에서 가져오되 파라미터 이름(BATCH_SIZE 등)은 그대로 둔다.
     - tag model_family = MODEL_FAMILY('lstm'), model_registry.model_family와 같은 어휘.
     - 하이브리드 게이트 RMSE는 hybrid_rmse_tickermean으로만 기록한다. 옛 이름 hybrid_rmse는 2026-09-28
       실행부터 pooled에서 종목평균으로 정의가 바뀌어 한 줄로 읽으면 안 된다.
@@ -591,6 +580,7 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
                 print(f"[MLFLOW-SKIP] ⚠️ MLflow 서버 응답 없음 — 기록 건너뜀({problem}). "
                       f"예측 저장은 끝났고, 이번 실행의 MLflow run은 남지 않는다.")
                 return
+        cfg = train_out["train_config"]
         pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
         pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
@@ -606,9 +596,10 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
             mlflow.log_params({
                 "MODEL_ARCHITECTURE": MODEL_FAMILY,
                 "model_class": MODEL_CLASS_NAME,
-                **{f"model_{k}": v for k, v in _model_kwargs(len(tickers)).items()},
-                "BATCH_SIZE": BATCH_SIZE, "LR": LR, "WEIGHT_DECAY": WEIGHT_DECAY,
-                "SMOKE_EPOCHS": SMOKE_EPOCHS, "MAX_EPOCHS": MAX_EPOCHS, "PATIENCE": PATIENCE, "SEED": SEED,
+                **{f"model_{k}": v for k, v in _model_kwargs(len(tickers), cfg).items()},
+                "BATCH_SIZE": cfg.batch_size, "LR": cfg.lr, "WEIGHT_DECAY": cfg.weight_decay,
+                "SMOKE_EPOCHS": cfg.smoke_epochs, "MAX_EPOCHS": cfg.max_epochs, "PATIENCE": cfg.patience,
+                "SEED": cfg.seed,
             })
             for epoch, train_loss, val_loss in train_out["history"]:
                 mlflow.log_metric("train_loss", train_loss, step=epoch)
@@ -756,7 +747,7 @@ def _count_prediction_results(results):
     return n_success, n_failed, n_excluded
 
 
-def run_pooled_volatility_pipeline(tickers, start_date, end_date):
+def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG):
     """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
     통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> 종목별 다음 거래일 예측(run_isolated로
     종목별 격리) -> model_predictions 저장(게이트 결과와 무관하게 항상 저장).
@@ -792,14 +783,14 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     # 거시지표·KOSPI·종목 가격은 실행 시작 시 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다(2026-10-05).
     shared_cache = load_shared_cache(start_date, end_date)
     prices_by_ticker = load_price_cache(tickers, start_date, end_date)
-    train_out = train_daily_pooled_model(tickers, start_date, end_date, shared_cache=shared_cache,
+    train_out = train_daily_pooled_model(tickers, start_date, end_date, train_config=train_config, shared_cache=shared_cache,
                                          prices_by_ticker=prices_by_ticker)
     model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
     ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
     baselines_by_ticker = train_out["baselines_by_ticker"]
 
     version = save_checkpoint(
-        model, scaler, feature_cols, _model_kwargs(len(tickers)), CHECKPOINT_DIR,
+        model, scaler, feature_cols, _model_kwargs(len(tickers), train_out["train_config"]), CHECKPOINT_DIR,
         model_class_name=MODEL_CLASS_NAME,
         extra_meta={
             "tickers": tickers, "ticker_to_id": ticker_to_id,

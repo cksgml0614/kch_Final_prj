@@ -8,6 +8,7 @@ import json
 import os
 import random
 import traceback
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import numpy as np
@@ -16,6 +17,25 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from 가격예측.model import PooledLSTMRegressor
+
+
+@dataclass(frozen=True)
+class TrainConfig:
+    """운영 LSTM 학습 하이퍼파라미터(2026-10-17, 모듈 상수에서 설정 객체로). 기본값 = 2026-09-28 이후 운영값
+    (가격예측_변동성_공통의 옛 D_MODEL/NUM_LAYERS/DROPOUT/EMBEDDING_DIM/BATCH_SIZE/LR/WEIGHT_DECAY/
+    SMOKE_EPOCHS/MAX_EPOCHS/PATIENCE/SEED와 같은 값). 튜닝은 이 객체를 바꿔 train_model에 넘기는 방식으로 끼어든다
+    (튜닝 검증은 train 구간 안의 expanding-window 폴드로만 — CLAUDE.md "하이퍼파라미터 월간 튜닝")."""
+    hidden_size: int = 32
+    num_layers: int = 2
+    dropout: float = 0.3
+    embedding_dim: int = 20
+    batch_size: int = 32
+    lr: float = 1e-3
+    weight_decay: float = 1e-4
+    smoke_epochs: int = 2
+    max_epochs: int = 60
+    patience: int = 8
+    seed: int = 42
 
 
 def set_seed(seed):
@@ -28,7 +48,7 @@ def set_seed(seed):
 # ── 변동성 예측 배포 게이트 (2026-09-06) ──
 
 def passes_deployment_gate_volatility(hybrid_rmse, garch_rmse, sma_rmse, parkinson_rmse):
-    """하이브리드(GARCH+Transformer) 변동성 예측 배포 게이트 — 하이브리드 RMSE가 GARCH(1,1)·
+    """하이브리드(GARCH σ 피처 + LSTM) 변동성 예측 배포 게이트 — 하이브리드 RMSE가 GARCH(1,1)·
     SMA20·Parkinson-SMA20 baseline **셋 다**보다 낮아야(개선돼야) 통과한다.
 
     2026-09-07 확정(100종목 검증 세션): 50종목 검증까지는 GARCH·SMA20 둘만 기준이었으나
@@ -157,27 +177,25 @@ def evaluate_pooled_predictions(model, loader, device):
     return np.concatenate(preds), np.concatenate(actuals), np.concatenate(tids)
 
 
-# ── pooled LSTM(2026-09-27, 2026-09-28부터 운영) ──────────────────────────────────
-# 학습 루프: 스모크 테스트 -> 본 학습(Adam+MSE, early stopping) -> best_state 복원.
-# 하이퍼파라미터 매핑: d_model -> hidden_size, num_layers -> LSTM 층 수. nhead/dim_feedforward는 쓰지 않는다
-# (호출부 위치 인자 호환용으로만 남아 있음 — 4단계에서 설정 객체로 바꾼다).
+# ── 학습 루프 (2026-10-17 단일화: 옛 train_pooled_lstm과 같은 연산 순서) ──────────────────────
+# 스모크 테스트 -> 본 학습(Adam+MSE, early stopping) -> best_state 복원.
 
-def train_pooled_lstm(X_train, y_train, tid_train, X_val, y_val, tid_val,
-                      n_features, lookback, num_stocks, embedding_dim,
-                      d_model, nhead, num_layers, dim_feedforward, dropout,
-                      batch_size, lr, weight_decay, smoke_epochs, max_epochs, patience,
-                      device, seed=42, verbose=True, label=""):
-    """train_pooled_transformer()의 LSTM 버전 — PooledLSTMRegressor(ticker_ids 입력)용.
-    test는 절대 건드리지 않는다 — train/val 로더만 받아서 학습·검증한다."""
-    set_seed(seed)
-    model = PooledLSTMRegressor(n_features, lookback, num_stocks, embedding_dim,
-                                hidden_size=d_model, num_layers=num_layers, dropout=dropout).to(device)
+def train_model(X_train, y_train, tid_train, X_val, y_val, tid_val, num_stocks, lookback, config, device,
+                verbose=True, label=""):
+    """PooledLSTMRegressor를 config(TrainConfig)로 학습한다. test는 절대 건드리지 않는다 — train/val만 받는다.
+    반환: model, history, best_epoch, best_val_loss, last_epoch, last_train_loss, last_val_loss, val_loader,
+    overfit_ratio_at_end."""
+    smoke_epochs, max_epochs, patience = config.smoke_epochs, config.max_epochs, config.patience
+    set_seed(config.seed)
+    model = PooledLSTMRegressor(X_train.shape[2], lookback, num_stocks, config.embedding_dim,
+                                hidden_size=config.hidden_size, num_layers=config.num_layers,
+                                dropout=config.dropout).to(device)
 
-    train_loader = make_pooled_loader(X_train, y_train, tid_train, batch_size, shuffle=True)
-    val_loader = make_pooled_loader(X_val, y_val, tid_val, batch_size, shuffle=False)
+    train_loader = make_pooled_loader(X_train, y_train, tid_train, config.batch_size, shuffle=True)
+    val_loader = make_pooled_loader(X_val, y_val, tid_val, config.batch_size, shuffle=False)
 
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
 
     history = []
     prefix = f"[{label}] " if label else ""
