@@ -7,10 +7,7 @@ import sys
 
 import pandas as pd
 
-from 가격예측.dataset_builder import (
-    build_base_dataset_v2_volatility,
-    build_next_day_feature_window_volatility,
-)
+from 가격예측.dataset_builder import add_recent_vol, build_stationary_features, volatility_target
 from 가격예측.momentum_feature import build_momentum_feature
 from 시장지표.feature_loader import get_features
 
@@ -22,27 +19,43 @@ VAL_RATIO = 0.15
 # TEST_RATIO는 나머지 전부 (반올림 오차를 test 쪽에 흡수)
 
 
+def _load_raw(ticker, start_date, end_date, precomputed_indicators, precomputed_prices):
+    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
+                       precomputed_prices=precomputed_prices)
+    if raw.empty:
+        raise RuntimeError(f"{ticker}: {start_date}~{end_date} 구간에 가격 데이터 없음")
+    return raw
+
+
+def _lagged_features(ticker, start_date, end_date, raw, true_kospi, index):
+    """학습·서빙 공용 피처 조립(2026-10-17). index의 각 행 t에 "raw 기준 직전 행"의 값을 놓는다(shift(1)):
+    기본 피처 13개(build_stationary_features + recent_vol_ma20)와 excess_return_z_lag1(= z_(t-1)).
+    index = raw.index면 학습 행(행 t = target 날짜 t), index = raw.index + 다음 평일이면 마지막 행이 "오늘(T)의
+    원값 = T+1행 피처"가 된다. 반환: (features DataFrame, momentum diag)"""
+    feats = add_recent_vol(build_stationary_features(raw)).reindex(index).shift(1)
+    _, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
+    feats["excess_return_z_lag1"] = diag["z"].reindex(index).shift(1)
+    return feats, diag
+
+
 def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
                                        precomputed_prices=None):
-    """변동성 예측용 frame(2026-09-06): build_base_dataset_v2_volatility(target |로그수익률x100|, 피처에
-    recent_vol_ma20 포함) + excess_return_z_lag1. GARCH σ는 build_merged_dataset_v2_volatility_hybrid가 붙인다.
-    (2026-10-17: 같은 구조의 방향 예측판 build_merged_dataset_v2는 지웠다.)
+    """변동성 예측용 학습 frame(GARCH σ 전, 2026-09-06): 기본 피처 13개 + target(|로그수익률x100|) +
+    excess_return_z_lag1. 행 t의 피처는 t 직전 거래일까지의 정보다. GARCH σ는 _hybrid가 붙인다.
+    (2026-10-17: 피처 조립을 서빙과 공용인 _lagged_features로 바꿨다 — 열 순서·값은 그대로.)
 
-    precomputed_indicators/true_kospi(선택, 2026-09-20): build_merged_dataset_v2와 동일한
-    성능 최적화 — get_features() 종목당 중복 호출 제거. 둘 다 None이면 기존과 동일."""
-    base, raw = build_base_dataset_v2_volatility(ticker, start_date, end_date,
-                                                  precomputed_indicators=precomputed_indicators,
-                                                  precomputed_prices=precomputed_prices)
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
-
-    merged = base.copy()
-    merged["excess_return_z_lag1"] = momentum
+    precomputed_indicators/true_kospi/precomputed_prices(선택): 공유 캐시(가격예측_변동성_공통.load_shared_cache,
+    feature_loader.load_price_cache). None이면 직접 조회한다."""
+    raw = _load_raw(ticker, start_date, end_date, precomputed_indicators, precomputed_prices)
+    feats, diag = _lagged_features(ticker, start_date, end_date, raw, true_kospi, raw.index)
+    merged = feats.drop(columns=["excess_return_z_lag1"])
+    merged["target"] = volatility_target(raw)
+    merged["excess_return_z_lag1"] = feats["excess_return_z_lag1"]
     before = len(merged)
     merged = merged.dropna(how="any")
     after = len(merged)
-
-    return merged, {"base": base, "raw": raw, "momentum": momentum, "diag": diag,
-                     "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
+    return merged, {"raw": raw, "diag": diag,
+                    "rows_before_dropna": before, "rows_after_dropna": after}
 
 
 def valid_feature_dates(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
@@ -97,22 +110,16 @@ def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, prec
 def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date, lookback, garch_params,
                                                    precomputed_indicators=None, true_kospi=None,
                                                    precomputed_prices=None):
-    """서빙(추론) 전용 — 변동성 하이브리드 모델(15피처)의 다음 거래일 예측 시퀀스를 만든다
-    (2026-09-06, 가격예측_변동성_일일수집.py용). build_next_day_feature_window_volatility()
-    (13개: base 12 + recent_vol_ma20) + momentum(1개, 마지막 칸 = 오늘 z) + garch_sigma(1개, GARCH 다음
-    거래일 예측)를 합친다.
+    """서빙(추론) 전용 — 변동성 하이브리드 모델(15피처)의 다음 거래일 예측 시퀀스를 만든다(2026-09-06).
+    2026-10-17: 학습 frame과 같은 _lagged_features·garch_sigma_series로 조립한다. index를 raw 날짜 + "다음
+    평일" 한 행으로 늘려 shift(1)하므로 마지막 행이 오늘(T)의 원값(= T+1행 피처), garch_sigma 마지막 칸은
+    forecast_next_day_sigma(T까지 수익률로 낸 T+1 예측)다. 마지막 행 라벨은 다음 평일(save_prediction의
+    target_date와 같은 규칙, 공휴일 미반영)이다 — 예전에는 원자료 날짜 T가 붙어 바로 앞 행 라벨과 중복됐다.
 
     garch_params: 월 1회 캐싱된(또는 방금 재추정한) 고정 GARCH 파라미터 — 호출부가 넘겨준다.
-    이 함수 내부에서 재추정하지 않는다(캐싱 취지 유지 — 매일 예측 때마다 재추정하면 캐싱이
-    무의미해짐).
+    이 함수 내부에서 재추정하지 않는다.
 
-    ⚠️ 정렬 주의: returns(로그수익률)는 raw(get_features 원본)보다 첫 행이 하나 적다(pct_change
-    특성상 첫 행이 NaN이라 dropna로 빠짐) — 그래서 위치 기반이 아니라 base_window의 실제
-    날짜 라벨(base_window.index)로 GARCH 조회 시작 위치를 찾는다(위치 산술로 하면 하루
-    어긋난다).
-
-    반환: (window, last_confirmed_date) — window 컬럼 15개(순서는 feature_cols와 다를 수
-    있으니 호출부는 반드시 컬럼명으로 인덱싱할 것).
+    반환: (window, last_confirmed_date) — window 컬럼 15개(호출부는 컬럼명으로 인덱싱할 것).
 
     precomputed_indicators/true_kospi(선택, 2026-10-05, Neon 전송량 절감): build_merged_dataset_v2와
     같은 공유 캐시. 예전에는 이 함수가 종목마다 get_features()를 두 번(base window용, momentum용)
@@ -124,42 +131,26 @@ def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date,
     from 가격예측.garch_baseline import (  # 순환 임포트 방지(지연 임포트)
         compute_log_returns_pct,
         forecast_next_day_sigma,
-        forecast_with_fixed_params,
+        garch_sigma_series,
     )
 
-    raw = get_features(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
-                       precomputed_prices=precomputed_prices)
-    base_window, last_confirmed_date = build_next_day_feature_window_volatility(
-        ticker, start_date, end_date, lookback, raw=raw,
-    )
+    raw = _load_raw(ticker, start_date, end_date, precomputed_indicators, precomputed_prices)
+    if len(raw) < lookback:
+        raise RuntimeError(f"{ticker}: 이력이 lookback({lookback})보다 짧음({len(raw)}행) — 예측 불가")
+    last_confirmed_date = raw.index[-1]
+    next_label = last_confirmed_date + pd.offsets.BDay(1)
+    index = raw.index.append(pd.DatetimeIndex([next_label]))
 
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
-    momentum_next = diag["z"].iloc[-1]
-    if pd.isna(momentum_next):
+    feats, diag = _lagged_features(ticker, start_date, end_date, raw, true_kospi, index)
+    if pd.isna(diag["z"].iloc[-1]):
         raise RuntimeError(f"{ticker}: 최신 momentum 값이 NaN — 가격 이력이 window보다 짧을 수 있음")
-    past_momentum = momentum.tail(lookback - 1).values
-    momentum_col = list(past_momentum) + [float(momentum_next)]
 
-    close = raw["close"]
-    returns = compute_log_returns_pct(close)
+    returns = compute_log_returns_pct(raw["close"])
+    sigma = garch_sigma_series(returns, garch_params)
+    sigma = pd.concat([sigma, pd.Series([forecast_next_day_sigma(returns, garch_params)], index=[next_label])])
+    feats["garch_sigma"] = sigma.reindex(index)
 
-    past_dates = base_window.index[:-1]  # window 마지막 행(오늘=T+1용) 제외 (lookback-1)개 날짜
-    # ⚠️ 2026-09-06: forecast_with_fixed_params()가 "start_pos+1부터 시작"하도록 수정됨(라벨링
-    # 버그 수정, garch_baseline.py 참고) — 출력 첫 날짜가 past_dates[0]이 되려면 그 하루 전
-    # 위치를 start_pos로 넘겨야 한다.
-    target_pos = returns.index.get_loc(past_dates[0])
-    past_sigma_series = forecast_with_fixed_params(returns, garch_params, target_pos - 1)
-    if not past_sigma_series.index.equals(pd.DatetimeIndex(past_dates)):
-        raise RuntimeError(f"{ticker}: GARCH 과거 시퀀스 날짜가 base_window와 어긋남")
-    garch_next = forecast_next_day_sigma(returns, garch_params)
-    garch_col = list(past_sigma_series.values) + [garch_next]
-
-    if len(momentum_col) != lookback or len(garch_col) != lookback:
-        raise RuntimeError(
-            f"{ticker}: 시퀀스 길이 불일치 — momentum={len(momentum_col)}, garch={len(garch_col)}, 기대={lookback}"
-        )
-
-    window = base_window.copy()
-    window["excess_return_z_lag1"] = momentum_col
-    window["garch_sigma"] = garch_col
+    window = feats.tail(lookback)
+    if len(window) != lookback or window["garch_sigma"].isna().any():
+        raise RuntimeError(f"{ticker}: 서빙 창 길이·GARCH σ 정렬 불일치(길이 {len(window)}, 기대 {lookback})")
     return window, last_confirmed_date

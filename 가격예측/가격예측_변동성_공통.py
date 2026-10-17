@@ -42,7 +42,7 @@ from constants import MIN_TRAIN_SEQUENCES
 from db_manager import get_db_connection
 from 가격예측.garch_baseline import (
     SMA_WINDOW, compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
-    forecast_with_fixed_params, load_close_prices, rmse_mae,
+    garch_sigma_series, load_close_prices, rmse_mae,
 )
 from 가격예측.momentum_feature import load_true_kospi
 from 가격예측.parkinson_baseline import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
@@ -227,8 +227,8 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
 
 def compute_full_period_sigma_cached(returns, params):
     """이미 가진(캐시된) params로 재적합 없이 전체 구간 GARCH σ를 재귀 계산한다
-    (forecast_with_fixed_params(start_pos=0)). 이름의 "cached"는 params가 캐시에서 온다는 뜻이다."""
-    return forecast_with_fixed_params(returns, params, 0)
+    (garch_baseline.garch_sigma_series — 서빙 창과 같은 경로). 이름의 "cached"는 params가 캐시에서 온다는 뜻이다."""
+    return garch_sigma_series(returns, params)
 
 
 # ── baseline 3종: val 구간 RMSE(게이트용) + 다음 거래일 점예측(감사 컬럼용) ──────────────

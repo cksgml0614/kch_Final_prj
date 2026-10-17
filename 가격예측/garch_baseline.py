@@ -112,6 +112,13 @@ def forecast_with_fixed_params(returns, params, start_pos):
     return pd.Series(sigma_raw[keep], index=dates)
 
 
+def garch_sigma_series(returns, params):
+    """고정 params로 전체 구간 GARCH σ(라벨 t = returns t-1까지로 낸 t 예측)를 재귀 계산한다 — 학습 frame과
+    서빙 창이 함께 쓰는 단일 경로(2026-10-17). forecast_with_fixed_params(start_pos=0)과 같다(서빙이 예전에 쓰던
+    start_pos=target_pos-1과도 값이 같음을 정리 전 점검에서 5종목x20일로 확인, 최대 차 0.0)."""
+    return forecast_with_fixed_params(returns, params, 0)
+
+
 def forecast_next_day_sigma(returns, params):
     """서빙(추론) 전용 — returns 마지막 날짜 다음 거래일의 GARCH 1-step-ahead σ를 예측한다.
     forecast(horizon=1)을 start 없이 호출하면 내부적으로 마지막 유효 위치(len(returns)-1)를
