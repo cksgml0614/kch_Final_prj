@@ -1,5 +1,7 @@
 # 결과: Task T 방향 예측 폐기
 
+> 2026-10-17 정리: 이 문서가 가리키는 `가격예측/검증용/`·`발표자료/`·일회성 스크립트·삭제된 함수(Transformer·1세대 방향·급변 손실 실험 등)는 코드 정리 브랜치에서 지웠다. 그런 경로·이름 앞에는 "pre-cleanup 태그 시점의"를 붙였다(git 태그 `pre-cleanup`, `git show pre-cleanup:<경로>`). 수치·결론은 그대로 유효하다.
+
 작성일: 2026-09-06
 상위 문서: `TASK_T_transformer_baseline.md`(Task T-1 지시서, 완료 아카이브) / `CLAUDE.md`
 목적: 가격 방향(상승/하락) 예측을 목표로 진행했던 Task T-1(단일 종목) + 이번 세션(pooled
@@ -39,7 +41,7 @@
 ## [3] 시도한 것 — 다종목 pooled + 종목 임베딩 (2026-09-06, 이번 세션)
 
 표본 부족(단일 종목 test 236일)을 극복하기 위해 8종목(005930/005380/051910/105560/
-207940/035420/034730/015760)을 `PooledTransformerRegressor`(종목 임베딩 concat 방식)로
+207940/035420/034730/015760)을 pre-cleanup 태그 시점의 `PooledTransformerRegressor`(종목 임베딩 concat 방식)로
 동시 학습 — pooled test 표본 1,888개(236×8)로 8배 확대.
 
 | 기준 | 결과 |
@@ -75,9 +77,9 @@
 - `test_evaluation_방향예측.py` (구 `test_evaluation.py`, 단일 종목 방향 예측 V2 test 평가)
 
 보존된 파일(운영 대상 아님, 재실행 금지 — 역사적 기록 + 하이퍼파라미터 참조용):
-- `가격예측_통합모델.py`(pooled 방향 예측) — 파일 정리 목록에서 최종 삭제 여부 별도 검토
-- `test_evaluation_pooled.py`(pooled 방향 예측 test 평가)
-- Task T-1 진단 체인 전체(`diagnose_baseline.py` 등) — 기존과 동일하게 기록으로만 보존
+- pre-cleanup 태그 시점의 `가격예측_통합모델.py`(pooled 방향 예측) — 파일 정리 목록에서 최종 삭제 여부 별도 검토
+- pre-cleanup 태그 시점의 `test_evaluation_pooled.py`(pooled 방향 예측 test 평가)
+- Task T-1 진단 체인 전체(pre-cleanup 태그 시점의 `diagnose_baseline.py` 등) — 기존과 동일하게 기록으로만 보존
 
 새 운영 파이프라인은 `가격예측_변동성_일일수집.py`(2026-09-06 신설)이며, `model_predictions`
 테이블도 변동성 예측 스키마로 완전히 교체됐다 — 상세는 CLAUDE.md 참고.

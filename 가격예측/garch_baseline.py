@@ -28,8 +28,8 @@
 #     동일함을 이미 실측 확인)를 그대로 재사용해 Transformer 실험과 조건을 맞췄다.
 #
 # 2026-09-12(가격예측/ 활성·검증 재분리): 운영 파이프라인이 쓰지 않는 fit_and_forecast_garch()/
-# compute_full_period_sigma()/main()은 검증용/garch_baseline_check.py로 분리했다(값 변경 없음).
-# 이 파일에는 활성 파이프라인(가격예측_변동성_공통.py)이 실제로 쓰는 함수만 남는다.
+# compute_full_period_sigma()/main()은 검증용/garch_baseline_check.py로 분리했다(값 변경 없음 — 그 파일은
+# 2026-10-17 정리에서 삭제, pre-cleanup 태그 시점에 있음). 이 파일에는 운영 파이프라인이 실제로 쓰는 함수만 남는다.
 
 import sys
 

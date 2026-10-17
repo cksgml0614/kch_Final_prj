@@ -1,5 +1,7 @@
 # 결과: 급변 구간 과소예측 — 손실함수/후처리 개선 시도 및 구조적 한계 확정
 
+> 2026-10-17 정리: 이 문서가 가리키는 `가격예측/검증용/`·`발표자료/`·일회성 스크립트·삭제된 함수(Transformer·1세대 방향·급변 손실 실험 등)는 코드 정리 브랜치에서 지웠다. 그런 경로·이름 앞에는 "pre-cleanup 태그 시점의"를 붙였다(git 태그 `pre-cleanup`, `git show pre-cleanup:<경로>`). 수치·결론은 그대로 유효하다.
+
 작성일: 2026-09-20
 상위 문서: `결과_TaskT_변동성예측_최종.md`(100종목 검증 정본) / `CLAUDE.md`
 목적: 100종목 pooled 하이브리드(GARCH+Transformer) 변동성 예측 모델이 실측 상위20%
@@ -224,34 +226,34 @@ GARCH sigma 단독 — 셋의 predicted_volatility를 "값이 클수록 급변�
 `_trailing_predicted_volatility_mean` 코드 주석에만 짧게 남아있었다 — 이번 PR-AUC
 결과가 그 미문서화된 결론을 정량적으로 재확인해준다.
 
-사용 스크립트: `가격예측/검증용/anomaly_detection_pr_auc_check.py`(유지 — highvol_regime_
+사용 스크립트: pre-cleanup 태그 시점의 `가격예측/검증용/anomaly_detection_pr_auc_check.py`(유지 — highvol_regime_
 diagnosis.py의 급변일 라벨링 함수에 의존하므로 그 파일도 함께 유지).
 
 ---
 
-## [8] 사용된 스크립트 (전부 `가격예측/검증용/`, 재학습이 필요한 실험 전용)
+## [8] 사용된 스크립트 (전부 pre-cleanup 태그 시점의 `가격예측/검증용/`, 재학습이 필요한 실험 전용)
 
-- `ablation_feature_pruning.py` — fold3 baseline/variant A/B (참고: 이 문서와 별개 트랙)
+- pre-cleanup 태그 시점의 `ablation_feature_pruning.py` — fold3 baseline/variant A/B (참고: 이 문서와 별개 트랙)
 - `loss_weighting_high_vol.py` — 가중 MSE 1차(상위20% 분위수 전체) — ⚠️ 결과 문서화 후 삭제(2026-09-20)
-- `highvol_regime_diagnosis.py` — 첫날/지속중 라벨링 + RMSE/MAE 분해 — **유지**([7]의
-  `anomaly_detection_pr_auc_check.py`가 여기 정의된 급변일 라벨링 함수를 계속 사용)
+- pre-cleanup 태그 시점의 `highvol_regime_diagnosis.py` — 첫날/지속중 라벨링 + RMSE/MAE 분해 — **유지**([7]의
+  pre-cleanup 태그 시점의 `anomaly_detection_pr_auc_check.py`가 여기 정의된 급변일 라벨링 함수를 계속 사용)
 - `loss_weighting_bigmove_v2.py` — signed bias 확인 + 가중 MSE 2차(진짜 급변일만) — ⚠️ 삭제
 - `highvol_diagnosis_v3.py` — GARCH 단독 비교 + Spearman 순위상관 — ⚠️ 삭제
 - `pred_distribution_overlap_check.py` — 예측값 분포 겹침 진단(+히스토그램/박스플롯) — ⚠️ 삭제
 - `isotonic_calibration_v1.py` — isotonic 후처리 보정 — ⚠️ 삭제
 - `pinball_loss_sweep.py` — pinball/quantile loss 스윕(tau=0.6/0.7/0.8) — ⚠️ 삭제
-- `anomaly_detection_pr_auc_check.py` — [7]의 PR-AUC 진단 — **유지**(다음 트랙인 이상탐지
+- pre-cleanup 태그 시점의 `anomaly_detection_pr_auc_check.py` — [7]의 PR-AUC 진단 — **유지**(다음 트랙인 이상탐지
   전환 검토로 이어지는 근거 스크립트)
 
 ⚠️ 표시된 5개 스크립트 + `가격예측/checkpoints/pred_dist_overlap_g4_vs_bottom80.png`는
 이 문서로 결과가 완전히 문서화된 뒤 **2026-09-20 삭제됐다**(사람 승인) — 급변구간 손실함수
 트랙(가중MSE/isotonic/pinball) 자체가 "구조적 한계"로 결론나 재사용 가치가 없다고 판단.
-`highvol_regime_diagnosis.py`/`anomaly_detection_pr_auc_check.py`는 다음 트랙(이상탐지
+pre-cleanup 태그 시점의 `highvol_regime_diagnosis.py`/`anomaly_detection_pr_auc_check.py`는 다음 트랙(이상탐지
 전환 검토)이 계속 참조하므로 유지했다.
 
 모두 fold3 val만 사용했고 test는 전혀 평가하지 않았다. `가격예측/train_common.py`에
-`train_pooled_transformer_weighted`(가중 MSE)와 `train_pooled_transformer_pinball`
-(pinball loss) 두 함수가 이 실험들을 위해 추가됐다 — 기존 `train_pooled_transformer`는
+pre-cleanup 태그 시점의 `train_pooled_transformer_weighted`(가중 MSE)와 `train_pooled_transformer_pinball`
+(pinball loss) 두 함수가 이 실험들을 위해 추가됐다 — 기존 pre-cleanup 태그 시점의 `train_pooled_transformer`는
 값 변경 없이 그대로 보존. 이 두 함수는 스크립트가 삭제된 뒤에도 **이 문서와의 코드-문서
 정합성을 위해 그대로 유지**한다(사람 결정, 2026-09-20).
 
@@ -262,7 +264,7 @@ diagnosis.py의 급변일 라벨링 함수에 의존하므로 그 파일도 함�
 **배경**: 2026-09-27 운영 게이트의 집계 비대칭 버그를 발견했다(CLAUDE.md "게이트 집계 버그" 절).
 이 문서의 판정이 같은 비대칭에 오염됐는지 확인하려 했으나, [8]의 ⚠️ 스크립트 4개(가중 MSE 1·2차,
 isotonic, pinball)는 **git에 한 번도 커밋되지 않은 채 삭제돼 코드 확인이 불가능**했다. 그래서
-`train_common.py`에 남은 학습 함수 + `highvol_regime_diagnosis.py`의 그룹 라벨링 함수로 같은 실험을
+`train_common.py`에 남은 학습 함수 + pre-cleanup 태그 시점의 `highvol_regime_diagnosis.py`의 그룹 라벨링 함수로 같은 실험을
 재실행하고, 모든 그룹에서 하이브리드와 baseline을 **같은 행·같은 집계 방식**(pooled / 종목별 평균
 두 가지 모두)으로 비교했다. 분할 경계가 당시와 약간 다르므로(train_end 2024-10-07→2024-10-10,
 baseline 유효 행 23,737/23,800) 수치가 원 표와 소수점까지 같지는 않다. seed 42 단일, val만.
@@ -320,7 +322,7 @@ pooled 집계로 봐도 게이트 통과/실패 패턴은 전 variant에서 동�
 "신뢰할 만한 국면 전환 스위치"를 만들 수 없다는 것이 두 번 확인됐다. [5]의 손실함수 3종, [7]·CLAUDE.md의
 급변일 분류기(PR-AUC 1.1~1.24x)와 같은 근본 원인 — **현재 피처에는 다음날 급변 여부를 가르는 정보가
 약하다.** GARCH·LSTM 블렌딩 방향은 여기서 종료하고, 급변 전문 모델 등 세 번째 시도로 넘어가지 않는다.
-운영은 LSTM 단독 유지. 수치: `발표자료/blend_garch_lstm.csv`, `발표자료/price_estimate_by_regime.csv`.
+운영은 LSTM 단독 유지. 수치: pre-cleanup 태그 시점의 `발표자료/blend_garch_lstm.csv`, `발표자료/price_estimate_by_regime.csv`.
 
 ---
 
@@ -369,7 +371,7 @@ std 비율은 0.271→최대 0.277로 사실상 불변, ①의 과소예측 편�
 | 20 | 1.2 | 1.9914 | 통과 | 4.643% | 1.392% | 실패 | 0.380 |
 | 30 | 3.0 | 4.0210 | 실패 | 3.191% | 4.370% | 실패 | 1.370 |
 
-(전 15조합: `가격예측/검증용/실험_20260927/postproc_eval.py`. ① GARCH+오라클 = 4.366%)
+(전 15조합: pre-cleanup 태그 시점의 `가격예측/검증용/실험_20260927/postproc_eval.py`. ① GARCH+오라클 = 4.366%)
 
 - M ≥ 1.5면 ①이 GARCH 수준 이하까지 내려가지만, ③이 무너져 전체·③ 게이트가 모두 실패한다.
 - M 1.1~1.2는 전체 게이트는 대부분 통과한다. 그러나 ① 개선이 4.93 → 4.61~4.82%에 그치고, ③ 게이트는 전부

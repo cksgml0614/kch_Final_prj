@@ -42,10 +42,9 @@ def _build_fn_accepts_shared_cache(build_fn):
     100종목 피처 생성 성능 최적화 — 종목과 무관한 거시지표 9종·KOSPI 원자료를 매 종목 재조회
     하던 것을 없애기 위함). inspect로 한 번만 확인하고 종목 루프 전체에서 재사용한다.
 
-    이 검사가 필요한 이유: build_fn은 호출부(가격예측_변동성_공통.py, ablation_*.py 등)가
-    자유롭게 만드는 클로저라 시그니처를 강제할 수 없다. 캐시를 지원하도록 아직 갱신되지 않은
-    build_fn(옛 검증용/ 스크립트 등)은 이 검사에서 False가 나와 캐시 없이 기존과 완전히
-    동일하게(매 종목 재조회) 동작한다 — 하위 호환이 깨지지 않는다."""
+    이 검사가 필요한 이유: build_fn은 호출부가 만드는 클로저라 시그니처를 강제할 수 없다. 캐시 인자를 받지 않는
+    build_fn은 False가 나와 캐시 없이(매 종목 재조회) 동작한다. (2026-10-17: 캐시를 받지 않던 옛 검증용 스크립트는
+    삭제됐고 운영 hybrid_build_fn은 받는다.)"""
     try:
         params = inspect.signature(build_fn).parameters
     except (TypeError, ValueError):

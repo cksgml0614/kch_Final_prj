@@ -1,5 +1,7 @@
 # 결과: Task T 변동성 예측 — 진행 경과 종합 (2026-09-06~07)
 
+> 2026-10-17 정리: 이 문서가 가리키는 `가격예측/검증용/`·`발표자료/`·일회성 스크립트·삭제된 함수(Transformer·1세대 방향·급변 손실 실험 등)는 코드 정리 브랜치에서 지웠다. 그런 경로·이름 앞에는 "pre-cleanup 태그 시점의"를 붙였다(git 태그 `pre-cleanup`, `git show pre-cleanup:<경로>`). 수치·결론은 그대로 유효하다.
+
 상위 문서: `결과_TaskT_방향예측_폐기.md`(방향 예측 폐기 배경, 상세) / `결과_변동성_조기경보_검증.md`
 (⚠️ **버그 있던 버전 — 아래 [3] 참고, 폐기 대상**) / `CLAUDE.md`
 
@@ -394,7 +396,7 @@ GARCH·SMA20 대비 개선(RMSE·MAE 모두) = **True**. Parkinson-SMA20 대비�
 순수 날짜별 변동에서도 baseline보다 나은 예측력이 확인됐다.
 
 (주: 이 검증은 상관계수/RMSE 분해만 수행 — 유의성(셔플) 검증은 [11]의 N=30 결과를 그대로
-원용하며 이 단계에서 별도 재검증하지 않았다. 스크립트: `가격예측/test_evaluation_pooled50_decompose.py`.)
+원용하며 이 단계에서 별도 재검증하지 않았다. 스크립트: pre-cleanup 태그 시점의 `가격예측/test_evaluation_pooled50_decompose.py`.)
 
 ---
 
@@ -468,7 +470,7 @@ baseline 전부(RMSE·MAE 모두) 이긴다.**
 걸려있지만, 격차가 90~120표준편차로 노이즈로 설명 가능한 수준을 압도적으로 넘는다 —
 "방향 확인"이라는 목적에는 충분한 근거.
 
-(스크립트: `가격예측/test_evaluation_pooled100_hybrid.py`. EMBEDDING_DIM을 50종목 시절
+(스크립트: pre-cleanup 태그 시점의 `가격예측/test_evaluation_pooled100_hybrid.py`. EMBEDDING_DIM을 50종목 시절
 16에서 20으로 소폭 확대, d_model=32는 50종목 검증과 동일하게 유지해 비교 가능성을 지켰다.)
 
 ---

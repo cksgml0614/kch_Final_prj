@@ -1,14 +1,49 @@
 # kch_Final_prj
 
-주가 데이터 + 뉴스 데이터를 결합해 감성분석 모델(KoBERT)과 가격 예측 모델(Transformer)을 학습시키는 졸업작품 프로젝트.
+주가 데이터 + 뉴스 데이터를 결합해 감성분석 모델(KoBERT)과 가격 예측 모델을 학습시키는 졸업작품 프로젝트. 지금 운영 중인 것은
+가격·거시지표 기반 다음 거래일 변동성 예측(GARCH σ 피처 + pooled LSTM)이다(뉴스·방향 예측 트랙은 신호 없음으로 종료).
 
 ## 지금 어디까지 왔는가 (세션 시작 시 먼저 읽을 것)
 
 ### 📌 현재 상태 요약 — 2026-10-05 기준 (여기만 읽어도 되게 압축. 아래는 날짜순 상세 기록)
 
+**0. 코드 정리(2026-10-17, 브랜치 `cleanup/pipeline-stages` — main에 아직 합치지 않음)**
+- **기준점**: 정리 전 코드는 git 태그 `pre-cleanup`(커밋 `739e6ea`, main)에 있다. 지운 파일·함수는 `git show pre-cleanup:<경로>`로 본다.
+  정리는 작업 트리 `C:\kch_cleanup`(브랜치 `cleanup/pipeline-stages`)에서 했고 운영 폴더 `C:\kch_Final_prj`(main)는 그대로다.
+- **지운 것**: Transformer 계열(TransformerRegressor·PooledTransformerRegressor·train_pooled_transformer·_ARCHITECTURES·
+  MODEL_ARCHITECTURE 환경변수 — **Transformer로 되돌리는 경로는 없어졌다**), 1세대 단일 종목 방향 함수, 방향 target
+  데이터셋(build_merged_dataset_v2 등), 3세대 급변 손실 실험(가중 MSE·pinball), DEAD 코드, `가격예측/검증용/` 전체,
+  `발표자료/` 전체, 옛 대시보드(`쓰래기통/`), 일회성 스크립트 5개(actual_volatility_비교·lag1_baseline_비교·
+  상관관계_진단_외국인순매수·백테스트_월간·actual_volatility_백필), `TASK_T_transformer_baseline.md`.
+- **보관(압축용)**: git에 없던 산출물(발표 그림·CSV·train 캐시, 검증용 실험 산출물 npy/parquet, 검증용 히트맵 png, 8종목 방향
+  모델 체크포인트) 44개 21.7MB를 저장소 밖 `C:\압축용\`에 원래 상대 경로 그대로 복사해 두었다. 목록·크기·수정일·추적 여부·보관
+  이유는 `C:\압축용\MANIFEST.md`. 압축과 운영 폴더의 원본(미추적) 삭제는 사람이 한다.
+- **판정기준 해시 확인 방법**: `실험기록_20261010_다일방향/`의 고정 파일 3개(판정기준.md·탐색분석_사전선언.md·
+  prophet_튜닝/판정기준_P.md)는 정리 대상이 아니며 수정하지 않았다. 확인: 그 폴더에서 `sha256sum -c *.sha256`, 또는
+  `git show pre-cleanup:실험기록_20261010_다일방향/판정기준.md | sha256sum` → `bf22c24e…2849ad`(2026-10-17 세 파일 모두 일치).
+  코드·훅·워크플로는 이 해시를 검증하지 않고, 파이프라인은 이 파일들을 읽지 않는다.
+- **새 구조(단계 축, 파일 이름은 그대로)**: 수집(`주가데이터/`·`시장지표/`, 변경 없음) → 입력 점검(`가격예측_변동성_공통`:
+  가격 정렬·지수 신선도) → 피처(`dataset_builder`: 기본 피처·recent_vol·target / `momentum_feature`: excess_return_z /
+  `split_dataset`: 학습 frame·서빙 창을 같은 `_lagged_features`로 조립, `valid_feature_dates` / `garch_baseline`:
+  `garch_sigma_series` 등) → 시퀀스(`pooled_dataset`·`sequence_dataset`) → 학습(`train_common.train_model(..., TrainConfig)`,
+  하이퍼파라미터는 설정 객체, 기본값 = 운영값) → 평가(`evaluate.evaluate_gate`) → 저장+예측(`store`: 체크포인트·
+  model_registry·model_predictions·MLflow, Sink 3종 `DbSink`/`MlflowSink`/`CollectSink`). 오케스트레이터
+  `가격예측_변동성_공통.run_pooled_volatility_pipeline`은 기본 인자만 쓰면 운영 동작 그대로이고, `sinks=[store.CollectSink()]`,
+  `checkpoint_dir`, `garch_cache_dir`, `garch_read_only=True`, `version`으로 저장 없이 돌릴 수 있다. bat·워크플로가 부르는
+  모듈 경로·진입 함수명, 클래스명·meta `model_class` 문자열, DB 컬럼·CHECK, MLflow 이름은 바꾸지 않았다.
+- **동일성 확인**: 단계마다 정리 전 골든(태그 `pre-cleanup`, end 2026-10-16 고정, DB 읽기 전용 커넥션, GARCH 캐시 읽기 전용 복사본)과
+  비교해 전부 일치했다 — G1(5종목 × 20거래일: 피처 frame·서빙 창 값·GARCH σ·baseline·분할 경계·pooled 시퀀스·scaler·월간 게이팅
+  수) 41/41 비트 일치, G2(100종목 저장 없는 전체 경로: 예측 100행·게이트·state_dict SHA256 `cec251d4…`·MLflow 기록·registry)
+  정확 일치. GPU 기본 설정·CPU 모두 같은 시드에서 학습이 비트 단위로 재현됨을 먼저 확인했다. 의도된 차이는 서빙 창 마지막 행의
+  날짜 라벨(원자료 날짜 T → 다음 평일, 중복 라벨 해소) 하나뿐이고 값에는 영향이 없다. 하네스·골든·비교 기준 문서는 세션 스크래치에만
+  있다(저장소 밖).
+- **requirements**: 정리 후 코드가 쓰지 않고 남는 패키지의 의존성도 아닌 것은 `seaborn` 하나뿐이라 그 줄만 지웠다(버전 변경 없음).
+  scikit-learn·matplotlib·scipy·statsmodels는 mlflow·arch의 의존성이라 남는다. `psycopg-binary`는 psycopg가 실제로 쓰는 binary
+  구현이라 유지(아래 알려진 이슈). 운영 venv `pip check` 이상 없음, 남는 집합의 의존 버전 충족을 메타데이터로 확인.
+
 **1. 운영 시스템 — 완성·가동 중**
 - **모델**: 100종목 pooled **LSTM**(15피처, hidden 32·2층, dropout 0.3, wd 1e-4, 종목 임베딩). 2026-09-27에 기본값을
-  transformer→lstm으로 전환(`MODEL_ARCHITECTURE`, 되돌리려면 환경변수 `=transformer`). val 게이트 RMSE 1.9648로
+  transformer→lstm으로 전환했다(정리 브랜치에서는 Transformer 코드와 전환 스위치를 지워 되돌릴 수 없다 — 위 0번). val 게이트 RMSE 1.9648로
   GARCH 2.1450 / SMA20 2.0177 / Parkinson-SMA20 2.0013을 모두 이김.
 - **배포 게이트 버그 수정**: 하이브리드는 pooled, baseline은 종목평균으로 비대칭 비교하던 포팅 버그를 고쳐 양쪽
   모두 **종목별 RMSE 평균**으로 통일(커밋 `7055cf8`). 9/12 이후의 "게이트 계속 미통과"와 D-4의 "val·실측 정반대"는
@@ -24,9 +59,9 @@
   백테스트 분리 → 패널 C 순서, 2026-10-11 사람 결정). **1단계 골격 완료**(커밋 `eab0e06` 보관 이동·도구,
   `cc41d69` 테마·상태 6종·더미 화면 — 밝은 테마 고정, 파랑은 데이터 전용, 값은 아직 전부 더미). **2단계(패널 A
   데이터 연결, `대시보드/패널A_데이터.py`)는 보류** — 다음 세션에 diff 재제시(열 = 예측 기준일, Actions는 시작 KST
-  12시 전이면 전날 귀속, 새로고침은 DB·로컬 캐시만 비움). 옛 대시보드는 `쓰래기통/대시보드/`로 옮겼다(폴백: 루트에서
-  `streamlit run 쓰래기통/대시보드/model_predictions_dashboard.py`). 옛 대시보드 (d) 패널에서 날짜별 전 종목 예측,
-  상위 10종목, 게이트 통과·입력 오염 여부를 본다.
+  12시 전이면 전날 귀속, 새로고침은 DB·로컬 캐시만 비움). 옛 대시보드(날짜별 전 종목 예측·상위 10종목·게이트 통과·입력 오염 여부를
+  보던 (d) 패널)는 정리 브랜치에서 지웠다(pre-cleanup 태그 시점의 `쓰래기통/대시보드/model_predictions_dashboard.py`). 새 대시보드
+  패널 A가 연결될 때까지는 DB를 직접 조회해야 한다(main에는 아직 옛 대시보드가 있다).
 - **Neon 전송량 절감(2026-10-05, 커밋 `7a030d0`·`0ab06b5`·`d72b231`)**: 무료 한도 5GB/월을 소진해 접속이 막힌 원인은
   예측 단계가 종목마다 거시지표 9종 전체 이력을 캐시 없이 두 번씩 읽은 것이었다(실행당 약 0.4GB, 추정).
   ① 거시지표·KOSPI를 실행 시작 시 한 번만 읽어 학습·예측이 공유, ② 지표 조회 하한을 "시작일 이전 마지막 공표일"로
@@ -57,8 +92,8 @@
 평균 성능은 baseline을 이기지만, 급변일에는 크기를 체계적으로 낮게 예측한다(① 평균 −4.1%p, 예측/실측 std 약
 0.27, 예측값 천장 약 4~5). 2026-09-27에 아래 시도를 전부 했고 모두 같은 벽에 부딪혔다. 근본 원인은
 **예측 시점에 다음날 급변 여부를 가를 신호가 현재 입력에 약하다**는 것이다(급변일 분류 PR-AUC 무작위 대비
-1.1~1.24배). 상세·수치: `결과_TaskT_급변구간_손실함수_시도.md` [1]~[12], 재현 코드:
-`가격예측/검증용/실험_20260927/`(README 참고), 공용 평가 함수: `가격예측/검증용/regime_eval.py`.
+1.1~1.24배). 상세·수치: `결과_TaskT_급변구간_손실함수_시도.md` [1]~[12], 재현 코드: pre-cleanup 태그 시점의 
+`가격예측/검증용/실험_20260927/`(README 참고)와 공용 평가 함수 `가격예측/검증용/regime_eval.py`(정리 브랜치에서 삭제).
 
 | 계열 | 시도 | 결과·실패 사유 |
 |---|---|---|
@@ -94,15 +129,17 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
   GARCH-type models", *Expert Systems with Applications***: GARCH 계열 예측을 LSTM 입력으로 결합하는 하이브리드 변동성
   예측의 원류(KOSPI 200 대상). 이 프로젝트의 "GARCH σ를 피처로 쓰는 하이브리드" 구조가 이 계보를 따른다.
 
-**5. 발표자료 (`발표자료/`, 스크립트만 git — 그림·CSV·캐시는 .gitignore, 재생성 가능)**
-| 파일 | 내용 | 재생성 |
-|---|---|---|
-| fig1 / fig2 / fig3 | RMSE 비교 막대(y축 0 시작), 예측 vs 실측 산점도(전체+확대), 예측/실측 std 33% | `python -m 발표자료.make_presentation_figures --rows 가격예측/검증용/실험_20260927/val_diag_rows.parquet` |
-| fig4 + percentiles.csv | 타겟 분포 train vs val(선형/로그) | `python -m 발표자료.make_target_distribution` |
-| fig5 + feature_target_relations.csv | 회귀 혼동행렬, KMeans, 피처-타겟 P/S/MI | `python -m 발표자료.diagnose_structure --rows …/val_diag_rows.parquet --pred …/lossrecheck_lstm_s42.npy` |
-| fig6 / fig7 | train 타겟 vs 16피처 hexbin 그리드, 전일 종가 4패널 | `make_feature_scatter_grid` → `make_close_vs_target`(첫 실행 시 train 캐시 생성 약 15분) |
-| fig8 + market_bigmove_ratio_corr.csv | 새 피처 포함 상관행렬 | `python -m 발표자료.diagnose_market_bigmove_ratio` |
-| price_estimate_*.csv, blend_garch_lstm.csv, postproc_topP_scaling*.csv | 가격 추정 비교(오라클 방향), 그룹별, 블렌딩, 후처리 | `가격예측/검증용/실험_20260927/`의 `price_estimate_and_blend.py` / `postproc_eval.py` |
+**5. 발표자료 — 정리 브랜치에서 스크립트 삭제, 산출물은 `C:\압축용\발표자료\`에 보관(재생성 불가)**
+그림·CSV는 git에 없었고, 만든 스크립트(pre-cleanup 태그 시점의 `발표자료/`·`가격예측/검증용/실험_20260927/`)도 지웠으므로 다시 만들 수 없다.
+보관본: `C:\압축용\발표자료\`(그림 8개·CSV·train 캐시), 입력 데이터 `C:\압축용\가격예측\검증용\실험_20260927\`.
+| 파일 | 내용 |
+|---|---|
+| fig1 / fig2 / fig3 | RMSE 비교 막대(y축 0 시작), 예측 vs 실측 산점도(전체+확대), 예측/실측 std 33% |
+| fig4 + target_distribution_percentiles.csv | 타겟 분포 train vs val(선형/로그) |
+| fig5 + feature_target_relations.csv | 회귀 혼동행렬, KMeans, 피처-타겟 P/S/MI |
+| fig6 / fig7 | train 타겟 vs 16피처 hexbin 그리드, 전일 종가 4패널 |
+| fig8 + market_bigmove_ratio_corr.csv | 새 피처 포함 상관행렬 |
+| price_estimate_*.csv, blend_garch_lstm.csv, postproc_topP_scaling*.csv | 가격 추정 비교(오라클 방향), 그룹별, 블렌딩, 후처리 |
 - ⚠️ "변동성 + 오라클 방향" 가격 추정을 발표에 쓸 때는 **"방향은 이미 안다고 가정(사용자 판단 영역) — 이 모델이 방향을
   맞힌다는 주장 아님"**을 반드시 명시하고, "상수 크기 + 오라클" 행도 함께 보여 개선의 대부분이 방향 가정에서 온다는
   점을 드러낼 것(naive 대비 0.79 중 변동성 모델 기여는 0.79→0.72).
@@ -117,10 +154,11 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
 3. **작업 스케줄러 "예약 시간을 놓치면 즉시 실행"(StartWhenAvailable)을 GUI에서 켜기**: 저장된 암호가 필요해
    명령으로는 불가. 미완료.
 4. **잠정값 재발 방지**: GitHub Actions 일일수집에 "최근 7일 `--force`" 단계 추가를 검토(제안만, 미적용).
-5. `actual_volatility_백필.py` 자동화(여전히 수동) + target_date 매칭 유연화 검토(아래 로드맵 절).
+5. ~~`actual_volatility_백필.py` 자동화~~ — 정리 브랜치에서 백필 스크립트를 지웠다. 실측 평가·표시는 `model_predictions_realized`
+   뷰(prediction_date 다음 첫 거래일로 계산, 휴장일 target_date도 처리)로 한다. `model_predictions.actual_volatility` 컬럼은 남는다.
 6. 필요 시: D-4 후속 롤링 val 단발 테스트를 수정된 게이트로 재평가, walk-forward 재검증(미실시).
-7. 정리 항목: 로컬 잔재 파일, `가격예측/상관관계_진단_외국인순매수.py` 리네임(외국인 코드는 이미 없음, 순수 상관 진단),
-   대시보드 개선, 거래량만 다른 과거 주가 행(2026-10-10 점검 기준 9/08~10/08에 439행, 알려진 이슈 참고) 정정 여부.
+7. 정리 항목: 로컬 잔재 파일(운영 폴더의 미추적 원본 — `C:\압축용\MANIFEST.md` 목록), 대시보드 개선, 거래량만 다른 과거 주가 행
+   (2026-10-10 점검 기준 9/08~10/08에 439행, 알려진 이슈 참고) 정정 여부. (상관관계 진단 스크립트 리네임은 스크립트 삭제로 종료.)
 8. **급변 구간·국면 전환·규제·후처리는 다시 시도하지 않는다**(위 3번 표). 새로 시도할 가치가 있는 건 "새 정보" 계열
    뿐이며, 그것도 `market_bigmove_ratio` 한 번으로 실패했다.
 9. 백테스트·백필 시 `가격예측/checkpoints/garch_params/`를 먼저 비울 것(아래 알려진 이슈, 여전히 유효).
@@ -131,9 +169,9 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
     원인 확인, USD_KRW 주말 날짜 라벨 문제 — 미조치. 하지 않기로 한 것(inserted_at 컬럼, USD_KRW 7일 재조회, 확정 시각
     측정 스크립트)은 아래 "알려진 이슈"의 해당 항목 참고.
 12. **`가격예측/종목_월간갱신.py:237` lookback 하드코딩 정리(2026-10-11)**: 신규 종목 게이팅이
-    `count_train_sequences(..., lookback=20)`으로 20을 직접 쓴다. 지금은 운영 `LOOKBACK`(`가격예측_변동성_공통.py:63`)도
-    20이라 결과가 같지만(확인), LOOKBACK을 바꾸면 게이팅과 실제 학습의 시퀀스 수가 어긋난다. 이미 import하는
-    `MIN_TRAIN_SEQUENCES`처럼 `LOOKBACK`을 import해 쓰도록 고친다. LOOKBACK은 월간 튜닝 범위에서 뺐다(2026-10-11 사람 결정,
+    `count_train_sequences(..., lookback=20)`으로 20을 직접 쓴다. 지금은 운영 `LOOKBACK`(`가격예측_변동성_공통.LOOKBACK`)도
+    20이라 결과가 같지만(확인), LOOKBACK을 바꾸면 게이팅과 실제 학습의 시퀀스 수가 어긋난다. 정리 브랜치에서
+    `MIN_TRAIN_SEQUENCES`를 constants.py로 옮겼듯 `LOOKBACK`도 torch를 끌어오지 않는 곳으로 옮겨 import해 쓰도록 고친다. LOOKBACK은 월간 튜닝 범위에서 뺐다(2026-10-11 사람 결정,
     아래 로드맵 "하이퍼파라미터 월간 튜닝").
 13. **새 대시보드 2단계(패널 A 데이터 연결)**: `대시보드/패널A_데이터.py` diff를 다시 제시하고 승인 후 적용한다(⑥ MLflow는
     10/12 05:00 실행으로 새 `일일_자동화` 실험이 생긴 뒤). 구현 조건: 더미 차트 카드 제거, 수동·재시도 실행은 성공해도 경고로
@@ -145,6 +183,17 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
     D+1 00:43~02:56). ③ **기준금리(722Y001) 알람은 소스 정체다**(ECOS가 10/08 이후 값을 내지 않음, DB와 일치 — 수집기 문제
     아님). 10/22 금통위 이후 ECOS 갱신 여부를 다시 보고, 그때까지 Actions·로컬 지표 수집의 exit 1은 이 알람이다
     (DAILY_LAG_LIMITS는 바꾸지 않음). ④ 10/14 05:00 실행 누락 원인 미확정(아래 알려진 이슈).
+15. **정리 브랜치 후속(2026-10-17)**: ① `cleanup/pipeline-stages`를 main에 합칠지 사람이 결정한다(합칠 때는 주말에, 첫 05:00 실행
+    로그·DB 행 확인). ② **거래정지일 행(시가·고가·저가=0, 거래량 0, 종가=직전 종가) 피처 처리**: 활성 11종목 112행(예: 017670
+    2021-10~11 24행, 012450 2024-08~09 18행, 최근 377300 2025-06-24~26). 그날 `open_gap_ratio=-1`, `hl_range_ratio=0`,
+    Parkinson `ln(0/0)`=NaN(이후 20일 baseline NaN). 대부분 train 구간 — 처리 방식은 재학습·게이트 재평가가 필요하다.
+    ③ **기준 달력(005930 하드코딩) 대체**: 분할 경계는 ACTIVE_TICKERS[0](현재 005930), 월간 유니버스 점검은 `"005930"` 문자열로
+    정한다(`split_dataset.valid_feature_dates` 기준). 전 종목 공통 거래일(교집합) 등으로 바꾸면 경계가 달라질 수 있어 게이트 재평가가
+    필요하다. ④ **이름 변경 라운드**: 감사에서 제안한 이름(예: `split_dataset` → 피처 조립, `가격예측_변동성_일일수집` → 일일 예측,
+    `build_merged_dataset_v2_volatility_hybrid` → 학습 frame)은 이번 정리에서 바꾸지 않았다. 바꿀 때는 bat 78행(CP949로 편집)·
+    `monthly_universe_check.yml` 55행·문서를 함께 고친다. ⑤ 백테스트를 다시 만들 때는 `run_pooled_volatility_pipeline`의
+    `sinks`·`checkpoint_dir`·`garch_cache_dir`·`garch_read_only`와 `store.DbSink(registry_source=...)`로 운영과 분리한다
+    (2026-10-11 결정한 `model_predictions_backtest`·`backtest_runs` 테이블은 아직 없음).
 
 ---
 
@@ -233,7 +282,7 @@ tau=0.8은 급변 지속구간에서 GARCH를 실제로 이겼지만(RMSE 4.04 v
 지도교수님으로부터 "Transformer는 원래 문자열(시퀀스) 임베딩을 위한 구조이니, 수치형 시계열
 데이터는 수치형답게 다루는 모델을 검토해보라"는 피드백을 받았다 — LSTM으로의 전환 방향으로
 해석해 다음 트랙으로 채택한다(상세는 아래 로드맵 "모델 아키텍처 재검토" 절 참고). 이 세션에서는
-그 전환을 대비해 두 가지를 완료했다: (1) `가격예측_변동성_공통.py`에 `MODEL_ARCHITECTURE`
+그 전환을 대비해 두 가지를 완료했다(2026-10-17 정리 브랜치에서 이 스위치는 지웠다): (1) `가격예측_변동성_공통.py`에 `MODEL_ARCHITECTURE`
 환경변수 + `_ARCHITECTURES` 레지스트리로 아키텍처 전환 가능한 구조를 마련하고, 기존
 Transformer 경로가 리팩터링 전/후 모델 state_dict SHA256까지 완전히 동일함을 검증했다(커밋
 `c776c73`). 같은 커밋에서 `daily_pipeline.bat`의 chcp 65001 실행 순서도 고쳤으나 **효과가
@@ -283,7 +332,7 @@ GitHub Actions 데이터 수집 스케줄이 20:00 전후라 19:00엔 당일 데
 - **원인(평가 코드 버그)**: `가격예측_변동성_공통.train_daily_pooled_model()`이 하이브리드는 val 전체
   행을 모은 **pooled RMSE**, baseline 3종은 **종목별 val RMSE의 단순 평균**으로 계산해 비교하고 있었다.
   같은 오차라도 종목별 RMSE 평균 ≤ pooled RMSE(젠센 부등식)라 baseline에 구조적으로 유리한 비교다.
-  검증 정본(`가격예측/검증용/test_evaluation_pooled100_hybrid.py:253`)은 양쪽 다 종목별 평균이었다 —
+  검증 정본(pre-cleanup 태그 시점의 `가격예측/검증용/test_evaluation_pooled100_hybrid.py:253`)은 양쪽 다 종목별 평균이었다 —
   운영 파이프라인으로 옮기며 생긴 포팅 버그.
 - **확인(seed 42 재학습으로 운영값 2.0716 재현 후, 같은 23,737행 기준)**: 대칭 비교에서는 하이브리드가
   **셋 다 이긴다** — 종목평균 1.9594 vs GARCH 2.1450 / SMA20 2.0177 / Parkinson 2.0013, pooled 2.0675 vs
@@ -340,8 +389,8 @@ GitHub Actions 데이터 수집 스케줄이 20:00 전후라 19:00엔 당일 데
   1.1/1.2/1.5/2.0/3.0): M≥1.5는 ①급변일을 GARCH 수준 이하까지 낮추지만(예: P10·M2.0 4.05%) ③평상일이 무너져 전체·③ 게이트
   모두 실패. M 1.1~1.2는 전체 게이트는 대부분 통과하나 ① 개선이 4.93→4.61~4.82%에 그치고 ③ 게이트는 전부 실패, 전체 RMSE도
   원본보다 나쁨. 배율이 걸리는 비율이 ①급변일 39~71% vs ③평상일 25~55%로 거의 안 갈림 — 블렌딩 스위치와 같은 원인. train
-  상위 10% 임계값이 val에선 30%에 걸림(val 예측 분포가 위로 이동). `발표자료/postproc_topP_scaling*.csv`.
-  `발표자료/diagnose_market_bigmove_ratio.py`, `fig8_corr_with_market_bigmove_ratio.png`.
+  상위 10% 임계값이 val에선 30%에 걸림(val 예측 분포가 위로 이동). pre-cleanup 태그 시점의 `발표자료/postproc_topP_scaling*.csv`.
+  pre-cleanup 태그 시점의 `발표자료/diagnose_market_bigmove_ratio.py`, `fig8_corr_with_market_bigmove_ratio.png`(보관본은 `C:\압축용\발표자료\`).
 
 **데이터 오염 정리 + 재수집 인프라(2026-09-27)**:
 - **근본 원인(공통)**: 수집기가 "확정 전 잠정값"을 받아 저장한 뒤 다시 보지 않는 구조 — 지표는 항상
@@ -369,7 +418,7 @@ GitHub Actions 데이터 수집 스케줄이 20:00 전후라 19:00엔 당일 데
   `model_predictions_trusted` 뷰가 `gate_passed AND NOT input_data_suspect`로 확장. 이후 실행은 지수
   결측이 감지되면 자동으로 true 기록(재실행 시 플래그도 함께 갱신).
 - **target 9/14 `actual_volatility` 정정**: 정정 전 종가로 계산돼 있던 100행 중 84행 변경(최대 0.94,
-  평균 0.21) — NULL 후 `actual_volatility_백필.py` 재실행 방식(같은 실행에서 미채움 상태였던 9/15·9/21
+  평균 0.21) — NULL 후 pre-cleanup 태그 시점의 `actual_volatility_백필.py` 재실행 방식(같은 실행에서 미채움 상태였던 9/15·9/21
   target 102행도 채워짐). 19영업일 백테스트 통계(N=1,800)의 하루치가 이만큼 바뀌었다.
 - 부수: `requirements.txt`/venv에서 미사용 41개 패키지 제거(pykrx·transformers·newspaper3k·yfinance 등,
   정리 전 freeze는 세션 scratchpad에만 보관). `psycopg-binary`는 psycopg가 실제로 쓰는 구현이라 유지.
@@ -413,8 +462,8 @@ GitHub Actions 데이터 수집 스케줄이 20:00 전후라 19:00엔 당일 데
    ✅ **실제 무인 실행도 검증 완료(2026-09-25 05:00, 2026-09-27 재검증)** — 위 "무인 실행
    검증 완료 + MLflow 자가 기동" 절 참고. 남은 것은 StartWhenAvailable 옵션을 GUI에서
    켜는 것뿐(저장된 암호 필요).
-6. ✅ **완료(2026-09-14)** — `actual_volatility` 백필 스크립트(`가격예측/
-   actual_volatility_백필.py` + 비교 스크립트 `actual_volatility_비교.py`) 작성·실행
+6. ✅ **완료(2026-09-14)** — `actual_volatility` 백필 스크립트(pre-cleanup 태그 시점의 `가격예측/
+   actual_volatility_백필.py` + 비교 스크립트 `actual_volatility_비교.py`, 둘 다 2026-10-17 정리 브랜치에서 삭제) 작성·실행
    완료. 상세는 아래 "actual_volatility 백필 + 첫 실측 비교" 절 참고
 7. ✅ **원인 규명(2026-09-27) — 게이트 집계 버그였음(위 "게이트 집계 버그" 절), 2026-09-28부터 수정 적용.**
    아래는 경과 기록.
@@ -711,10 +760,16 @@ kch_Final_prj/
     └── Bigkinds.py         # 레거시. BigKinds CSV 일괄 적재, 미사용
 ```
 
-> 2026-09-27 추가: `가격예측/검증용/regime_eval.py`(급변/평상 그룹·종목평균 게이트·오라클 가격 환산 공용 평가 함수),
+> 2026-09-27 추가: pre-cleanup 태그 시점의 `가격예측/검증용/regime_eval.py`(급변/평상 그룹·종목평균 게이트·오라클 가격 환산 공용 평가 함수),
 > `가격예측/검증용/실험_20260927/`(그날 실험 스크립트 아카이브 + README, 데이터는 로컬 전용), `발표자료/`(발표 그래프·EDA
-> 스크립트), `대시보드/capture_screenshot.py`(Chrome DevTools로 Streamlit 렌더 후 캡처, 옛·새 대시보드 공용 — 3·4번째 인자로
-> 대기 h3 글자와 최소 plotly 수, 산출물은 `대시보드/screenshots/`).
+> 스크립트) — 셋 다 2026-10-17 정리 브랜치에서 삭제. `대시보드/capture_screenshot.py`(Chrome DevTools로 Streamlit 렌더 후 캡처
+> — 3·4번째 인자로 대기 h3 글자와 최소 plotly 수, 산출물은 `대시보드/screenshots/`).
+
+> 2026-10-17 정리 브랜치의 `가격예측/`(운영 경로만): `가격예측_변동성_일일수집.py`(CLI 진입점) · `가격예측_변동성_공통.py`(오케스트레이터·
+> 설정·입력 점검·GARCH 캐시·baseline) · `dataset_builder.py` · `momentum_feature.py` · `split_dataset.py`(학습 frame·서빙 창) ·
+> `garch_baseline.py` · `parkinson_baseline.py` · `sequence_dataset.py` · `pooled_dataset.py` · `train_common.py`(TrainConfig·train_model) ·
+> `model.py`(PooledLSTMRegressor·MODEL_FAMILY) · `evaluate.py`(게이트) · `store.py`(체크포인트·registry·예측·MLflow·Sink) ·
+> `종목_월간갱신.py`. 위 상태 요약 0번 참고.
 
 > 2026-09-12: 위 트리의 `뉴스데이터/`, `감성분석/`, `라벨/`, `빅카인즈/`는 코드 의존성 검증 후
 > `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
@@ -911,7 +966,8 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   실제로 binary 구현(`psycopg.pq.__impl__ == 'binary'`)으로 동작하므로 `psycopg-binary`는 반드시 유지
 - `market_indicators.unit` DEPRECATED — 적재 시 NULL로 두고 `indicator_meta.unit` 사용
 - `쓰래기통/` 폴더명 오타는 의도된 것("안 쓰는 코드 보관용")
-- `쓰래기통/`은 2026-10-03 `a4a10c9`로 삭제됐다가 2026-10-11에 옛 대시보드 보관용으로 다시 만들었다.
+- `쓰래기통/`은 2026-10-03 `a4a10c9`로 삭제됐다가 2026-10-11에 옛 대시보드 보관용으로 다시 만들었고, 2026-10-17 정리 브랜치에서
+  옛 대시보드와 함께 다시 지웠다(pre-cleanup 태그 시점에 있음).
 - ⚠️ **GARCH 파라미터 캐시의 시점 무결성 문제 (2026-09-12 발견, 중요)** —
   `가격예측_변동성_공통.py`의 `get_or_fit_garch_params()`는 캐시(`가격예측/checkpoints/
   garch_params/<ticker>.json`) 재사용 여부를 **`fitted_at` 기준 경과일수(30일 이내)만**
@@ -929,15 +985,12 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   회원제(로그인 필수)로 전환되면서 계정 가입·본인인증이라는 통제 불가능한 외부 프로세스에
   의존하게 돼 마감 일정상 리스크가 크다고 판단해 폐기. `가격예측/외국인_순매수_수집.py` 삭제,
   `investor_net_trading` 테이블(`Database/가격예측/테이블_생성_투자자매매.sql`, 0행) DROP,
-  해당 SQL 파일도 삭제. `가격예측/상관관계_진단_외국인순매수.py`는 외국인 관련 코드(수집·
+  해당 SQL 파일도 삭제. pre-cleanup 태그 시점의 `가격예측/상관관계_진단_외국인순매수.py`는 외국인 관련 코드(수집·
   조인·GARCH 잔차 상관)를 전부 제거하고 100종목 pooled 피처 상관관계 진단(다중공선성 +
-  피처-target) 전용 스크립트로 남겼다(파일명은 유지).
-- ⚠️ **`actual_volatility` 백필 자동화 안 됨(2026-09-20)** — `가격예측/actual_volatility_
-  백필.py`가 일일 파이프라인(`daily_pipeline.bat`/`daily_data_collection.yml`)에 물려있지
-  않아, 최근 며칠치 `model_predictions.actual_volatility`는 항상 수동 실행 전까지 NULL로
-  남아있다(대시보드 등에서 봤을 때 버그처럼 보일 수 있음 — 정상 상태). 다음 세션 과제로
-  남김.
-  평가·표시는 `model_predictions_realized` 뷰로 대체 가능(2026-10-11, 아래 "휴장일 target_date" 항목 참고).
+  피처-target) 전용 스크립트로 남겼었다(2026-10-17 정리 브랜치에서 삭제).
+- ⚠️ **`model_predictions.actual_volatility`는 더 이상 채워지지 않는다(2026-10-17 정리 브랜치)** — 이 컬럼을 채우던
+  pre-cleanup 태그 시점의 `가격예측/actual_volatility_백필.py`(일일 파이프라인에 물려 있지 않아 수동 실행이었음)를 지웠다. 기존에 채워진 값
+  (백필 당시 스냅숏)은 그대로 있고, 실측 평가·표시는 `model_predictions_realized` 뷰로 한다(2026-10-11, 아래 "휴장일 target_date" 항목).
 - ⚠️ **`daily_pipeline.bat`은 CP949로 저장돼 있다 — UTF-8로 다시 저장하지 말 것(2026-09-24,
   커밋 `98aae71`)** — 더블클릭 실행 시 한글 텍스트가 깨져 명령어로 오인되는 에러
   (`'◆◆령으로' is not recognized...`)로 세 스크립트가 시작도 못 하던 문제. **원인은 BOM이
@@ -1155,7 +1208,7 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
     2026-10-11까지의 운영 run은 전부 여기 있다. 새 형식(태그, `hybrid_rmse_tickermean`)으로 기록된 첫 run
     `pd2026-10-08_v20261011_035645`(10/11 12:54 실행) **한 개도 옛 실험에 남아 있다**. 다음 운영 실행에서 코드가 같은 이름
     `일일_자동화`로 `set_experiment`를 부르면 MLflow가 새 실험을 만든다(새 id는 그 실행 뒤 확인해 적을 것). 코드는 실험을
-    **이름으로만** 찾으므로(`MLFLOW_EXPERIMENT_NAME`, 백테스트는 `"백테스트"`) 새 실험의 id가 무엇이든 영향이 없다
+    **이름으로만** 찾으므로(`MLFLOW_EXPERIMENT_NAME` — 정리 브랜치에서는 `store.MLFLOW_EXPERIMENT_NAME`, 옛 백테스트는 `"백테스트"`) 새 실험의 id가 무엇이든 영향이 없다
     (2026-10-11 grep 확인: 저장소 코드에 실험 id 하드코딩 없음). 옛 로그(`logs/daily_*.log`)의 "View run" 링크
     `#/experiments/1/...`는 옛 실험을 가리킨다.
   - **하이브리드 게이트 RMSE 합치는 규칙**: 값 = `hybrid_rmse_tickermean`(커밋 `00c7fe3` 이후 run).
@@ -1177,13 +1230,13 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
     덮어써진 실행의 prediction_date는 알 수 없다. `n_tickers` < 100인 run은 시험 실행이다.
     두 실험에 걸칠 수 있으므로(예: pd 10/08은 옛 실험에 여러 run이 있고 새 실험에도 생길 수 있음) 두 실험을 함께 검색한다.
   - **run이 없는 날**: 실행이 없었던 날일 수도 있고, 실행은 했지만 **MLflow 기록을 건너뛴 날**일 수도 있다(커밋
-    `0e79d8f`부터 `_log_mlflow_run`이 `/health`를 3초 안에 확인하고, 응답이 없으면 기록하지 않는다). 그날 로그
+    `0e79d8f`부터 `_log_mlflow_run`(정리 브랜치에서는 `store.MlflowSink.log_run`)이 `/health`를 3초 안에 확인하고, 응답이 없으면 기록하지 않는다). 그날 로그
     `logs/daily_*.log`에서 줄 맨 앞 `[MLFLOW-SKIP]`(건너뜀) 또는 `⚠️ MLflow 로깅 실패`(확인 통과 후 실패)를 찾는다.
     예측은 그 전에 DB에 저장되므로 model_predictions에는 행이 있다.
   - **지연 상한**: MLflow HTTP 기본값(`MLFLOW_HTTP_REQUEST_MAX_RETRIES`=7, `MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR`=2,
     `MLFLOW_HTTP_REQUEST_BACKOFF_JITTER`=1.0, `MLFLOW_HTTP_REQUEST_TIMEOUT`=120초 — 설치된 mlflow 3.16 코드와 공식 문서로
     확인)이면 서버가 없을 때 파이프라인 끝에서 **약 4분 24초**(2026-10-11 실측 263.8초: 대기 244초 + Windows 연결 거부
-    2.05초×8회로 계산이 실측과 일치), 멈춤 시 약 20분(추정)을 기다렸다. 지금은 `_log_mlflow_run`이 재시도 3·계수 1·타임아웃
+    2.05초×8회로 계산이 실측과 일치), 멈춤 시 약 20분(추정)을 기다렸다. 지금은 `_log_mlflow_run`(정리 브랜치: `store.MlflowSink.log_run`)이 재시도 3·계수 1·타임아웃
     15초를 setdefault로 넣는다(환경변수로 덮어쓸 수 있음). 실측 상한(스크래치 서버, 커밋 `0e79d8f` 검증): 서버 없음 2.05초,
     응답 없는 소켓 3.01초, /health 통과 후 API 500 7.09초, /health 통과 후 API 멈춤 66.99초. run이 열린 뒤 멈추면 종료
     요청까지 최대 약 140초(추정, 미측정). 정상 서버에서 /health 확인 비용은 중앙값 0.016초(실측). 대가로 재기동 중처럼
@@ -1194,7 +1247,8 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   - 끌 때는 `taskkill /PID <부모PID> /T /F`로 **프로세스 트리**를 종료한다. 부모만 종료하면 작업(worker) 프로세스가 포트를
     계속 쥔다 — 확인: 2026-10-11 스크래치 서버(포트 5995) 시험에서 부모(7064)를 종료한 뒤에도 작업 프로세스 4개가 포트를 쥐고
     있었다. 운영 서버에서 죽은 PID가 소켓을 쥐고 있던 현상도 같은 종류로 **추정**한다(미확인).
-- ⛔ **`가격예측/백테스트_월간.py` 실행 금지 — 백테스트 전용 테이블로 분리하기 전까지(2026-10-11)** — 이 스크립트는
+- ⛔→🗑️ **pre-cleanup 태그 시점의 `가격예측/백테스트_월간.py`(2026-10-17 정리 브랜치에서 삭제)** — 아래는 삭제 전 실행 금지 사유(2026-10-11). 새 백테스트를
+  만들 때 같은 함정을 피하려고 남긴다(새 구조의 분리 인자는 위 할 일 15 ⑤). 이 스크립트는
   `run_pooled_volatility_pipeline()`을 그대로 불러 ① `model_predictions`에 (ticker, target_date) UPSERT한다:
   기간을 최근 22거래일(9/04~10/08)로 바꾸고 `PRODUCTION_CUTOFF`(9/14) 가드를 빼면 **실시간 LSTM 800행 전부(사전 예측
   400·trusted 300 포함)를 포함해 1,502행을 덮어쓰고** 600행을 새로 넣는다. 하드코딩된 8/14~9/11 그대로면 D-4 1,900행
@@ -1384,16 +1438,14 @@ h=3/5/10(주간 단위 누적 초과수익률)까지 확장해 재실험했지�
 중간 발표에서 지도교수님으로부터 "Transformer는 원래 문자열(시퀀스) 임베딩을 위한 구조이니,
 수치형 시계열 데이터는 수치형답게 다루는 모델을 검토해보라"는 피드백을 받았다.
 
-- ✅ **LSTM 등록·비교 완료(2026-09-27)** — `MODEL_ARCHITECTURE=lstm`(`PooledLSTMRegressor`, 단방향·hidden 32·
+- ✅ **LSTM 등록·비교 완료(2026-09-27)** — 당시 `MODEL_ARCHITECTURE=lstm`(`PooledLSTMRegressor`, 단방향·hidden 32·
   2층, 종목 임베딩 매 타임스텝 concat, 학습 루프는 Transformer와 동일). 대칭 게이트 기준 3 seed 전부 통과,
   Transformer와 동급(근소 열세) — 위 "게이트 집계 버그" 절 참고. **같은 날 운영 기본값을 lstm으로 전환**
-  (`MODEL_ARCHITECTURE` 기본값, 되돌리려면 환경변수 `MODEL_ARCHITECTURE=transformer`). 전환 후 운영 학습 함수
+  (`MODEL_ARCHITECTURE` 기본값 — 2026-10-17 정리 브랜치에서 스위치와 Transformer 코드를 지워 되돌리기 경로는 없다). 전환 후 운영 학습 함수
   그대로 재학습 검증: 게이트 1.9648(val 전체 23,800행 기준 — 재검증 때 1.9643은 baseline 유효 23,737행 기준이라
   미세 차이), best epoch 3 동일, 게이트 통과. **2026-09-28 05:00 실행부터 LSTM으로 운영.**
-- **LSTM 우선 시도** — 리스크가 낮고 교수님 피드백과 가장 직접적으로 부합. 위 아키텍처
-  스위치 구조(`MODEL_ARCHITECTURE`/`_ARCHITECTURES`, 가격예측_변동성_공통.py)에
-  `train_pooled_lstm()`(train_common.py) + `PooledLSTMRegressor`(model.py) 한 쌍만
-  추가하면 됨.
+- **LSTM 우선 시도** — 리스크가 낮고 교수님 피드백과 가장 직접적으로 부합(당시 아키텍처 스위치에 LSTM 학습 함수와
+  `PooledLSTMRegressor` 한 쌍을 추가하는 방식으로 했다. 정리 브랜치에서는 `train_common.train_model` 하나로 단일화).
 - **여유가 되면 GAF(Gramian Angular Field)+CNN 병행 검토** — 레버리지 효과 등 방향-크기
   상호작용을 국소 패턴으로 포착할 가능성이 있으나, 100종목이라는 "표본 다양성"이 커스텀
   CNN을 처음부터 학습시키기엔 넉넉지 않을 수 있음 — 작은 구조 또는 전이학습 검토 필요.
@@ -1406,7 +1458,7 @@ h=3/5/10(주간 단위 누적 초과수익률)까지 확장해 재실험했지�
 
 ### 레버리지 효과 검증 — ❌ 종료(2026-09-27, 신호 부족)
 
-`가격예측/상관관계_진단_외국인순매수.py`에 진단 전용 파생 피처 `downside_shock =
+pre-cleanup 태그 시점의 `가격예측/상관관계_진단_외국인순매수.py`에 진단 전용 파생 피처 `downside_shock =
 max(-close_return, 0)`, `upside_move = max(close_return, 0)`을 추가해(파이프라인 피처셋은
 그대로, 이미 t-1 shift된 close_return의 행 단위 변환이라 추가 누수 없음) 100종목 pooled
 **train만**(n=106,129, train_end=2024-10-10) 상관행렬을 재계산했다. 히트맵:
@@ -1430,18 +1482,17 @@ garch_sigma 0.35 / hl_range_ratio 0.33은 전체 기간판 수치로 보이며, 
 다소 다르다. 피어슨 상관은 선형·극단치 민감 지표라 조건부 평균 비교는 하지 않았다 — 필요 시
 재검토 여지로만 남김.)
 
-### actual_volatility_백필.py 매칭 유연화 검토 (신규, 2026-09-24)
+### actual_volatility 백필 매칭 유연화 — 종료(2026-10-17)
 
-현재는 `target_date`가 정확히 일치하는 실제 거래일만 찾고, 공휴일 등으로 안 맞으면 NULL로
-남는다. `close_prev`를 찾을 때 이미 쓰고 있는 "가장 가까운 실제 거래일" 패턴을 `target_date`
-매칭에도 동일하게 적용하는 방안을 검토한다 — 단, `next_weekday()` 자체(예측 시점의 근사
-로직)는 그대로 유지한다(지우면 매주 금요일마다 더 큰 구멍이 생긴다).
+백필 스크립트(pre-cleanup 태그 시점의 `actual_volatility_백필.py`)가 정리 브랜치에서 삭제돼 종료한다. "prediction_date 다음 첫 실제 거래일"
+매칭은 `model_predictions_realized` 뷰가 이미 하고 있다(2026-10-11). `next_weekday()`(예측 시점의 target_date 근사)는 그대로다.
 
 ### 하이퍼파라미터 월간 튜닝 — 원칙만(2026-10-11, 설계 전)
 - **튜닝 검증은 train 구간 안의 expanding-window 폴드로만 한다.** 게이트 val(현재 2024-10-21~2025-10-16, 실행마다
   70/15/15로 하루씩 밀림)과 그 뒤 구간은 튜닝 선택에 쓰지 않는다 — 같은 val로 고르면 게이트가 낙관적으로 된다
   (위 상태 요약 4번 McLean & Pontiff 항목과 같은 이유). 폴드 경계 사이에는 LOOKBACK 이상 퍼지를 둔다. 선례:
-  `가격예측/검증용/ablation_walkforward_folds.py`.
+  pre-cleanup 태그 시점의 `가격예측/검증용/ablation_walkforward_folds.py`. 정리 브랜치에서는 `train_common.TrainConfig`를 바꿔
+  `run_pooled_volatility_pipeline(train_config=...)`·`train_model(..., config)`에 넘기는 방식으로 끼어든다.
 - **LOOKBACK은 튜닝 범위에서 뺀다**(구조 파라미터: 표본 집합·종목 게이팅·Transformer 위치 임베딩에 함께 영향, 2026-10-11
   사람 결정). 필요하면 별도 일회성 실험으로 하고, 그 전에 `종목_월간갱신.py:237` 하드코딩부터 고친다(상태 요약 6번 12).
 - 바뀐 하이퍼파라미터는 `hyperparameter_ref`로 체크포인트 meta·MLflow·model_registry에 남긴다(구현 전).
