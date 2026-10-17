@@ -91,7 +91,7 @@ def forecast_with_fixed_params(returns, params, start_pos):
     함수 출력[i]가 수작업 재귀식의 (k+i+1) 위치 값과 정확히 일치하고 (k+i) 위치 값과는
     불일치함). 이전 코드는 이 행을 그대로 index[k+i]에 라벨링해 "t 시점 예측이 t 자신의
     수익률을 사용"하는 명백한 미래 정보 누수였다 — 이 버그가 하이브리드 Transformer의
-    garch_sigma 피처, GARCH baseline 자체의 test 평가, 조기경보 검증(`결과_변동성_조기경보_
+    garch_sigma 피처, GARCH baseline 자체의 test 평가, 조기경보 검증(pre-cleanup 태그 시점의 `결과_변동성_조기경보_
     검증.md`)에 전부 영향을 미쳤다(상세 재검증·수정 결과는 해당 문서 갱신판 참고).
 
     수정: 원시 출력 행 i를 실제 의미에 맞는 날짜 index[start_pos+i+1]로 재라벨링한다. 배열

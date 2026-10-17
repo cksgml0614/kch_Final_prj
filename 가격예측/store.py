@@ -180,7 +180,7 @@ def _trailing_predicted_volatility_mean(ticker, before_target_date, n=60):
     """model_predictions에서 이 종목의 직전 n개 target_date(< before_target_date)
     predicted_volatility 평균을 가져온다. is_early_warning 계산용.
 
-    ⚠️ 이 규칙(예측σ > 직전60일 평균의 1.5배) 자체의 조기경보 "능력"은 결과_변동성_조기경보_
+    ⚠️ 이 규칙(예측σ > 직전60일 평균의 1.5배) 자체의 조기경보 "능력"은 pre-cleanup 태그 시점의 결과_변동성_조기경보_
     검증.md 원 검증이 GARCH 라벨링 버그로 무효화된 뒤 재검증에서 우연 수준으로 확인됐다
     (CLAUDE.md 참고). 여기서 채우는 is_early_warning은 감사/기록용 descriptive 값일 뿐,
     검증된 운영 신호로 취급하면 안 된다."""

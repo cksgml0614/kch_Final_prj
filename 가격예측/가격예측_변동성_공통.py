@@ -6,7 +6,7 @@
 # -> 학습(train_common.train_model) -> 평가(evaluate.evaluate_gate) -> 저장+예측(store: 체크포인트·registry·
 # model_predictions·MLflow). run_pooled_volatility_pipeline은 이 단계를 순서대로 부르는 얇은 함수다.
 #
-# 배경: 결과_TaskT_변동성예측_최종.md의 100종목 검증(원본·종목평균 제거 지표 둘 다 GARCH·
+# 배경: pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md의 100종목 검증(원본·종목평균 제거 지표 둘 다 GARCH·
 # SMA20·Parkinson-SMA20 셋을 이김, N=5 셔플 격차 90~120σ)을 그대로 운영 파이프라인으로
 # 옮겼다(검증 정본은 pre-cleanup 태그 시점의 가격예측/검증용/test_evaluation_pooled100_hybrid.py).
 #
@@ -443,7 +443,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=D
     엄격한 방식을 채택했다 — 그전에는 gate_passed=False가 model_predictions에 기록만 될
     뿐 저장을 막지 않아 게이트가 사실상 장식이었기 때문. 이후 actual_volatility 백필로 A-1
     적용 *이전*에 저장됐던 100행을 실제 결과와 대조해보니 하이브리드가 세 baseline 전부에
-    뒤졌음이 확인돼(결과_TaskT_변동성예측_최종.md 및 아래 "actual_volatility 백필" 절
+    뒤졌음이 확인돼(pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md 및 아래 "actual_volatility 백필" 절
     참고) 게이트 강제의 방향성 자체는 지지됐다. 그런데 A-1 적용 이후 게이트가 연속
     미통과하면서 예측 계산 자체가 아예 안 일어나 "미래 예측이 실제로 얼마나 정확한지"를
     계속 검증할 데이터가 더 이상 쌓이지 않는 문제가 드러났다 — 게이트를 검증하려면 게이트가
