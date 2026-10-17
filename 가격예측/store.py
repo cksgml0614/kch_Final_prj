@@ -1,12 +1,8 @@
-# store.py — 저장(+예측) 단계: 체크포인트, model_registry, model_predictions, 종목별 다음 거래일 예측, MLflow 기록.
-# 2026-10-17 정리에서 train_common.py(체크포인트·예외 격리)와 가격예측_변동성_공통.py(registry·예측·저장·MLflow)에서
-# 옮겼다. SQL·출력 문구·MLflow 이름(실험·run·태그·파라미터·지표)은 그대로다.
-#
-# Sink: 저장 대상을 바꿔 끼우는 최소 인터페이스(이 모듈과 오케스트레이터에서만 쓴다).
-#   on_checkpoint(ckpt)   체크포인트를 저장한 직후(DbSink: model_registry 등록)
-#   save_prediction(row)  종목 1개 예측 행(DbSink: model_predictions UPSERT)
-#   log_run(payload)      실행 기록(MlflowSink: MLflow run)
-# 운영 기본값은 [DbSink(), MlflowSink()]. CollectSink는 아무 데도 쓰지 않고 메모리에 모은다(정리 전후 비교·점검용).
+# store.py — 저장과 예측: 체크포인트, model_registry 등록, 종목별 다음 거래일 예측과 model_predictions 저장, MLflow 실행 기록.
+# 파이프라인 단계: 저장+예측. 주요 진입: save_checkpoint, predict_and_save_for_ticker, build_run_payload, Sink 3종.
+# Sink는 저장 대상을 바꿔 끼우는 인터페이스다(on_checkpoint, save_prediction, log_run). 운영 기본값은 [DbSink(), MlflowSink()].
+# 배경: 결정기록.md의 "예측은 게이트와 무관하게 저장한다", "model_predictions UPSERT와 target_date 규칙",
+#       "MLflow 기록과 model_registry 등록은 부가 기록"
 
 import hashlib
 import json
@@ -25,41 +21,33 @@ from db_manager import get_db_connection
 from 가격예측.model import MODEL_CLASS_NAME, MODEL_FAMILY
 from 가격예측.split_dataset import build_next_day_merged_window_volatility_hybrid
 
-# MLflow 일일 자동화 로깅 (2026-09-14 신규). 자동화 스크립트는 서버와 같은 컴퓨터에서
-# 돌기 때문에 기본값은 127.0.0.1이다. 2026-10-11부터 서버를 127.0.0.1에만 바인딩하므로
-# (mlflow_server_start.bat) 다른 기기에서는 UI에 접속할 수 없다 — 원격 조회가 필요하면 인증을
-# 갖춘 터널을 따로 검토한다. 환경변수로 덮어쓸 수 있게 해 서버 위치가 바뀌어도 코드 수정 없이
-# 대응 가능하게 함.
+# 서버는 같은 PC의 127.0.0.1에만 바인딩된다. 환경변수로 덮어쓸 수 있다.
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 MLFLOW_EXPERIMENT_NAME = "일일_자동화"
-# 2026-10-11: 로깅 직전 서버 확인 타임아웃(초). 서버가 없거나 멈췄으면 기록을 건너뛴다(MlflowSink.log_run).
+# 기록 직전 /health 확인 타임아웃(초). 응답이 없으면 기록을 건너뛴다.
 MLFLOW_HEALTH_TIMEOUT_SEC = 3
-# MLflow HTTP 재시도 상한(setdefault — 사람이 환경변수로 덮어쓸 수 있다). MLflow 기본값(재시도 7, 대기 계수 2,
-# 타임아웃 120초)이면 서버가 없을 때 약 4분 24초(2026-10-11 실측), 멈췄을 때 약 20분(추정)을 기다린다.
+# MLflow HTTP 재시도 상한(setdefault라 환경변수로 덮어쓸 수 있다). 기본값이면 서버가 없을 때 수 분을 기다린다.
 MLFLOW_HTTP_LIMITS = {
     "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
     "MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR": "1",
     "MLFLOW_HTTP_REQUEST_TIMEOUT": "15",
 }
 
-# 2026-10-11: 체크포인트를 저장한 직후 그 version을 model_registry에 등록한다(register_model_version).
-# 일일 경로 기본값은 source='live'. 끄려면 환경변수 MODEL_REGISTRY_AUTO=0.
+# model_registry 자동 등록 값. 끄려면 환경변수 MODEL_REGISTRY_AUTO=0.
 REGISTRY_SOURCE = "live"
 REGISTRY_GATE_DEFINITION = "tickermean"
 REGISTRY_MISSING_SHOW = 10  # [REGISTRY-MISSING] 줄에 보여줄 최대 version 수
 
 
-# ── 모델 체크포인트 저장 (2026-09-06) ─────────────────────────────────────────────
-# 버전 디렉터리(UTC 날짜+시각)를 매번 새로 만들어 이전 버전을 덮어쓰지 않는다(롤백 가능) — latest.txt로
-# 최신 버전을 가리킨다(심볼릭 링크는 Windows 권한 문제가 있을 수 있어 피함).
+# ── 모델 체크포인트 저장 ──────────────────────────────────────────────────────────
 
 def save_checkpoint(model, scaler, feature_cols, model_kwargs, checkpoint_dir, version=None,
                      extra_meta=None, model_class_name=None):
-    """model.state_dict() + FeatureScaler + 피처 목록 + 모델 하이퍼파라미터 + 메타데이터를
-    버전 디렉터리(checkpoint_dir/<version>/)에 저장한다. version 생략 시 UTC 날짜+시각
-    (YYYYMMDD_HHMMSS)으로 자동 태깅 — 같은 날 여러 번 실행해도 초 단위까지 있어 겹치지 않는다.
-    model_class_name 생략 시 model의 실제 클래스 이름을 자동으로 기록한다.
-    반환: 저장된 version 문자열."""
+    """
+    설명: state_dict·scaler·meta.json을 새 버전 폴더(checkpoint_dir/<version>/)에 저장하고 latest.txt를 그 버전으로 바꾼다.
+    주의 사항: 파일 쓰기. version 생략 시 UTC 저장 시각(YYYYMMDD_HHMMSS). 이전 버전은 덮어쓰지 않는다.
+    입력 타입->반환 타입: (nn.Module, FeatureScaler, list[str], dict, str, str|None, dict|None, str|None) -> str
+    """
     if version is None:
         version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     version_dir = os.path.join(checkpoint_dir, version)
@@ -87,7 +75,11 @@ def save_checkpoint(model, scaler, feature_cols, model_kwargs, checkpoint_dir, v
 
 
 def state_dict_sha256(model):
-    """state_dict 내용 해시(키 정렬, 키 이름 + 텐서 바이트). CollectSink가 학습 결과 동일성 비교에 쓴다."""
+    """
+    설명: state_dict의 키 이름과 텐서 바이트를 키 순서대로 이어 SHA256을 만든다.
+    주의 사항: 학습 결과 동일성 비교용(CollectSink). 장치·dtype이 다르면 해시가 달라진다.
+    입력 타입->반환 타입: (nn.Module) -> str
+    """
     h = hashlib.sha256()
     for k, v in sorted(model.state_dict().items()):
         h.update(k.encode())
@@ -96,11 +88,11 @@ def state_dict_sha256(model):
 
 
 def register_model_version(version, checkpoint_dir, source=REGISTRY_SOURCE):
-    """체크포인트 meta.json으로 model_registry에 1행을 INSERT ... ON CONFLICT DO NOTHING 한다(2026-10-11).
-    이어서 로컬 체크포인트 version과 model_predictions의 version 중 registry에 없는 것을 찾아 경고한다
-    (자동 보충 등록은 하지 않는다 — 시험 실행 체크포인트를 'live'로 잘못 넣을 수 있어 사람이 보고 넣는다).
-    부가 기록이라 실패해도 예외를 던지지 않는다. 줄 맨 앞 [REGISTRY-SKIP]을 붙인 경고만 남기고 돌아간다.
-    경고에는 예외 클래스명만 넣고(원문에 접속 정보가 섞일 수 있음), 출력 전에 redact를 거친다."""
+    """
+    설명: 체크포인트 meta.json으로 model_registry에 1행을 넣고, registry에 없는 version 목록을 경고로 출력한다.
+    주의 사항: DB 쓰기. 실패해도 예외를 던지지 않고 [REGISTRY-SKIP] 경고만 남긴다. 빠진 version을 자동 보충하지 않는다.
+    입력 타입->반환 타입: (str, str, str) -> None
+    """
     try:
         if os.environ.get("MODEL_REGISTRY_AUTO", "1") == "0":
             print(f"[REGISTRY-OFF] model_registry 자동 등록 꺼짐(MODEL_REGISTRY_AUTO=0) — version {version} 등록 안 함")
@@ -132,20 +124,19 @@ def register_model_version(version, checkpoint_dir, source=REGISTRY_SOURCE):
             shown = ", ".join(missing[:REGISTRY_MISSING_SHOW]) + (" …" if len(missing) > REGISTRY_MISSING_SHOW else "")
             print(f"[REGISTRY-MISSING] ⚠️ model_registry에 없는 version {len(missing)}개: {shown}")
     except Exception as e:
+        # 예외 원문에 접속 정보가 섞일 수 있어 클래스명만 남기고 redact를 거친다.
         print(redact(f"[REGISTRY-SKIP] ⚠️ model_registry 등록 실패({type(e).__name__}) — 예측·저장은 계속된다. "
                      f"version {version}은 registry에 없으므로 수동 등록이 필요하다."))
 
 
-# ── 무인 실행 예외 격리 (2026-09-06) ─────────────────────────────────────────────
-# 예외를 print만 하고 삼키지 않는다. 종목 단위로 격리해 하나가 실패해도 나머지가 계속 진행되게 하되,
-# 실패는 콘솔 + 로그 파일에 traceback까지 남긴다.
+# ── 무인 실행 예외 격리 ───────────────────────────────────────────────────────────
 
 def run_isolated(fn, *args, label="", log_dir=None, **kwargs):
-    """fn(*args, **kwargs)을 실행하고 성공/실패를 status dict로 반환한다. 예외가 나면
-    traceback을 콘솔에 출력하고(log_dir이 주어지면 파일로도 저장) 예외를 다시 던지지
-    않는다 — 호출부(오케스트레이션 스크립트의 종목별 루프)가 다음 항목을 계속 처리할 수 있다.
-
-    반환: {"label", "status"("success"/"failed"), "result", "error", "traceback"}"""
+    """
+    설명: fn을 실행하고 성공·실패를 status dict({label, status, result, error, traceback})로 돌려준다.
+    주의 사항: 예외를 다시 던지지 않는다(종목별 루프 계속용). 실패하면 traceback을 출력하고 log_dir에 파일로 쓴다.
+    입력 타입->반환 타입: (Callable, *args, str, str|None, **kwargs) -> dict
+    """
     try:
         result = fn(*args, **kwargs)
         return {"label": label, "status": "success", "result": result, "error": None, "traceback": None}
@@ -165,9 +156,11 @@ def run_isolated(fn, *args, label="", log_dir=None, **kwargs):
 # ── 다음 거래일 예측 + 저장 ───────────────────────────────────────────────────────
 
 def next_weekday(d):
-    """옛 방향예측 파이프라인에서 쓰던 근사를 값 변경 없이 그대로 가져옴 — 실제 거래소 캘린더가 없어 공휴일은
-    반영 못 한다. target_date가 실제 거래일과 어긋나면 실측은 model_predictions_realized 뷰가 prediction_date
-    다음 첫 거래일로 계산한다(CLAUDE.md "휴장일 target_date")."""
+    """
+    설명: 다음 평일을 돌려준다(금·토 → 월).
+    주의 사항: 공휴일을 모른다. 휴장일이 target_date가 될 수 있다(실측은 model_predictions_realized 뷰가 다음 거래일로 계산).
+    입력 타입->반환 타입: (date) -> date
+    """
     wd = d.weekday()  # Mon=0 .. Sun=6
     if wd == 4:  # 금요일 -> 월요일
         return d + timedelta(days=3)
@@ -177,13 +170,11 @@ def next_weekday(d):
 
 
 def _trailing_predicted_volatility_mean(ticker, before_target_date, n=60):
-    """model_predictions에서 이 종목의 직전 n개 target_date(< before_target_date)
-    predicted_volatility 평균을 가져온다. is_early_warning 계산용.
-
-    ⚠️ 이 규칙(예측σ > 직전60일 평균의 1.5배) 자체의 조기경보 "능력"은 pre-cleanup 태그 시점의 결과_변동성_조기경보_
-    검증.md 원 검증이 GARCH 라벨링 버그로 무효화된 뒤 재검증에서 우연 수준으로 확인됐다
-    (CLAUDE.md 참고). 여기서 채우는 is_early_warning은 감사/기록용 descriptive 값일 뿐,
-    검증된 운영 신호로 취급하면 안 된다."""
+    """
+    설명: model_predictions에서 종목의 직전 n개 target_date 예측 변동성 평균을 구한다(조기경보 계산용).
+    주의 사항: DB 읽기. 이력이 10개 미만이면 None(조기경보 False). 조기경보는 설명용이며 검증된 신호가 아니다.
+    입력 타입->반환 타입: (str, date, int) -> float|None
+    """
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패 — _trailing_predicted_volatility_mean")
@@ -205,9 +196,11 @@ def _trailing_predicted_volatility_mean(ticker, before_target_date, n=60):
 def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
                      garch_baseline, sma20_baseline, parkinson_sma20_baseline,
                      is_early_warning, model_version, gate, input_data_suspect=False):
-    """model_predictions에 UPSERT((ticker, target_date) 기준) — 재실행 시 최신 값으로 덮어씀.
-    input_data_suspect(2026-09-27): 입력 데이터 오염 의심 플래그 — 재실행으로 예측값이 바뀌면
-    플래그도 그 실행 기준으로 함께 덮어쓴다(깨끗한 재실행 후에도 true가 남지 않도록)."""
+    """
+    설명: 예측 1행을 model_predictions에 (ticker, target_date) 기준으로 UPSERT한다.
+    주의 사항: DB 쓰기. 같은 키를 다시 계산하면 예측값·게이트·suspect를 덮어쓴다(이전 값은 남지 않음, created_at은 최초 값).
+    입력 타입->반환 타입: (str, date, date, float, float, float, float, bool, str, dict, bool) -> None
+    """
     query = """
         INSERT INTO model_predictions
             (ticker, target_date, prediction_date, predicted_volatility,
@@ -246,11 +239,11 @@ def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
 def predict_and_save_for_ticker(ticker, start_date, end_date, lookback, model, scaler, feature_cols,
                                  ticker_to_id, device, version, gate, baselines_by_ticker, sinks,
                                  input_data_suspect=False, shared_cache=None, prices=None):
-    """pooled 모델로 한 종목의 다음 거래일 변동성을 예측하고 sinks에 예측 행을 넘긴다(DbSink면 model_predictions
-    저장). run_isolated로 감싸 호출하는 것을 전제로 예외를 그대로 던진다(격리 책임은 호출부에 있음).
-
-    shared_cache(선택, 2026-10-05): load_shared_cache() 결과. None이면 종목마다 거시지표·KOSPI를 다시 조회한다.
-    prices(선택, 2026-10-05): load_price_cache(...)[ticker]. None이면 가격을 직접 조회한다."""
+    """
+    설명: 한 종목의 다음 거래일 변동성을 예측하고 예측 행을 sinks에 넘긴 뒤 요약 dict를 돌려준다.
+    주의 사항: 예외를 그대로 던진다(run_isolated로 감싸 부를 것). 예측값이 NaN/inf/음수면 저장하지 않고 ValueError.
+    입력 타입->반환 타입: (str, str, str, int, nn.Module, FeatureScaler, list, dict, device, str, dict, dict, list, bool, dict|None, pd.DataFrame|None) -> dict
+    """
     params = baselines_by_ticker[ticker]["params"]
     window_df, last_confirmed_date = build_next_day_merged_window_volatility_hybrid(
         ticker, start_date, end_date, lookback, params, **(shared_cache or {}),
@@ -267,9 +260,7 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, lookback, model, s
         ).cpu().numpy()[0]
 
     predicted_volatility = float(pred)
-    # sanity check(2026-09-14, 사람 결정): NaN/inf/음수만 차단 — 변동성은 음수가 될 수 없는
-    # 값이라 확실한 결함 신호지만, 상한선은 일부러 두지 않는다. 실제 급변장에서는 크게 튀는
-    # 예측이 정상일 수 있어 임의 상한이 오히려 정상 예측을 막을 위험이 있다는 판단.
+    # 확실한 결함(NaN/inf/음수)만 막고 상한은 두지 않는다(급변장의 큰 예측은 정상일 수 있음).
     if not np.isfinite(predicted_volatility) or predicted_volatility < 0:
         raise ValueError(
             f"[{ticker}] 예측값 비정상(NaN/inf/음수) — predicted_volatility={predicted_volatility!r}. "
@@ -303,8 +294,11 @@ def predict_and_save_for_ticker(ticker, start_date, end_date, lookback, model, s
 
 
 def count_prediction_results(results):
-    """종목별 결과를 (성공, 실패, 제외) 수로 센다. 성공 = dict, 실패 = "실패 ..." 문자열,
-    제외 = "제외 ..." 문자열(가격 정렬 이탈로 예측을 저장하지 않은 종목, 2026-10-17)."""
+    """
+    설명: 종목별 결과를 (성공, 실패, 제외) 수로 센다. 성공=dict, 실패="실패 ..." 문자열, 제외="제외 ..." 문자열.
+    주의 사항: 결과 문자열의 접두어("실패"·"제외")로 판정하므로 오케스트레이터의 문구와 맞아야 한다.
+    입력 타입->반환 타입: (dict) -> (int, int, int)
+    """
     n_success = sum(1 for v in results.values() if isinstance(v, dict))
     n_failed = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("실패"))
     n_excluded = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("제외"))
@@ -314,13 +308,11 @@ def count_prediction_results(results):
 # ── 실행 기록(MLflow) ─────────────────────────────────────────────────────────────
 
 def build_run_payload(tickers, version, train_out, gate, prediction_results, model_kwargs, input_data_suspect=False):
-    """MLflow에 남길 실행 기록을 dict로 만든다(2026-10-17, 옛 _log_mlflow_run의 내용 부분). 이름은 그대로다:
-    - run 이름 "pd<prediction_date>_v<체크포인트 버전>", 실행일은 run_date 태그(2026-10-11 정정).
-    - params: 모델 생성자 인자(model_* — 체크포인트 meta와 같은 출처)와 MODEL_ARCHITECTURE(= MODEL_FAMILY),
-      학습 하이퍼파라미터는 train_out["train_config"](TrainConfig)에서 가져오되 이름(BATCH_SIZE 등)은 그대로.
-    - tag model_family = MODEL_FAMILY('lstm'), model_registry.model_family와 같은 어휘.
-    - 하이브리드 게이트 RMSE는 hybrid_rmse_tickermean으로만 기록한다(옛 hybrid_rmse는 2026-09-28부터 정의 변경).
-    - input_data_suspect는 실행 단위 플래그라 n_input_suspect는 0 또는 저장 성공 종목 수다."""
+    """
+    설명: MLflow에 남길 run 이름·태그·파라미터·손실 수열·지표를 dict로 만든다(run 이름 "pd<prediction_date>_v<version>").
+    주의 사항: 태그·파라미터·지표 이름은 기존 MLflow 기록과 같아야 한다(바꾸지 말 것). n_input_suspect는 0 또는 성공 종목 수.
+    입력 타입->반환 타입: (list[str], str, dict, dict, dict, dict, bool) -> dict
+    """
     cfg = train_out["train_config"]
     pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
     pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
@@ -364,8 +356,11 @@ def build_run_payload(tickers, version, train_out, gate, prediction_results, mod
 
 
 def _mlflow_health_problem(uri):
-    """MLflow 서버 /health를 MLFLOW_HEALTH_TIMEOUT_SEC 안에 확인한다(2026-10-11). 정상(HTTP 200)이면 None,
-    아니면 원인 요약(예외 클래스명 또는 HTTP 상태)을 돌려준다. URL·예외 원문은 돌려주지 않는다."""
+    """
+    설명: MLflow 서버 /health를 짧은 타임아웃으로 확인해 정상이면 None, 아니면 원인 요약(예외 클래스명·HTTP 상태)을 돌려준다.
+    주의 사항: 네트워크 요청. URL·예외 원문은 돌려주지 않는다.
+    입력 타입->반환 타입: (str) -> str|None
+    """
     try:
         r = requests.get(uri.rstrip("/") + "/health", timeout=MLFLOW_HEALTH_TIMEOUT_SEC)
     except requests.RequestException as e:
@@ -376,42 +371,91 @@ def _mlflow_health_problem(uri):
 # ── Sink ──────────────────────────────────────────────────────────────────────
 
 class Sink:
-    """저장 대상 인터페이스. 기본 구현은 아무것도 하지 않는다."""
+    """
+    설명: 저장 대상 인터페이스(on_checkpoint, save_prediction, log_run). 기본 구현은 아무것도 하지 않는다.
+    주의 사항: 오케스트레이터가 sinks 목록을 돌며 같은 이름의 메서드를 부른다(메서드 이름을 바꾸지 말 것).
+    입력 타입->반환 타입: () -> Sink
+    """
 
     def on_checkpoint(self, ckpt):
+        """
+        설명: 체크포인트 저장 직후 호출된다(기본: 아무것도 안 함).
+        주의 사항: 없음.
+        입력 타입->반환 타입: (dict) -> None
+        """
         pass
 
     def save_prediction(self, row):
+        """
+        설명: 종목 1개 예측 행을 받는다(기본: 아무것도 안 함).
+        주의 사항: 없음.
+        입력 타입->반환 타입: (dict) -> None
+        """
         pass
 
     def log_run(self, payload):
+        """
+        설명: 실행 기록 payload를 받는다(기본: 아무것도 안 함).
+        주의 사항: 없음.
+        입력 타입->반환 타입: (dict) -> None
+        """
         pass
 
 
 class DbSink(Sink):
-    """운영 DB: model_registry 등록(체크포인트 직후)과 model_predictions UPSERT."""
+    """
+    설명: 운영 DB에 쓴다(체크포인트 직후 model_registry 등록, 예측 행 model_predictions UPSERT).
+    주의 사항: DB 쓰기. 백테스트 등 운영 외 실행에서는 쓰지 말 것.
+    입력 타입->반환 타입: (str) -> DbSink
+    """
 
     def __init__(self, registry_source=REGISTRY_SOURCE):
+        """
+        설명: model_registry.source에 넣을 값을 받는다.
+        주의 사항: 운영 기본값은 'live'.
+        입력 타입->반환 타입: (str) -> None
+        """
         self.registry_source = registry_source
 
     def on_checkpoint(self, ckpt):
+        """
+        설명: 체크포인트 version을 model_registry에 등록한다.
+        주의 사항: DB 쓰기(실패해도 예외 없이 경고만).
+        입력 타입->반환 타입: (dict) -> None
+        """
         register_model_version(ckpt["version"], ckpt["checkpoint_dir"], source=self.registry_source)
 
     def save_prediction(self, row):
+        """
+        설명: 예측 행을 model_predictions에 UPSERT한다.
+        주의 사항: DB 쓰기.
+        입력 타입->반환 타입: (dict) -> None
+        """
         save_prediction(**row)
 
 
 class MlflowSink(Sink):
-    """MLflow run 기록. 게이트 통과 여부와 무관하게 항상 기록한다(2026-09-14 — MLflow는 "무슨 일이 있었는지 전부
-    보는" 관측 도구). 전체를 try/except로 감싸 MLflow가 꺼져 있어도 파이프라인 본체는 멈추지 않는다.
-    2026-10-11 지연 상한: 시작할 때 /health를 3초 안에 확인하고, 응답이 없으면 줄 맨 앞에 [MLFLOW-SKIP]을 붙인
-    경고를 출력한 뒤 기록 없이 돌아간다. 확인을 통과한 뒤 실패해도 MLFLOW_HTTP_LIMITS로 재시도를 줄여 상한을 둔다."""
+    """
+    설명: MLflow run을 기록한다(게이트 통과 여부와 무관하게 항상).
+    주의 사항: 네트워크 쓰기. 서버가 없거나 실패해도 파이프라인을 멈추지 않는다([MLFLOW-SKIP] 또는 경고 출력).
+    입력 타입->반환 타입: (str, str|None) -> MlflowSink
+    """
 
     def __init__(self, experiment=MLFLOW_EXPERIMENT_NAME, tracking_uri=None):
+        """
+        설명: 실험 이름과 tracking URI를 받는다.
+        주의 사항: 실험은 이름으로 찾는다(운영 "일일_자동화").
+        입력 타입->반환 타입: (str, str|None) -> None
+        """
         self.experiment = experiment
         self.tracking_uri = tracking_uri or MLFLOW_TRACKING_URI
 
     def log_run(self, payload):
+        """
+        설명: /health를 확인한 뒤 payload의 run 이름·태그·파라미터·손실 수열·지표를 MLflow에 기록한다.
+        주의 사항: 네트워크 쓰기. HTTP 재시도 상한 환경변수를 setdefault한다. 모든 예외를 잡아 경고만 출력한다.
+        입력 타입->반환 타입: (dict) -> None
+        """
         try:
             for k, v in MLFLOW_HTTP_LIMITS.items():
                 os.environ.setdefault(k, v)
@@ -435,16 +479,29 @@ class MlflowSink(Sink):
 
 
 class CollectSink(Sink):
-    """아무 데도 쓰지 않고 메모리에 모은다(정리 전후 비교·점검용). 값은 MLflow·DB에 들어가는 형태로 정규화한다
-    (태그·파라미터는 문자열, 지표는 float, 날짜는 문자열)."""
+    """
+    설명: 아무 데도 쓰지 않고 체크포인트 요약·예측 행·MLflow 기록을 메모리에 모은다(점검·비교용).
+    주의 사항: 값은 DB·MLflow에 들어가는 형태로 바꿔 담는다(태그·파라미터 문자열, 지표 float, 날짜 문자열).
+    입력 타입->반환 타입: (str) -> CollectSink
+    """
 
     def __init__(self, experiment=MLFLOW_EXPERIMENT_NAME):
+        """
+        설명: 빈 수집 상태(predictions, registry, checkpoint, mlflow)로 만든다.
+        주의 사항: 없음.
+        입력 타입->반환 타입: (str) -> None
+        """
         self.experiment = experiment
         self.predictions, self.registry = [], []
         self.checkpoint = None
         self.mlflow = None
 
     def on_checkpoint(self, ckpt):
+        """
+        설명: version과 체크포인트 요약(state_dict 해시, scaler, 피처, model_kwargs, model_class, extra_meta)을 담는다.
+        주의 사항: 없음.
+        입력 타입->반환 타입: (dict) -> None
+        """
         self.registry.append(ckpt["version"])
         self.checkpoint = {
             "state_hash": state_dict_sha256(ckpt["model"]),
@@ -455,6 +512,11 @@ class CollectSink(Sink):
         }
 
     def save_prediction(self, row):
+        """
+        설명: 예측 행을 model_predictions 열 형태의 dict로 바꿔 predictions에 더한다.
+        주의 사항: 없음.
+        입력 타입->반환 타입: (dict) -> None
+        """
         g = row["gate"]
         self.predictions.append(dict(
             ticker=row["ticker"], target_date=str(row["target_date"]), prediction_date=str(row["prediction_date"]),
@@ -465,6 +527,11 @@ class CollectSink(Sink):
             gate_vs_parkinson=bool(g["beats_parkinson"]), input_data_suspect=bool(row["input_data_suspect"])))
 
     def log_run(self, payload):
+        """
+        설명: payload를 MLflow에 기록될 형태(실험, run 이름, 태그, 파라미터, 지표, 손실 수열)로 바꿔 mlflow에 담는다.
+        주의 사항: 없음.
+        입력 타입->반환 타입: (dict) -> None
+        """
         metrics = {}
         for m in payload["metrics"]:
             metrics.update({k: float(v) for k, v in m.items()})

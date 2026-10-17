@@ -1,26 +1,7 @@
-# 종목_월간갱신.py
-# Task T pooled 변동성 모델의 종목 유니버스를 월 1회 자동 갱신한다(2026-09-07 신규 작성 —
-# CLAUDE.md "다음 세션 시작 시 할 일" 3번 항목).
-#
-# 로직: fdr.StockListing('KOSPI') 재조회 -> 우선주 제외(2026-09-06/09-07 세션과 동일 정규식,
-# 시가총액 상위 TARGET_UNIVERSE_SIZE(기본 100)위 재산정 -> constants.STOCKS와 비교해:
-#   - 신규 진입(상위권에 새로 들어왔고 현재 목록에 없거나 비활성) -> 가격 데이터 없으면 백필 후
-#     MIN_TRAIN_SEQUENCES(constants.py, 10) 이상인지 확인하고
-#     통과해야만 활성화
-#   - 이탈(현재 active=True인데 더 이상 상위권 아님) -> active=False로 전환
-# constants.py는 절대 통째로 재생성하지 않는다 — 해당 Stock(...) 줄만 정확히 찾아 boolean만
-# 바꾸거나(True<->False), STOCKS 리스트 닫는 대괄호 바로 앞에 새 Stock(...) 줄만 추가한다.
-# 기존 주석·이력은 전부 그대로 보존된다(CLAUDE.md "기존 컬럼 값을 파괴적으로 덮어쓰지 않는다"
-# 원칙을 소스 파일 수정에도 동일하게 적용).
-#
-# 안전장치: 기본은 --dry-run(제안만 출력, 파일 변경 없음)이다. 실제로 constants.py를 고치려면
-# --apply를 명시해야 하고, 그때도 수정 직전 constants.py.bak_<타임스탬프>로 백업을 남긴다.
-# 무인 크론에서 매달 이 스크립트가 소스 코드를 실제로 고치는 것 자체가 상당히 민감한 동작이라
-# (CLAUDE.md의 "하드 투 리버스 작업은 확인 후" 원칙), 스케줄러에 등록할 때 --apply를 명시적으로
-# 넣을지는 사람이 결정할 문제로 남겨둔다 — 이 세션에서는 코드만 작성하고 실행하지 않는다.
-#
-# 실행(다음 세션 이후): python -m 가격예측.종목_월간갱신 --dry-run  (제안만 확인)
-#                        python -m 가격예측.종목_월간갱신 --apply    (실제로 constants.py 수정)
+# 종목_월간갱신.py — 시가총액 상위 종목을 다시 조회해 종목 유니버스(constants.STOCKS) 변경 계획을 세우고, --apply일 때만 반영한다.
+# 파이프라인 단계: 월간 유니버스 관리(monthly_universe_check.yml, dry-run 전용). 주요 진입 함수: main.
+# 실행: python -m 가격예측.종목_월간갱신 --dry-run(기본, 계획만) / --apply(constants.py 수정, 사람이 로컬에서).
+# 배경: 결정기록.md의 "월간 유니버스 갱신은 기본 dry-run, constants.py는 해당 줄만 고친다"
 
 import argparse
 import os
@@ -31,8 +12,6 @@ from datetime import date, datetime
 
 import FinanceDataReader as fdr
 
-# MIN_TRAIN_SEQUENCES는 constants.py에서 가져온다(2026-10-17) — 예전에는 가격예측_변동성_공통에서 가져와
-# 이 스크립트(및 월간 워크플로)가 torch·mlflow까지 import했다.
 from constants import ACTIVE_TICKERS, MIN_TRAIN_SEQUENCES, STOCK_INITIAL_LOAD_START, STOCKS
 from 가격예측.pooled_dataset import compute_global_split_dates
 from 가격예측.split_dataset import valid_feature_dates
@@ -41,16 +20,11 @@ from 주가데이터.주가_공통 import needs_initial_load, update_stock_data
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# 2026-09-06/09-07 세션에서 검증된 우선주 필터 — 이름이 "...우"/"...우B"/"...2우" 등으로
-# 끝나는 종목을 제외한다. 당시 실측 결과 943개 중 109개 제외로 정확히 일치했다(재확인용
-# 참고 수치 — 아래 _PREFERRED_COUNT_SANITY_RANGE로 매달 큰 이탈이 있으면 경고).
+# 우선주 이름 패턴("...우"/"...우B"/"...2우" 등).
 _PREFERRED_PATTERN = re.compile(r".*\d?우[A-Z]?$")
-_PREFERRED_COUNT_SANITY_RANGE = (60, 220)  # 109 기준으로 넉넉히 잡은 범위 — 벗어나면 정규식이
-# KRX 명명 규칙 변화로 깨졌을 가능성을 의심할 것(원래는 정지가 아니라 경고만 하고 계속 진행).
+_PREFERRED_COUNT_SANITY_RANGE = (60, 220)  # 우선주 제외 건수가 이 범위를 벗어나면 이름 규칙 변화를 의심(경고만).
 
-TARGET_UNIVERSE_SIZE = 100  # 사람이 의도적으로 바꾸는 값 — len(ACTIVE_TICKERS)에서 자동
-# 유도하지 않는다(다른 이유로 몇 종목이 수동 비활성화됐을 때 유니버스 크기가 조용히 줄어드는
-# 것을 방지).
+TARGET_UNIVERSE_SIZE = 100  # 사람이 정하는 값 — 비활성 종목이 생겨도 줄지 않게 ACTIVE_TICKERS에서 유도하지 않는다.
 
 CONSTANTS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "constants.py")
 
@@ -60,8 +34,11 @@ _STOCK_LINE_PATTERN = re.compile(r'^(\s*)Stock\("([^"]+)",\s*"([^"]*)",\s*(True|
 # ── 1) 시가총액 상위 유니버스 재조회 ─────────────────────────────────────────────────
 
 def fetch_top_n_universe(n=TARGET_UNIVERSE_SIZE):
-    """fdr.StockListing('KOSPI')에서 우선주를 제외하고 시가총액 상위 n개를 반환한다.
-    반환: list[(ticker, name, marcap)], 시가총액 내림차순."""
+    """
+    설명: KOSPI 상장 목록에서 우선주를 빼고 시가총액 상위 n개를 [(ticker, name, marcap)] 내림차순으로 돌려준다.
+    주의 사항: 네트워크(FinanceDataReader). 우선주 제외 건수가 예상 범위를 벗어나면 경고만 낸다.
+    입력 타입->반환 타입: (int) -> list[tuple[str, str, float]]
+    """
     df = fdr.StockListing("KOSPI")[["Code", "Name", "Marcap"]].copy()
     is_pref = df["Name"].apply(lambda name: bool(_PREFERRED_PATTERN.match(name)))
     n_pref = int(is_pref.sum())
@@ -78,22 +55,22 @@ def fetch_top_n_universe(n=TARGET_UNIVERSE_SIZE):
 # ── 2) 신규 진입 종목 게이팅(최소 train 시퀀스 수 확인) ────────────────────────────────
 
 def ensure_price_data(ticker):
-    """daily_stock_prices에 해당 종목 데이터가 전혀 없으면 초기적재한다(월간갱신이 신규
-    종목을 완전히 자동으로 처리할 수 있도록 — 사람이 별도로 주가_초기적재.py를 먼저
-    돌려줄 필요가 없게 함)."""
+    """
+    설명: daily_stock_prices에 종목 데이터가 전혀 없으면 STOCK_INITIAL_LOAD_START부터 초기적재한다.
+    주의 사항: DB 쓰기(dry-run에서도 실행된다 — 유니버스 밖 종목 주가가 DB에 들어감).
+    입력 타입->반환 타입: (str) -> None
+    """
     if needs_initial_load(ticker):
         print(f"  {ticker}: 가격 데이터 없음 — {STOCK_INITIAL_LOAD_START}부터 초기적재")
         update_stock_data(ticker, start_date_override=STOCK_INITIAL_LOAD_START)
 
 
 def count_train_sequences(ticker, train_end, val_end, lookback=20):
-    """constants.MIN_TRAIN_SEQUENCES 게이팅을 위한 실제 train 시퀀스 수를 센다.
-
-    split_dataset.valid_feature_dates(GARCH σ 전 변동성 frame의 유효 날짜)로 센다 — GARCH 적합이 필요 없다.
-    학습 frame(GARCH σ 포함)과 유효 날짜가 같다(momentum 60일 창이 선행 결측을 가장 길게 만듦, pooled_dataset의
-    train_end 일치 assert가 매 실행 확인). 시퀀스 i(lookback-1 이상)의 target 날짜가 train_end 이하인 개수 =
-    sequence_dataset.build_sequences + split_sequences_by_date의 train 개수와 같다.
-    2026-10-17: 예전에는 방향 예측 frame(build_merged_dataset_v2)으로 시퀀스를 실제로 만들어 셌다."""
+    """
+    설명: GARCH σ 전 변동성 frame의 유효 날짜로 이 종목의 train 시퀀스 수(target일 <= train_end)를 센다.
+    주의 사항: DB 읽기. lookback은 운영 LOOKBACK과 같아야 실제 학습 시퀀스 수와 맞는다. val_end는 쓰지 않는다.
+    입력 타입->반환 타입: (str, pd.Timestamp, pd.Timestamp, int) -> int
+    """
     dates = valid_feature_dates(ticker, STOCK_INITIAL_LOAD_START, date.today().isoformat())
     seq_dates = dates[lookback - 1:]
     return int((seq_dates <= train_end).sum())
@@ -102,12 +79,21 @@ def count_train_sequences(ticker, train_end, val_end, lookback=20):
 # ── 3) constants.py 원본 텍스트 파싱/수정 ────────────────────────────────────────────
 
 def _read_constants_lines():
+    """
+    설명: constants.py를 줄 목록으로 읽는다.
+    주의 사항: 파일 읽기.
+    입력 타입->반환 타입: () -> list[str]
+    """
     with open(CONSTANTS_PATH, "r", encoding="utf-8") as f:
         return f.read().split("\n")
 
 
 def _find_stocks_block(lines):
-    """STOCKS = [ 로 시작하는 줄과, 그 뒤 첫 '](닫는 대괄호만 있는 줄)'을 찾는다."""
+    """
+    설명: 'STOCKS = [' 줄과 그 뒤 처음 나오는 ']'만 있는 줄의 위치를 돌려준다.
+    주의 사항: 둘 중 하나라도 없으면 RuntimeError.
+    입력 타입->반환 타입: (list[str]) -> (int, int)
+    """
     start = None
     for i, line in enumerate(lines):
         if line.strip().startswith("STOCKS = ["):
@@ -126,7 +112,11 @@ def _find_stocks_block(lines):
 
 
 def _parse_stock_lines(lines, start, end):
-    """STOCKS 블록 안에서 실제 Stock(...) 줄만 파싱한다. 반환: {ticker: line_idx}."""
+    """
+    설명: STOCKS 블록 안의 Stock(...) 줄을 찾아 {ticker: 줄 위치}로 돌려준다.
+    주의 사항: _STOCK_LINE_PATTERN 형식이 아닌 줄은 건너뛴다.
+    입력 타입->반환 타입: (list[str], int, int) -> dict[str, int]
+    """
     line_idx_by_ticker = {}
     for i in range(start + 1, end):
         m = _STOCK_LINE_PATTERN.match(lines[i])
@@ -137,8 +127,11 @@ def _parse_stock_lines(lines, start, end):
 
 
 def _set_active_flag(lines, line_idx, new_active, reason):
-    """해당 줄의 True/False만 바꾸고, 줄 끝에 자동 주석을 덧붙인다(기존 주석이 있으면
-    그 뒤에 이어붙임 — 지우지 않음)."""
+    """
+    설명: 해당 Stock 줄의 True/False만 바꾸고 줄 끝에 자동갱신 주석을 덧붙인다(lines를 직접 수정).
+    주의 사항: 기존 줄 끝 주석은 지우지 않고 그 뒤에 이어 붙인다.
+    입력 타입->반환 타입: (list[str], int, bool, str) -> None
+    """
     m = _STOCK_LINE_PATTERN.match(lines[line_idx])
     indent, ticker, name, _old_flag, comma, trailing = m.groups()
     new_flag = "True" if new_active else "False"
@@ -151,8 +144,11 @@ def _set_active_flag(lines, line_idx, new_active, reason):
 
 
 def _append_new_stocks(lines, end_idx, new_entries):
-    """STOCKS 리스트를 닫는 ']' 바로 앞(end_idx)에 새 Stock(...) 줄들을 삽입한다.
-    new_entries: list[(ticker, name, reason)]."""
+    """
+    설명: STOCKS를 닫는 ']' 바로 앞에 새 Stock(..., True) 줄들을 넣은 새 줄 목록을 돌려준다.
+    주의 사항: new_entries는 [(ticker, name, reason)].
+    입력 타입->반환 타입: (list[str], int, list[tuple[str, str, str]]) -> list[str]
+    """
     insert_lines = []
     for ticker, name, reason in new_entries:
         comment = f"  # 자동갱신 {date.today().isoformat()}: {reason}"
@@ -161,11 +157,11 @@ def _append_new_stocks(lines, end_idx, new_entries):
 
 
 def apply_updates_to_constants(deactivate, reactivate, add_new):
-    """deactivate: list[(ticker, reason)] — active=True -> False
-       reactivate: list[(ticker, reason)] — active=False -> True (이미 목록에 있던 종목)
-       add_new:    list[(ticker, name, reason)] — 완전히 새로운 종목 추가(active=True)
-
-    수정 전 constants.py.bak_<타임스탬프>로 백업한다."""
+    """
+    설명: 비활성화·재활성화·신규 추가 계획을 constants.py에 반영한다.
+    주의 사항: 파일 쓰기. 먼저 constants.py.bak_<시각>으로 백업한다. 반영 뒤 constants.py를 커밋·푸시해야 Actions 수집에 반영된다.
+    입력 타입->반환 타입: (list[tuple], list[tuple], list[tuple]) -> None
+    """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = f"{CONSTANTS_PATH}.bak_{timestamp}"
     shutil.copy2(CONSTANTS_PATH, backup_path)
@@ -197,12 +193,11 @@ def apply_updates_to_constants(deactivate, reactivate, add_new):
 # ── 4) 전체 갱신 로직 ────────────────────────────────────────────────────────────
 
 def plan_universe_update(target_size=TARGET_UNIVERSE_SIZE):
-    """현재 constants.STOCKS와 새로 조회한 시가총액 상위 target_size를 비교해 변경 계획을
-    세운다(constants.py는 아직 건드리지 않음 — 순수 계획 수립).
-
-    반환: dict(deactivate=[(ticker,reason)], reactivate=[(ticker,reason)],
-               add_new=[(ticker,name,reason)], skipped_thin=[(ticker,name,n_seq)],
-               unchanged_count=int)"""
+    """
+    설명: 현재 STOCKS와 새 시가총액 상위 target_size를 비교해 비활성화·재활성화·신규 추가·보류 계획 dict를 세운다.
+    주의 사항: constants.py는 고치지 않지만 신규 후보의 주가를 DB에 초기적재한다(ensure_price_data). 분할 경계 기준은 005930.
+    입력 타입->반환 타입: (int) -> dict
+    """
     universe = fetch_top_n_universe(target_size)
     universe_tickers = {t for t, _, _ in universe}
     name_by_ticker = {t: name for t, name, _ in universe}
@@ -256,6 +251,11 @@ def plan_universe_update(target_size=TARGET_UNIVERSE_SIZE):
 
 
 def print_plan(plan):
+    """
+    설명: 갱신 계획(유지·비활성화·재활성화·신규 추가·보류)을 사람이 읽을 수 있게 출력한다.
+    주의 사항: 없음.
+    입력 타입->반환 타입: (dict) -> None
+    """
     print("\n" + "=" * 100)
     print("=== 종목 유니버스 갱신 계획 ===")
     print("=" * 100)
@@ -275,6 +275,11 @@ def print_plan(plan):
 
 
 def main():
+    """
+    설명: 인자를 읽어 갱신 계획을 세우고 출력한 뒤, --apply이고 변경이 있을 때만 constants.py에 반영한다.
+    주의 사항: 계획 단계에서 DB에 쓸 수 있다(ensure_price_data). --apply는 파일을 고친다.
+    입력 타입->반환 타입: () -> None
+    """
     parser = argparse.ArgumentParser(
         description="Task T pooled 변동성 모델 종목 유니버스 월간 갱신 — 시가총액 상위 재조회 + 게이팅"
     )

@@ -1,9 +1,6 @@
-# train_common.py — 학습 단계: 운영 pooled LSTM 변동성 모델의 학습 설정(TrainConfig)과 학습 루프(train_model).
-#
-# 2026-10-17 정리: Transformer 계열(TransformerRegressor/PooledTransformerRegressor 학습), 1세대 단일 종목
-# 방향 예측 유틸(train_transformer, 방향 게이트, confusion 등), 급변 구간 손실 실험(가중 MSE·pinball),
-# load_checkpoint를 지웠다(git 태그 pre-cleanup 시점에 있음). 배포 게이트·val 예측 평가는 evaluate.py로,
-# 체크포인트 저장·예외 격리(run_isolated)는 store.py로 옮겼다.
+# train_common.py — 운영 pooled LSTM 변동성 모델의 학습 설정(TrainConfig)과 학습 루프(train_model).
+# 파이프라인 단계: 학습. 주요 진입 함수: train_model.
+# 흐름: 스모크 테스트(loss 유한성 확인) -> 본 학습(Adam+MSE, early stopping) -> best_state 복원.
 
 import random
 from dataclasses import dataclass
@@ -18,10 +15,11 @@ from 가격예측.model import PooledLSTMRegressor
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """운영 LSTM 학습 하이퍼파라미터(2026-10-17, 모듈 상수에서 설정 객체로). 기본값 = 2026-09-28 이후 운영값
-    (가격예측_변동성_공통의 옛 D_MODEL/NUM_LAYERS/DROPOUT/EMBEDDING_DIM/BATCH_SIZE/LR/WEIGHT_DECAY/
-    SMOKE_EPOCHS/MAX_EPOCHS/PATIENCE/SEED와 같은 값). 튜닝은 이 객체를 바꿔 train_model에 넘기는 방식으로 끼어든다
-    (튜닝 검증은 train 구간 안의 expanding-window 폴드로만 — CLAUDE.md "하이퍼파라미터 월간 튜닝")."""
+    """
+    설명: 운영 LSTM 학습 하이퍼파라미터 묶음. 기본값이 운영값이다.
+    주의 사항: 튜닝은 이 객체를 바꿔 train_model에 넘긴다. 튜닝 검증에 게이트 val 구간을 쓰지 말 것.
+    입력 타입->반환 타입: (필드 키워드 인자) -> TrainConfig
+    """
     hidden_size: int = 32
     num_layers: int = 2
     dropout: float = 0.3
@@ -36,20 +34,35 @@ class TrainConfig:
 
 
 def set_seed(seed):
+    """
+    설명: random·numpy·torch(CPU·CUDA)의 시드를 같은 값으로 고정한다.
+    주의 사항: 전역 난수 상태를 바꾼다.
+    입력 타입->반환 타입: (int) -> None
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-# ── Pooled(다종목) 학습/평가 루프 (2026-09-06) — 배치마다 (x, y, ticker_ids), 모델 호출은 model(x, ticker_ids) ──
+# ── Pooled(다종목) 배치: (x, y, ticker_ids), 모델 호출은 model(x, ticker_ids) ──
 
 def make_pooled_loader(X, y, ticker_ids, batch_size, shuffle):
+    """
+    설명: 배열 3개를 (x, y, ticker_id) 배치를 내는 DataLoader로 묶는다.
+    주의 사항: X·y는 float32, ticker_ids는 정수 배열이어야 한다.
+    입력 타입->반환 타입: (np.ndarray, np.ndarray, np.ndarray, int, bool) -> DataLoader
+    """
     ds = TensorDataset(torch.from_numpy(X), torch.from_numpy(y), torch.from_numpy(ticker_ids))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle)
 
 
 def run_pooled_epoch(model, loader, criterion, optimizer, device, train_mode):
+    """
+    설명: loader를 한 바퀴 돌며 손실 평균을 구하고, train_mode면 역전파로 가중치를 갱신한다.
+    주의 사항: model의 train/eval 모드를 바꾼다. 평균은 표본 수 가중이다.
+    입력 타입->반환 타입: (nn.Module, DataLoader, nn.Module, Optimizer, torch.device, bool) -> float
+    """
     model.train(train_mode)
     total_loss, n = 0.0, 0
     with torch.set_grad_enabled(train_mode):
@@ -66,14 +79,15 @@ def run_pooled_epoch(model, loader, criterion, optimizer, device, train_mode):
     return total_loss / n
 
 
-# ── 학습 루프 (2026-10-17 단일화: 옛 train_pooled_lstm과 같은 연산 순서) ──────────────────────
-# 스모크 테스트 -> 본 학습(Adam+MSE, early stopping) -> best_state 복원.
+# ── 학습 루프 ─────────────────────────────────────────────────────────────────────
 
 def train_model(X_train, y_train, tid_train, X_val, y_val, tid_val, num_stocks, lookback, config, device,
                 verbose=True, label=""):
-    """PooledLSTMRegressor를 config(TrainConfig)로 학습한다. test는 절대 건드리지 않는다 — train/val만 받는다.
-    반환: model, history, best_epoch, best_val_loss, last_epoch, last_train_loss, last_val_loss, val_loader,
-    overfit_ratio_at_end."""
+    """
+    설명: PooledLSTMRegressor를 config로 학습하고 val 손실이 가장 낮았던 가중치로 되돌린 결과 dict를 돌려준다.
+    주의 사항: train/val만 받는다(test 금지). 스모크 단계 손실이 NaN/Inf면 RuntimeError. 시드를 고정한다.
+    입력 타입->반환 타입: (np.ndarray x6, int, int, TrainConfig, torch.device, bool, str) -> dict
+    """
     smoke_epochs, max_epochs, patience = config.smoke_epochs, config.max_epochs, config.patience
     set_seed(config.seed)
     model = PooledLSTMRegressor(X_train.shape[2], lookback, num_stocks, config.embedding_dim,

@@ -1,52 +1,7 @@
-# baselines.py — 베이스라인 3종(GARCH·SMA20·Parkinson-SMA20)과 GARCH 파라미터 캐시.
-# 2026-10-17 garch_baseline.py·parkinson_baseline.py·가격예측_변동성_공통.py에서 이동했다(본문 변경 없음).
-#
-# [원래 garch_baseline.py 머리 주석]
-# garch_baseline.py — Task T 변동성 예측 학계 표준 baseline (2026-09-06)
-#
-# 지금까지 방향 예측(상승/하락)은 TF-IDF/KoBERT/KR-FinBERT/단일종목·pooled Transformer
-# 전부 무작위 수준으로 실패했다. 계량경제학은 애초에 "가격 방향은 예측 불가능(효율적
-# 시장가설)"을 전제하고, 변동성만 따로 모델링하는 GARCH 계열을 표준으로 쓴다. Transformer를
-# 변동성 예측에 투입하기 전에 이 학계 표준부터 baseline으로 세운다 — 이번 스크립트는 그
-# baseline 자체의 성능(SMA 대비)만 확인하는 것이 목적이고, Transformer와의 비교는 범위 밖이다.
-#
-# 설계 결정 (요청사항 판단):
-#   - 수익률 정의: **로그수익률**(log(close_t/close_(t-1)) x 100, 퍼센트 단위) 채택. GARCH
-#     문헌(Engle 1982, Bollerslev 1986)의 표준 관례이자 시간 가산성이 있어 변동성 모델링에
-#     적합하다. arch 패키지도 매우 작은 값(예: 0.01)에서 수렴 경고가 나는 경우가 많아 100을
-#     곱해 스케일을 맞추는 것이 패키지 공식 권장 사항이다. 프로젝트의 daily_stock_prices.
-#     change_rate(단순 등락률, Transformer 트랙이 쓰는 값)와는 다른 값이다 — 두 트랙이 서로
-#     다른 수익률 정의를 쓰는 것은 의도된 것: Transformer 쪽은 이미 확정된 설계(pct_change)를
-#     바꾸지 않고, GARCH는 그 자체 학계 관례를 따른다.
-#   - 실현 변동성(타겟): |수익률|(수익률 제곱 아님) 채택 — SMA baseline이 "직전 20일 평균
-#     |수익률|"로 요청됐고, GARCH가 예측하는 것도 조건부 분산이 아니라 조건부 "표준편차"(σ,
-#     분산의 제곱근)이므로, 두 baseline을 같은 척도(σ ~ |r|, 제곱 아님)에서 비교해야
-#     내적으로 일관된다.
-#   - 종목별 독립 적합(pooling 안 함) — 파라미터가 3개뿐이라 데이터 부족 문제가 없고, 종목마다
-#     변동성 구조(persistence 등)가 다르다는 것이 GARCH 채택의 전제이기도 하다.
-#   - 1-step-ahead 예측의 leak-free 보장: train 구간(<=train_end)에서만 파라미터(ω, α, β)를
-#     추정한 뒤, 그 값을 고정(arch의 fix())하고 train+val+test 전체 실제 수익률 이력 위에서
-#     재귀적으로 조건부 분산을 계산한다(재추정 없음). test 구간 값만 추출해 평가한다 —
-#     각 시점의 예측은 그 이전까지의 실제 값만 사용하므로 미래 정보 누수가 없다.
-#   - split 경계는 가격예측_통합모델.py/pooled_dataset.py와 동일한 전역 경계(전 종목 캘린더
-#     동일함을 이미 실측 확인)를 그대로 재사용해 Transformer 실험과 조건을 맞췄다.
-#
-# 2026-09-12(가격예측/ 활성·검증 재분리): 운영 파이프라인이 쓰지 않는 fit_and_forecast_garch()/
-# compute_full_period_sigma()/main()은 검증용/garch_baseline_check.py로 분리했다(값 변경 없음 — 그 파일은
-# 2026-10-17 정리에서 삭제, pre-cleanup 태그 시점에 있음). 이 파일에는 운영 파이프라인이 실제로 쓰는 함수만 남는다.
-#
-# [원래 parkinson_baseline.py 머리 주석]
-# parkinson_baseline.py — Parkinson(고가-저가 범위) 변동성 추정량 계산(2026-09-06, 원래
-# parkinson_volatility_check.py). recent_vol_ma20/GARCH σ보다 유용한 정보를 주는지 검증한
-# 실험(build_test_frame/main)은 pre-cleanup 태그 시점의 검증용/parkinson_baseline_check.py로 분리됐었다(2026-09-12,
-# 가격예측/ 활성·검증 재분리, 2026-10-17 삭제) — 그 검증 결과 Parkinson-SMA20이 GARCH·SMA20을 이기는 유일한
-# baseline으로 확인돼(pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md), 아래 두 함수 + PARK_WINDOW가
-# 가격예측_변동성_공통.py의 활성 피처 계산에 쓰인다.
-#
-# ⚠️ 리크 방지 설계: Parkinson 추정량 자체(parkinson_vol(t), high(t)/low(t) 사용)는 t일
-# 자신의 장중 정보라 target(t)(=|종가수익률(t)|)을 예측하는 피처로 쓰면 리크다. 호출부가
-# 반드시 rolling().shift(1)로 시차를 준 값("Parkinson-SMA20")만 예측 피처로 사용해야 한다 —
-# compute_parkinson_vol_pct() 자체는 그 시차 처리 이전의 원시값을 반환한다.
+# baselines.py — 베이스라인 3종(GARCH(1,1)·SMA20·Parkinson-SMA20)의 계산과 GARCH 파라미터 파일 캐시.
+# 파이프라인 단계: 피처(GARCH σ)·평가(val RMSE)·저장(다음 거래일 baseline 점예측). 주요 진입 함수: compute_ticker_baselines.
+# 수익률은 로그수익률x100(%), 실현 변동성은 |수익률|이다.
+# 배경: 결정기록.md의 "GARCH는 종목별로 train 구간에서만 적합하고 고정 파라미터로 재귀 계산", "GARCH 파라미터 캐시 30일"
 
 import json
 import os
@@ -68,6 +23,11 @@ SMA_WINDOW = 20
 
 
 def load_close_prices(ticker, start_date, end_date):
+    """
+    설명: daily_stock_prices에서 종목의 종가를 날짜 인덱스 Series로 읽는다.
+    주의 사항: DB 읽기. 운영 경로는 가격 캐시(prices)를 넘겨 이 함수를 거치지 않는다.
+    입력 타입->반환 타입: (str, str, str) -> pd.Series
+    """
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패 — load_close_prices")
@@ -88,47 +48,42 @@ def load_close_prices(ticker, start_date, end_date):
 
 
 def compute_log_returns_pct(close):
-    """로그수익률 x 100(퍼센트 단위) — arch 패키지 권장 스케일. 첫 행은 NaN이라 제거."""
+    """
+    설명: 로그수익률 x 100을 계산하고 첫 행(NaN)을 뺀다.
+    주의 사항: 단위는 %(arch 패키지 권장 스케일). 단순 등락률 change_rate와 다른 값이다.
+    입력 타입->반환 타입: (pd.Series) -> pd.Series
+    """
     log_ret = np.log(close / close.shift(1)) * 100
     return log_ret.dropna()
 
 
 def rmse_mae(pred, actual):
+    """
+    설명: 예측과 실제의 RMSE와 MAE를 계산한다.
+    주의 사항: 두 배열의 길이·정렬이 같아야 한다(NaN은 호출부에서 미리 빼야 함).
+    입력 타입->반환 타입: (np.ndarray, np.ndarray) -> (float, float)
+    """
     rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
     mae = float(np.mean(np.abs(pred - actual)))
     return rmse, mae
 
 
 def compute_sma_baseline(returns, window=SMA_WINDOW):
-    """직전 window일 평균 |수익률| — shift(1) 먼저 적용해 당일 값을 포함하지 않는다(leak-free,
-    D-2 원칙과 동일하게 sigma 계산 시 자기 자신 미포함)."""
+    """
+    설명: 직전 window일 평균 |수익률|(SMA baseline)을 날짜별로 계산한다.
+    주의 사항: shift(1)을 먼저 해서 당일 값을 포함하지 않는다.
+    입력 타입->반환 타입: (pd.Series, int) -> pd.Series
+    """
     return returns.abs().shift(1).rolling(window, min_periods=window).mean()
 
 
 # ── GARCH(파라미터 캐시 포함) ─────────────────────────────────────────────────────
 def forecast_with_fixed_params(returns, params, start_pos):
-    """이미 추정된(또는 캐시에서 불러온) GARCH(1,1) 파라미터를 고정한 채, returns 전체 이력
-    위에서 재귀적으로 1-step-ahead 조건부 표준편차를 계산한다(2026-09-06,
-    가격예측_변동성_일일수집.py의 월 1회 재추정 캐싱을 지원하기 위해 fit_and_forecast_garch에서
-    분리 — 파라미터 재추정 없이 이미 가진 params로만 재귀 계산이 필요한 경우 이 함수를 직접
-    쓴다).
-
-    ⚠️ 2026-09-06 라벨링 버그 수정(중대): arch의 `forecast(start=k, horizon=1)`이 반환하는
-    행 i는 "returns.index[k+i]까지의 실제 수익률(자기 자신 포함)로 계산한, returns.index[k+i+1]
-    시점에 대한 예측"이다 — 즉 그 날짜 자신의 수익률이 이미 재료로 들어간 값이다(수작업 GARCH
-    재귀식 sigma2[t]=omega+alpha*eps[t-1]^2+beta*sigma2[t-1]과 실측 대조로 확인:
-    함수 출력[i]가 수작업 재귀식의 (k+i+1) 위치 값과 정확히 일치하고 (k+i) 위치 값과는
-    불일치함). 이전 코드는 이 행을 그대로 index[k+i]에 라벨링해 "t 시점 예측이 t 자신의
-    수익률을 사용"하는 명백한 미래 정보 누수였다 — 이 버그가 하이브리드 Transformer의
-    garch_sigma 피처, GARCH baseline 자체의 test 평가, 조기경보 검증(pre-cleanup 태그 시점의 `결과_변동성_조기경보_
-    검증.md`)에 전부 영향을 미쳤다(상세 재검증·수정 결과는 해당 문서 갱신판 참고).
-
-    수정: 원시 출력 행 i를 실제 의미에 맞는 날짜 index[start_pos+i+1]로 재라벨링한다. 배열
-    밖(=아직 실현되지 않은 미래 1스텝)에 해당하는 마지막 값은 여기서는 버린다 — 그 값이
-    필요하면(서빙 시 "내일" 예측) forecast_next_day_sigma()를 쓴다. 즉 이 함수는 이제
-    start_pos+1부터 시작하는 leak-free 과거 구간만 반환한다.
-
-    반환: sigma_pred(pandas Series, index=날짜, start_pos+1 시점부터)"""
+    """
+    설명: 고정 GARCH(1,1) 파라미터로 start_pos+1번째 날짜부터 1-step-ahead 조건부 σ를 재귀 계산한다.
+    주의 사항: arch 원시 출력 행 i는 index[start_pos+i+1]의 예측이라 그 날짜로 다시 붙인다(그대로 쓰면 누수).
+    입력 타입->반환 타입: (pd.Series, pd.Series, int) -> pd.Series
+    """
     am_full = arch_model(returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
     res_fixed = am_full.fix(params)
     fc = res_fixed.forecast(horizon=1, start=start_pos, reindex=False)
@@ -142,30 +97,27 @@ def forecast_with_fixed_params(returns, params, start_pos):
 
 
 def garch_sigma_series(returns, params):
-    """고정 params로 전체 구간 GARCH σ(라벨 t = returns t-1까지로 낸 t 예측)를 재귀 계산한다 — 학습 frame과
-    서빙 창이 함께 쓰는 단일 경로(2026-10-17). forecast_with_fixed_params(start_pos=0)과 같다(서빙이 예전에 쓰던
-    start_pos=target_pos-1과도 값이 같음을 정리 전 점검에서 5종목x20일로 확인, 최대 차 0.0)."""
+    """
+    설명: 전체 구간 GARCH σ를 계산한다(날짜 t 값 = t-1까지의 수익률로 낸 t 예측).
+    주의 사항: 학습 frame과 서빙 창이 함께 쓰는 단일 경로다.
+    입력 타입->반환 타입: (pd.Series, pd.Series) -> pd.Series
+    """
     return forecast_with_fixed_params(returns, params, 0)
 
 
 def forecast_next_day_sigma(returns, params):
-    """서빙(추론) 전용 — returns 마지막 날짜 다음 거래일의 GARCH 1-step-ahead σ를 예측한다.
-    forecast(horizon=1)을 start 없이 호출하면 내부적으로 마지막 유효 위치(len(returns)-1)를
-    기준으로 예측하는데, forecast_with_fixed_params()에서 재확인한 라벨링 규칙에 따르면 이
-    위치의 원시 출력은 정확히 "returns 전체(마지막 날짜 포함)를 다 써서 그 다음 날을 예측한
-    값"이다 — 그래서 이 함수는 (forecast_with_fixed_params와 달리) 재라벨링이 필요 없다.
-    이 함수 자체는 2026-09-06 라벨링 버그 수정 이전부터 의미상 옳았다 — 버그는
-    forecast_with_fixed_params()가 과거 구간에 잘못된 날짜를 붙이던 부분에만 있었다.
-
-    반환: float(다음 거래일 σ 예측치)"""
+    """
+    설명: returns의 마지막 날짜 다음 거래일 GARCH σ를 예측한다(서빙용).
+    주의 사항: returns 전체(마지막 날 포함)를 쓴 값이라 재라벨링이 필요 없다.
+    입력 타입->반환 타입: (pd.Series, pd.Series) -> float
+    """
     am_full = arch_model(returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
     res_fixed = am_full.fix(params)
     fc = res_fixed.forecast(horizon=1)
     return float(np.sqrt(fc.variance.values[-1, 0]))
 
 
-# GARCH 파라미터를 이 일수 이내에 이미 재추정했으면 캐시를 그대로 재사용(월 1회 재추정 원칙,
-# 위 헤더 설명 참고).
+# 캐시된 GARCH 파라미터를 다시 적합하지 않고 재사용하는 최대 경과 일수(월 1회 재적합).
 GARCH_REFIT_MAX_AGE_DAYS = 30
 
 _HERE = os.path.dirname(__file__)
@@ -173,10 +125,20 @@ GARCH_PARAM_CACHE_DIR = os.path.join(_HERE, "checkpoints", "garch_params")
 
 
 def _garch_cache_path(ticker, cache_dir=None):
+    """
+    설명: 종목의 GARCH 캐시 파일 경로(<cache_dir>/<ticker>.json)를 만든다.
+    주의 사항: cache_dir가 없으면 운영 캐시 폴더(GARCH_PARAM_CACHE_DIR)다.
+    입력 타입->반환 타입: (str, str|None) -> str
+    """
     return os.path.join(cache_dir or GARCH_PARAM_CACHE_DIR, f"{ticker}.json")
 
 
 def _load_garch_cache(ticker, cache_dir=None):
+    """
+    설명: 종목의 GARCH 캐시 JSON을 읽어 dict로 돌려준다. 파일이 없으면 None.
+    주의 사항: 파일 읽기.
+    입력 타입->반환 타입: (str, str|None) -> dict|None
+    """
     path = _garch_cache_path(ticker, cache_dir)
     if not os.path.exists(path):
         return None
@@ -185,6 +147,11 @@ def _load_garch_cache(ticker, cache_dir=None):
 
 
 def _save_garch_cache(ticker, params, train_end, cache_dir=None):
+    """
+    설명: GARCH 파라미터를 fitted_at(오늘)·train_end와 함께 캐시 JSON으로 저장한다.
+    주의 사항: 파일 쓰기(폴더가 없으면 만든다). 기본 위치는 운영 캐시 폴더다.
+    입력 타입->반환 타입: (str, pd.Series, pd.Timestamp, str|None) -> None
+    """
     os.makedirs(cache_dir or GARCH_PARAM_CACHE_DIR, exist_ok=True)
     payload = {
         "params": {k: float(v) for k, v in params.items()},
@@ -197,11 +164,11 @@ def _save_garch_cache(ticker, params, train_end, cache_dir=None):
 
 def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT_MAX_AGE_DAYS, cache_dir=None,
                             read_only=False):
-    """캐시가 있고 max_age_days 이내면 재사용, 없거나 오래됐으면 train_end까지 데이터로
-    새로 MLE 적합해 캐시를 갱신한다. 반환: (params: pd.Series, refit_happened: bool).
-    cache_dir(2026-10-17): 기본 GARCH_PARAM_CACHE_DIR. read_only=True면 캐시가 없거나 만료됐을 때 적합·저장하지 않고
-    예외를 낸다(같은 params로 비교해야 하는 점검·백테스트용). ⚠️ 캐시 재사용은 fitted_at만 보고 train_end는 보지 않는다
-    (CLAUDE.md "GARCH 파라미터 캐시의 시점 무결성 문제")."""
+    """
+    설명: 캐시가 max_age_days 이내면 그 파라미터를, 아니면 train_end까지로 새로 적합한 파라미터를 (params, 재적합 여부)로 돌려준다.
+    주의 사항: 재적합하면 캐시 파일을 쓴다. 캐시는 fitted_at만 보고 train_end는 보지 않는다(과거 날짜 백테스트에 누수). read_only면 적합 대신 예외.
+    입력 타입->반환 타입: (str, pd.Series, pd.Timestamp, int, str|None, bool) -> (pd.Series, bool)
+    """
     cached = _load_garch_cache(ticker, cache_dir)
     if cached is not None:
         fitted_at = date.fromisoformat(cached["fitted_at"])
@@ -213,8 +180,7 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
 
     train_returns = returns[returns.index <= train_end]
     am_train = arch_model(train_returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
-    # cov_type="classic" — 표준오차(샌드위치 공분산)는 안 쓰고 params 점추정치만 쓰므로
-    # 기본값 "robust"의 추가 계산 비용을 뺀다(2026-09-20).
+    # 표준오차는 쓰지 않으므로 robust 공분산 계산을 생략한다.
     res_train = am_train.fit(disp="off", cov_type="classic")
     params = res_train.params
     _save_garch_cache(ticker, params, train_end, cache_dir)
@@ -222,8 +188,11 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
 
 
 def compute_full_period_sigma_cached(returns, params):
-    """이미 가진(캐시된) params로 재적합 없이 전체 구간 GARCH σ를 재귀 계산한다
-    (garch_baseline.garch_sigma_series — 서빙 창과 같은 경로). 이름의 "cached"는 params가 캐시에서 온다는 뜻이다."""
+    """
+    설명: 이미 가진(캐시된) 파라미터로 재적합 없이 전체 구간 GARCH σ를 계산한다(garch_sigma_series와 같음).
+    주의 사항: 없음.
+    입력 타입->반환 타입: (pd.Series, pd.Series) -> pd.Series
+    """
     return garch_sigma_series(returns, params)
 
 
@@ -232,6 +201,11 @@ PARK_WINDOW = 20
 
 
 def load_high_low(ticker, start_date, end_date):
+    """
+    설명: daily_stock_prices에서 종목의 고가·저가를 날짜 인덱스 DataFrame으로 읽는다.
+    주의 사항: DB 읽기. 운영 경로는 가격 캐시(prices)를 넘겨 이 함수를 거치지 않는다.
+    입력 타입->반환 타입: (str, str, str) -> pd.DataFrame
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -245,8 +219,11 @@ def load_high_low(ticker, start_date, end_date):
 
 
 def compute_parkinson_vol_pct(high, low):
-    """parkinson_vol(t) = sqrt(1/(4 ln2) * ln(high/low)^2), x100(%) 스케일 통일.
-    당일 H/L을 쓰므로 그 자체는 t일 정보 — 리크 방지 주석 참고."""
+    """
+    설명: Parkinson 추정량 sqrt(ln(high/low)^2 / (4 ln2)) x 100을 날짜별로 계산한다.
+    주의 사항: 당일 고가·저가를 쓰는 원시값이라 예측에는 rolling 평균 뒤 shift(1)한 값만 써야 한다(그대로 쓰면 누수).
+    입력 타입->반환 타입: (pd.Series, pd.Series) -> pd.Series
+    """
     raw = np.sqrt((np.log(high / low) ** 2) / (4 * np.log(2)))
     return raw * 100
 
@@ -255,22 +232,11 @@ def compute_parkinson_vol_pct(high, low):
 
 def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, prices=None, garch_cache_dir=None,
                              garch_read_only=False):
-    """종목 1개의 GARCH 파라미터를 캐시에서 가져오거나 새로 적합하고, 그 파라미터로:
-      (a) 전체 구간 σ(하이브리드 피처용 — build_merged_dataset_v2_volatility_hybrid의
-          precomputed_sigma로 그대로 재사용, 내부에서 다시 적합하지 않음)
-      (b) val 구간 GARCH/SMA20/Parkinson-SMA20 RMSE(배포 게이트 판정용)
-      (c) 다음 거래일 GARCH/SMA20/Parkinson-SMA20 baseline 점예측(model_predictions 감사 컬럼용)
-    을 한 번에 계산한다 — 세 용도를 따로 호출하면 종목당 GARCH 적합/재귀계산을 최대 3번
-    반복하게 되어 여기서 합쳤다.
-
-    prices(선택, 2026-10-05): 시장지표.feature_loader.load_price_cache(...)[ticker]. 주면
-    load_close_prices/load_high_low 대신 여기서 close·high·low를 꺼낸다 — 두 함수와 같은 테이블·
-    같은 구간(ticker, date BETWEEN start_date AND end_date, ORDER BY date)·같은 float 변환이다.
-
-    garch_cache_dir/garch_read_only(2026-10-17): get_or_fit_garch_params에 그대로 전달.
-
-    반환 dict: params, sigma_full, val_rmse(garch/sma20/parkinson dict), n_val_valid,
-    next_day(garch/sma20/parkinson dict)."""
+    """
+    설명: 종목 하나의 GARCH 파라미터·전체 구간 σ·val RMSE 3종·다음 거래일 baseline 3종을 한 번에 계산해 dict로 돌려준다.
+    주의 사항: GARCH 재적합 시 캐시 파일을 쓴다(garch_read_only면 예외). prices가 없으면 DB 읽기.
+    입력 타입->반환 타입: (str, str, str, pd.Timestamp, pd.Timestamp, pd.DataFrame|None, str|None, bool) -> dict
+    """
     if prices is not None:
         prices_by_date = prices.set_index("date")
         close = prices_by_date["close"]

@@ -1,31 +1,8 @@
-# 가격예측_변동성_공통.py
-# 하이브리드(GARCH σ 피처 + pooled LSTM) 변동성 예측 일일 파이프라인의 오케스트레이터와 설정(2026-09-07 신규 작성).
-#
-# 단계(2026-10-17 정리): 수집(주가데이터/·시장지표/, 이 파일 밖) -> 입력 점검(이 파일: 가격 정렬·지수 신선도)
-# -> 피처(dataset_builder·momentum_feature·split_dataset, GARCH σ·baseline은 이 파일의 compute_ticker_baselines)
-# -> 학습(train_common.train_model) -> 평가(evaluate.evaluate_gate) -> 저장+예측(store: 체크포인트·registry·
-# model_predictions·MLflow). run_pooled_volatility_pipeline은 이 단계를 순서대로 부르는 얇은 함수다.
-#
-# 배경: pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md의 100종목 검증(원본·종목평균 제거 지표 둘 다 GARCH·
-# SMA20·Parkinson-SMA20 셋을 이김, N=5 셔플 격차 90~120σ)을 그대로 운영 파이프라인으로
-# 옮겼다(검증 정본은 pre-cleanup 태그 시점의 가격예측/검증용/test_evaluation_pooled100_hybrid.py).
-#
-# 방향예측 파이프라인(pre-cleanup 태그 시점의 가격예측_공통.py·가격예측_통합모델.py — 둘 다 폐기)과의 관계:
-#   - "공통/일일수집" 파일 분리, run_isolated를 통한 종목별 예측 격리, next_weekday() 근사,
-#     save_checkpoint 버전 태깅은 그대로 계승했다.
-#   - pooled(전 종목 통합) 학습이라 종목별 격리가 원천적으로 불가능하다는 점도 가격예측_
-#     통합모델.py의 설계를 그대로 따른다(학습 실패=전체 파이프라인 실패, 예측 단계만 격리).
-#   - GARCH σ가 피처로 들어가는 하이브리드 구조라 baseline 3종(GARCH/SMA20/Parkinson-SMA20)을
-#     매일 다시 계산해 배포 게이트 판정 + model_predictions 감사 컬럼에 채운다는 점이
-#     방향예측 파이프라인과 다르다.
-#
-# GARCH 파라미터 캐싱(월 1회 재추정): split_dataset.build_merged_dataset_v2_volatility_hybrid의
-# precomputed_sigma/garch_params 인자, split_dataset.build_next_day_merged_window_volatility_hybrid의
-# garch_params 인자는 2026-09-06에 정확히 이 캐싱 용도로 이미 만들어져 있었다(당시엔 실제
-# 호출부가 없었음 — 이 파일이 최초 호출부다). 종목당 GARCH MLE 적합(arch_model.fit())은
-# 비용이 커서 매일 100종목분을 재추정하면 낭비이므로, (omega, alpha, beta)만 파일 캐시에
-# 남기고 재귀적 σ 계산(garch_sigma_series, 비용이 훨씬 작음)은 매일 최신 가격 이력
-# 전체에 대해 새로 돌린다.
+# 가격예측_변동성_공통.py — 하이브리드(GARCH σ 피처 + pooled LSTM) 변동성 예측 일일 파이프라인의 오케스트레이터와 설정.
+# 파이프라인 단계: 입력 점검(가격 정렬·지수 신선도) -> 피처·baseline -> 학습 -> 평가 -> 저장+예측 -> 실행 기록을 순서대로 부른다.
+# 주요 진입 함수: run_pooled_volatility_pipeline(가격예측_변동성_일일수집.py가 호출).
+# 배경: 결정기록.md의 "매일 전체 재학습, 학습 실패는 전체 실패·예측만 종목별 격리", "예측은 게이트와 무관하게 저장한다",
+#       "가격 정렬 점검", "시장지수 신선도 점검과 input_data_suspect"
 
 import os
 import time
@@ -51,26 +28,21 @@ from 시장지표.feature_loader import load_indicator_cache, load_price_cache
 
 LOOKBACK = 20
 
-# 학습 하이퍼파라미터는 train_common.TrainConfig(2026-10-17, 모듈 상수에서 설정 객체로). 기본값은 운영값 그대로다
-# (hidden 32·2층·dropout 0.3·embedding 20·batch 32·lr 1e-3·wd 1e-4·smoke 2·max 60·patience 8·seed 42).
-# 쓰지 않던 Transformer 전용 값(NHEAD=2, DIM_FEEDFORWARD=64)은 지웠다.
-# ⚠️ 종목 수(현재 100)가 크게 달라지면(종목_월간갱신.py 누적 결과) embedding_dim의 적정성도 사람이
-# 재검토해야 한다 — 자동으로 재조정되지 않는다.
+# 학습 하이퍼파라미터 기본값(운영값). 종목 수가 크게 달라지면 embedding_dim은 사람이 다시 검토해야 한다(자동 조정 없음).
 DEFAULT_TRAIN_CONFIG = TrainConfig()
-
-
-# MIN_TRAIN_SEQUENCES(최소 train 시퀀스 수)는 2026-10-17부터 constants.py에 있다 — 종목_월간갱신.py가 이 상수
-# 하나 때문에 이 모듈(torch·mlflow)을 import하지 않게 하려고 옮겼다. 값과 근거는 constants.py 참고.
 
 _HERE = os.path.dirname(__file__)
 CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints", "pooled_volatility_hybrid")
-# (8종목 시절 방향예측 pooled 모델의 checkpoints/pooled/ 와는 다른 디렉터리다. 운영 경로는 run_pooled_volatility_pipeline의
-# checkpoint_dir·garch_cache_dir·log_dir 인자로 바꿀 수 있다 — 기본값이 아래 세 상수다.)
+# 운영 경로 기본값. run_pooled_volatility_pipeline의 checkpoint_dir·garch_cache_dir·log_dir 인자로 바꿀 수 있다.
 LOG_DIR = os.path.join(_HERE, "logs")
 
 
 def _model_kwargs(num_stocks, config):
-    # 체크포인트 meta의 model_kwargs — PooledLSTMRegressor 생성자가 받는 인자만 담는다(2026-09-27).
+    """
+    설명: 체크포인트 meta에 남길 PooledLSTMRegressor 생성자 인자(model_kwargs)를 만든다.
+    주의 사항: 체크포인트로 모델을 다시 만들 때 이 키 그대로 쓰인다(키 이름 바꾸지 말 것).
+    입력 타입->반환 타입: (int, TrainConfig) -> dict
+    """
     return dict(
         lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=config.embedding_dim,
         hidden_size=config.hidden_size, num_layers=config.num_layers, dropout=config.dropout,
@@ -80,8 +52,11 @@ def _model_kwargs(num_stocks, config):
 # ── pooled 하이브리드 학습 ────────────────────────────────────────────────────────
 
 def load_shared_cache(start_date, end_date):
-    """종목과 무관한 거시지표 9종·KOSPI 원자료를 한 번 읽어 학습·예측이 함께 쓰게 한다(2026-10-05,
-    Neon 전송량 절감). 반환 dict의 키는 split_dataset 피처 함수들의 키워드 인자 이름과 같다."""
+    """
+    설명: 종목과 무관한 거시지표 9종·KOSPI 원자료를 한 번 읽어 학습·예측이 함께 쓸 dict로 돌려준다.
+    주의 사항: DB 읽기. 키 이름은 split_dataset 피처 함수의 키워드 인자 이름과 같아야 한다.
+    입력 타입->반환 타입: (str, str) -> dict
+    """
     return {
         "precomputed_indicators": load_indicator_cache(end_date, start_date),
         "true_kospi": load_true_kospi(start_date, end_date),
@@ -89,26 +64,22 @@ def load_shared_cache(start_date, end_date):
 
 
 def compute_split_dates(ref_ticker, start_date, end_date, shared_cache, prices):
-    """전역 train/val 분할 경계(2026-10-17 분리). 기준 종목(운영: ACTIVE_TICKERS[0])의 유효 피처 날짜
-    (split_dataset.valid_feature_dates — GARCH σ 전 변동성 frame 인덱스)로 compute_global_split_dates를 부른다.
-    예전에는 방향 예측 frame(build_merged_dataset_v2) 인덱스를 썼다(정리 골든 비교로 같은 경계 확인)."""
+    """
+    설명: 기준 종목의 유효 피처 날짜로 전역 train/val 분할 경계를 구한다.
+    주의 사항: 운영 기준 종목은 tickers[0](ACTIVE_TICKERS 첫 종목)이다.
+    입력 타입->반환 타입: (str, str, str, dict, pd.DataFrame) -> (pd.Timestamp, pd.Timestamp)
+    """
     dates = valid_feature_dates(ref_ticker, start_date, end_date, **shared_cache, precomputed_prices=prices)
     return compute_global_split_dates(dates)
 
 
 def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, shared_cache=None,
                              prices_by_ticker=None, garch_cache_dir=None, garch_read_only=False):
-    """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(파라미터 규모가
-    작아 재학습 자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
-
-    shared_cache(선택, 2026-10-05): load_shared_cache(start_date, end_date) 결과. None이면 여기서 로드한다.
-    prices_by_ticker(선택, 2026-10-05): load_price_cache(tickers, start_date, end_date) 결과. None이면
-    여기서 한 번에 로드한다 — 예전에는 종목마다 baseline용(종가, 고가·저가)과 피처용(OHLCV)으로
-    같은 구간을 세 번 읽었다.
-
-    반환: model, scaler, feature_cols, ticker_to_id, device, gate, baselines_by_ticker,
-    train_end/val_end, n_train/n_val, n_train_by_ticker, history/best_epoch/best_val_loss/
-    overfit_ratio_at_end(2026-09-14, MLflow 로깅용)."""
+    """
+    설명: 전 종목 baseline을 계산하고 하나의 pooled 데이터셋으로 LSTM을 학습한 뒤 게이트까지 판정한 결과 dict를 돌려준다.
+    주의 사항: 캐시 인자가 없으면 DB를 읽는다. GARCH 재적합 시 캐시 파일을 쓴다. train 시퀀스가 적은 종목은 경고만 낸다.
+    입력 타입->반환 타입: (list[str], str, str, TrainConfig, dict|None, dict|None, str|None, bool) -> dict
+    """
 
     if shared_cache is None:
         shared_cache = load_shared_cache(start_date, end_date)
@@ -126,9 +97,11 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
         )
 
     def hybrid_build_fn(ticker, s, e, precomputed_indicators=None, true_kospi=None):
-        # precomputed_indicators/true_kospi(2026-09-20): pooled_dataset.build_pooled_sequences가
-        # 이 시그니처를 보고(inspect) 거시지표 캐시를 종목 루프 시작 전에 한 번만 만들어 넘긴다
-        # — 성능 최적화일 뿐 조인/계산 로직은 동일(값 변경 없음 검증 완료).
+        """
+        설명: 종목 하나의 GARCH σ 포함 학습 frame을 만든다(build_pooled_sequences에 넘기는 build_fn).
+        주의 사항: build_pooled_sequences가 인자 이름(precomputed_indicators·true_kospi)을 보고 캐시를 넘긴다 — 이름을 바꾸지 말 것.
+        입력 타입->반환 타입: (str, str, str, dict|None, pd.Series|None) -> (pd.DataFrame, dict)
+        """
         b = baselines_by_ticker[ticker]
         return build_merged_dataset_v2_volatility_hybrid(
             ticker, s, e, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
@@ -160,7 +133,6 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
         len(tickers), LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
     )
 
-    # 평가 단계: 하이브리드 종목평균 RMSE vs baseline 3종(종목별 val RMSE 평균) — evaluate.evaluate_gate.
     gate = evaluate_gate(result["model"], result["val_loader"], device, baselines_by_ticker)
 
     return {
@@ -177,20 +149,16 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
     }
 
 
-# 주가지수(KOSPI/KOSDAQ) 신선도 점검(2026-09-27, 가시성 확보용 경고만 — 파이프라인은 멈추지 않음).
-# 배경: FinanceDataReader의 KS11/KQ11은 KRX 실시간이 아니라 FDR 작성자가 운영하는 GitHub 캐시
-# (FinanceData/fdr_krx_data_cache)에서 읽는데, 이 캐시의 지수 파일이 2026-09-17 이후 갱신되지 않아
-# market_indicators의 KOSPI/KOSDAQ가 9/17에서 멈췄다(같은 기간 네이버 fchart에는 9/18~9/23 존재
-# 확인). 결측이 있으면 (1) feature_loader의 asof 조인이 KOSPI/KOSDAQ 레벨 피처를 마지막 값으로 조용히
-# forward-fill하고, (2) momentum_feature.load_true_kospi 경로는 reindex -> pct_change(fill_method=
-# 'pad')로 결측일 KOSPI 수익률이 0이 되어 excess_return_z_lag1이 사실상 "종목 절대수익률 z"로
-# 오염된다 — 둘 다 에러 없이 진행되므로 최소한 로그에 드러나게 한다.
+# ── 입력 점검: 주가지수 신선도(경고만, 파이프라인은 멈추지 않음) ───────────────────────────
 INDEX_FRESHNESS_CODES = ("KOSPI", "KOSDAQ")
 
 
 def check_market_index_freshness(end_date):
-    """daily_stock_prices의 최신 거래일(<= end_date) 대비 KOSPI/KOSDAQ가 몇 거래일 뒤처졌는지
-    경고로 출력한다. 반환: {indicator_code: 뒤처진 거래일 수}."""
+    """
+    설명: 주가 최신 거래일(<= end_date) 대비 KOSPI·KOSDAQ가 몇 거래일 뒤처졌는지 세어 {코드: 거래일 수}로 돌려준다.
+    주의 사항: DB 읽기. 뒤처지면 경고만 출력한다. 결측일 지수 피처는 마지막 값으로 채워지고 excess_return_z가 오염된다.
+    입력 타입->반환 타입: (str) -> dict[str, int]
+    """
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패 — check_market_index_freshness")
@@ -218,22 +186,20 @@ def check_market_index_freshness(end_date):
     return lag
 
 
-# 종목별 주가 최신일 정렬 점검(2026-10-17). 10/13 05:02 실행이 Actions 주가 수집(05:02:58~05:07:15)과
-# 겹쳐 앞 12종목만 10/12 주가가 들어간 상태를 읽었고, 12종목은 prediction_date 10/12, 88종목은 10/08로
-# 예측했다(88종목의 10/12 기준 예측은 영영 만들어지지 않음).
-# 판정: 공통일 = 종목별 최신일(<= end_date)의 최빈값(동률이면 불일치). 이탈 종목 = 최신일이 공통일과
-# 다르거나(앞서든 뒤처지든) 가격 행이 없는 종목. 이탈이 MAX_DEVIANT_TICKERS 이하면 대기 없이 진행하되 그
-# 종목은 이번 실행에서 예측을 저장하지 않는다(학습 데이터는 그대로). 초과·동률이면 수집 진행 중일 수 있어
-# PRICE_ALIGNMENT_RETRY_INTERVAL_SEC마다 PRICE_ALIGNMENT_RETRIES번 재조회하고, 끝까지 같으면 학습 전에 중단한다.
+# ── 입력 점검: 종목별 주가 최신일 정렬 ──────────────────────────────────────────────
+# 공통일 = 종목별 최신일의 최빈값(동률이면 불일치). 이탈이 MAX_DEVIANT_TICKERS 이하면 그 종목만 저장에서 빼고 진행,
+# 초과·동률이면 재조회 후에도 같을 때 학습 전에 중단한다.
 MAX_DEVIANT_TICKERS = 5
 PRICE_ALIGNMENT_RETRIES = 3          # 첫 조회 뒤 재조회 횟수(최대 대기 = RETRIES x INTERVAL)
 PRICE_ALIGNMENT_RETRY_INTERVAL_SEC = 300
 
 
 def summarize_price_alignment(latest_by_ticker, tickers, max_deviant=MAX_DEVIANT_TICKERS):
-    """종목별 최신일 딕셔너리를 판정한다(DB 없이 단위 확인 가능한 순수 함수).
-    반환: {"ok": 진행 가능 여부, "common_date": 최빈 최신일(동률·전부 없음이면 None),
-           "deviants": {이탈 종목: 최신일 또는 None}, "distribution": {날짜: 종목 수}, "missing": [행 없는 종목]}."""
+    """
+    설명: 종목별 최신일로 공통일·이탈 종목·날짜 분포·가격 없는 종목·진행 가능 여부를 판정해 dict로 돌려준다.
+    주의 사항: DB 없이 쓰는 순수 함수. 최빈 날짜가 동률이거나 전부 없으면 common_date=None(진행 불가).
+    입력 타입->반환 타입: (dict[str, date|None], list[str], int) -> dict
+    """
     missing = [t for t in tickers if latest_by_ticker.get(t) is None]
     distribution = {}
     for t in tickers:
@@ -251,6 +217,11 @@ def summarize_price_alignment(latest_by_ticker, tickers, max_deviant=MAX_DEVIANT
 
 
 def _fetch_latest_price_dates(tickers, end_date):
+    """
+    설명: daily_stock_prices에서 종목별 최신 날짜(<= end_date)를 {종목: 날짜}로 읽는다.
+    주의 사항: DB 읽기. 행이 없는 종목은 결과에 없다.
+    입력 타입->반환 타입: (list[str], str) -> dict[str, date]
+    """
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -265,8 +236,11 @@ def check_price_dates_aligned(tickers, end_date, retries=PRICE_ALIGNMENT_RETRIES
                               interval_sec=PRICE_ALIGNMENT_RETRY_INTERVAL_SEC,
                               max_deviant=MAX_DEVIANT_TICKERS,
                               fetch=_fetch_latest_price_dates, sleep=time.sleep):
-    """종목별 주가 최신일(<= end_date) 정렬을 점검한다(판정 규칙은 위 주석). 진행 가능하면
-    {"common_date", "deviants"}를 돌려주고, 재조회 후에도 불가하면 RuntimeError를 던진다."""
+    """
+    설명: 종목별 주가 최신일 정렬을 점검해 진행 가능하면 {"common_date", "deviants"}를 돌려준다.
+    주의 사항: 불가하면 interval_sec마다 retries번 다시 조회하며 기다리고, 끝까지 불가하면 RuntimeError(학습 전 중단).
+    입력 타입->반환 타입: (list[str], str, int, int, int, Callable, Callable) -> dict
+    """
     for attempt in range(retries + 1):
         summary = summarize_price_alignment(fetch(tickers, end_date), tickers, max_deviant)
         dist = ", ".join(f"{d}: {n}종목" for d, n in summary["distribution"].items())
@@ -295,49 +269,20 @@ def check_price_dates_aligned(tickers, end_date, retries=PRICE_ALIGNMENT_RETRIES
 def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, sinks=None,
                                    checkpoint_dir=None, garch_cache_dir=None, garch_read_only=False, log_dir=None,
                                    version=None):
-    """전체 파이프라인: 입력 점검 -> baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
-    통합) -> 배포 게이트 판정 -> 체크포인트 저장 -> 종목별 다음 거래일 예측(run_isolated로
-    종목별 격리) -> 예측 저장(게이트 결과와 무관하게 항상 저장) -> 실행 기록.
-
-    2026-10-17 단계 분리: 저장 대상은 sinks(store.Sink)로 바꿔 끼운다. 기본값 None = 운영
-    [store.DbSink(), store.MlflowSink()](model_registry·model_predictions·MLflow "일일_자동화"). 저장 없이 돌리려면
-    sinks=[store.CollectSink()], checkpoint_dir=<임시 폴더>, garch_read_only=True(+ garch_cache_dir)를 넘긴다.
-    checkpoint_dir/garch_cache_dir/log_dir 기본값은 CHECKPOINT_DIR/GARCH_PARAM_CACHE_DIR/LOG_DIR,
-    version 기본값은 체크포인트 저장 시각(UTC)이다.
-
-    학습 자체는 격리하지 않는다(가격예측_통합모델.py와 동일 근거 — 모델이 하나라 학습 실패는
-    전체 실패, 단일 종목 파이프라인처럼 "한 종목만 실패, 나머지는 계속"이 구조적으로 불가능).
-    예측 단계만 종목별로 run_isolated로 감싼다.
-
-    2026-09-14(D-1, A-1의 "저장 스킵" 결정 철회 — 같은 날 안에서 방침이 두 번 바뀜, 아래
-    경과 참고): A-1(같은 날 오전)은 "gate['passed']가 False면 예측 루프 자체를 건너뛴다"는
-    엄격한 방식을 채택했다 — 그전에는 gate_passed=False가 model_predictions에 기록만 될
-    뿐 저장을 막지 않아 게이트가 사실상 장식이었기 때문. 이후 actual_volatility 백필로 A-1
-    적용 *이전*에 저장됐던 100행을 실제 결과와 대조해보니 하이브리드가 세 baseline 전부에
-    뒤졌음이 확인돼(pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md 및 아래 "actual_volatility 백필" 절
-    참고) 게이트 강제의 방향성 자체는 지지됐다. 그런데 A-1 적용 이후 게이트가 연속
-    미통과하면서 예측 계산 자체가 아예 안 일어나 "미래 예측이 실제로 얼마나 정확한지"를
-    계속 검증할 데이터가 더 이상 쌓이지 않는 문제가 드러났다 — 게이트를 검증하려면 게이트가
-    걸러낸 예측이라도 계속 쌓여야 하는데, 엄격 스킵이 그 검증 자체를 불가능하게 만드는
-    모순이었다. **결정: model_predictions에는 게이트 통과 여부와 무관하게 항상 저장하고,
-    이미 있던 gate_passed 컬럼으로 신뢰 가능 여부를 구분한다.** 새 테이블을 만들지 않고
-    기존 model_predictions에 통합 — `gate_passed=true`만 보고 싶으면 아래 D-3에서 준비한
-    `model_predictions_trusted` 뷰를 사용할 것(뷰 DDL만 준비됨, 실제 생성은 사람이 psql로
-    직접 실행 — `Database/가격예측/뷰_생성.sql`). A-1 이전(2026-09-12)에 저장된 기존 100행의
-    gate_passed 값은 소급 수정하지 않고 그대로 히스토리로 보존한다.
-
-    A-2(예측값 NaN/inf/음수 sanity check)는 게이트와 무관한 별개 로직이라 이번 결정과
-    무관하게 그대로 유지된다. 체크포인트 저장(학습 자체가 성공했다는 기록)도 게이트와
-    무관하게 항상 수행하는 기존 동작 그대로."""
+    """
+    설명: 입력 점검 → baseline·학습·게이트 → 체크포인트 → 종목별 예측·저장 → 실행 기록을 차례로 하고 {version, gate, predictions}를 돌려준다.
+    주의 사항: 기본 sinks는 운영 DB·MLflow에 쓴다(저장 없이 돌리려면 CollectSink·임시 checkpoint_dir·garch_read_only). 게이트 미통과여도 저장한다.
+    입력 타입->반환 타입: (list[str], str, str, TrainConfig, list|None, str|None, str|None, bool, str|None, str|None) -> dict
+    """
     if sinks is None:
         sinks = [store.DbSink(), store.MlflowSink()]
     checkpoint_dir = checkpoint_dir or CHECKPOINT_DIR
     log_dir = log_dir or LOG_DIR
-    # 종목별 주가 최신일 정렬 점검(2026-10-17): 소수 이탈은 그 종목 저장만 빼고 진행, 다수 이탈은 학습 전에 중단.
+    # 소수 이탈은 그 종목 저장만 빼고 진행, 다수 이탈은 학습 전에 중단.
     price_deviants = check_price_dates_aligned(tickers, end_date)["deviants"]
-    # 지수 결측이 있으면 이번 실행의 예측 전부를 input_data_suspect=True로 기록한다(2026-09-27).
+    # 지수 결측이 하나라도 있으면 이번 실행의 예측 전부를 input_data_suspect=True로 기록한다.
     input_data_suspect = any(n > 0 for n in check_market_index_freshness(end_date).values())
-    # 거시지표·KOSPI·종목 가격은 실행 시작 시 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다(2026-10-05).
+    # 거시지표·KOSPI·종목 가격은 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다.
     shared_cache = load_shared_cache(start_date, end_date)
     prices_by_ticker = load_price_cache(tickers, start_date, end_date)
     train_out = train_daily_pooled_model(tickers, start_date, end_date, train_config=train_config, shared_cache=shared_cache,

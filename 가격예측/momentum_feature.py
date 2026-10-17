@@ -1,13 +1,6 @@
-# momentum_feature.py — lag 적용 초과수익률 z(excess_return_z_lag1) 피처. 이름은 1세대("모멘텀") 시절 것이다.
-#
-# 세션에서 승인된 두 가지 해석:
-#   1) sigma_(t-1)의 window는 [t-61, ..., t-2] — t-1 자기 자신도 제외 (CLAUDE.md D-2의
-#      "sigma_t는 t 시점 미포함" 원칙을 t→t-1로 재적용).
-#   2) KOSPI는 feature_loader의 발표일 지연 조인(published_date < 거래일) 결과를 쓰지 않는다.
-#      KOSPI의 published_date = date(당일 발표, 2026-10-03부터 ECOS 802Y001)이므로,
-#      feature_loader가 반환하는 raw['KOSPI']는 이미 "d-1일자 값"이 d행에 들어가 있다.
-#      excess_return은 "같은 날 종목 대비 시장" 비교여야 하므로, market_indicators를
-#      date 기준으로 직접 재조회해 당일 실제 값으로 계산한다.
+# momentum_feature.py — 초과수익률 z의 하루 지연값(excess_return_z_lag1) 피처를 만든다(파일 이름은 옛 이름).
+# 파이프라인 단계: 피처. 주요 진입 함수: build_momentum_feature, load_true_kospi.
+# 배경: 결정기록.md의 "초과수익률 z는 당일 KOSPI를 date 기준으로 직접 조회해 계산"
 
 import sys
 
@@ -23,8 +16,11 @@ WINDOW = 60
 
 
 def load_true_kospi(start_date, end_date):
-    """market_indicators를 date 기준으로 직접 조회한다 (feature_loader의 published_date
-    지연 조인을 우회 — 당일 실제 KOSPI 값이 필요하므로)."""
+    """
+    설명: market_indicators의 KOSPI를 date(기준일) 기준으로 직접 읽어 날짜 인덱스 Series로 돌려준다.
+    주의 사항: DB 읽기. feature_loader의 published_date 지연 조인을 거치지 않은 당일 값이다.
+    입력 타입->반환 타입: (str, str) -> pd.Series
+    """
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패")
@@ -45,38 +41,28 @@ def load_true_kospi(start_date, end_date):
 
 
 def _excess_return_z(stock_cr, kospi_cr, window=WINDOW):
-    """excess_return_d, sigma_d(d 미포함 trailing), z_d를 계산한다."""
+    """
+    설명: 초과수익률, 직전 window일 표준편차(당일 제외), z를 계산한다.
+    주의 사항: 앞쪽 window일은 sigma가 NaN이라 z도 NaN이다.
+    입력 타입->반환 타입: (pd.Series, pd.Series, int) -> (pd.Series, pd.Series, pd.Series)
+    """
     excess_return = stock_cr - kospi_cr
-    # shift(1).rolling(window)는 위치 i에서 [i-window, ..., i-1] 구간을 보므로
-    # sigma_d 자신(d)은 window에서 자동으로 빠진다.
+    # shift(1).rolling(window)는 위치 i에서 [i-window, ..., i-1]을 보므로 당일 값이 sigma에서 빠진다.
     sigma = excess_return.shift(1).rolling(window, min_periods=window).std()
     z = excess_return / sigma
     return excess_return, sigma, z
 
 
 def build_momentum_feature(ticker, start_date, end_date, window=WINDOW, raw=None, true_kospi=None):
-    """target 행 t에 배치할 excess_return_z_(t-1) 피처를 계산한다.
-
-    raw(선택, 2026-09-20 추가): 호출부가 이미 계산해둔 get_features(ticker, start_date,
-    end_date) 결과를 넘기면 재계산하지 않는다 — 같은 (ticker, start_date, end_date)로 계산된
-    것이어야 한다(호출부 책임). None이면 기존과 동일하게 내부에서 계산한다.
-    true_kospi(선택, 2026-09-20 추가): load_true_kospi(start_date, end_date) 결과를 넘기면
-    재계산하지 않는다 — 종목과 무관한 값이라 100종목이 그대로 공유할 수 있다(단, start_date/
-    end_date는 이 호출과 같아야 한다). None이면 기존과 동일하게 내부에서 계산한다.
-    이 두 인자를 넘기지 않으면(둘 다 None) 이 함수의 동작은 리팩터링 이전과 완전히 동일하다.
-
-    Returns
-    -------
-    momentum : Series, index=target date t, value=z_(t-1)
-    diag : dict — 중간 산출물 (raw, true_kospi, n_missing_kospi, excess_return, sigma, z). 서빙 창은 diag["z"]의
-           마지막 값을 "다음 거래일 행"의 피처로 쓴다.
-           2026-10-17: 운영에서 쓰지 않던 "잘못된 방식"(발표일 지연 KOSPI) 비교값 계산을 지웠다.
+    """
+    설명: target 행 t에 넣을 excess_return_z_(t-1) 피처와 중간 산출물 dict(diag)를 돌려준다.
+    주의 사항: raw·true_kospi를 넘기면 다시 읽지 않으므로 같은 (ticker, start_date, end_date)로 만든 값이어야 한다.
+    입력 타입->반환 타입: (str, str, str, int, pd.DataFrame|None, pd.Series|None) -> (pd.Series, dict)
     """
     if raw is None:
         raw = get_features(ticker, start_date, end_date)
     stock_cr = raw["close"].pct_change()
 
-    # --- 올바른 방식: market_indicators를 date 기준 직접 조회 ---
     if true_kospi is None:
         true_kospi = load_true_kospi(start_date, end_date)
     kospi_aligned = true_kospi.reindex(raw.index)
