@@ -49,8 +49,3 @@ class PooledLSTMRegressor(nn.Module):
         h, _ = self.lstm(h)                                 # (B, L, hidden)
         last = h[:, -1, :]
         return self.head(self.dropout(last)).squeeze(-1)
-
-    def count_params(self):
-        total = sum(p.numel() for p in self.parameters())
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        return total, trainable

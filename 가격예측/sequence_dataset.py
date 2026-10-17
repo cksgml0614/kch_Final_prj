@@ -63,9 +63,6 @@ class FeatureScaler:
     def transform(self, X):
         return (X - self.mean_) / self.std_
 
-    def fit_transform(self, X):
-        return self.fit(X).transform(X)
-
     def save(self, path):
         """fit된 mean_/std_를 디스크에 저장한다(2026-09-06, Task T 자동화 착수) — 서빙
         시점에 학습 당시 표준화 기준을 그대로 재사용해야 한다(매 실행마다 새로 fit하면
