@@ -27,6 +27,7 @@
 
 import json
 import os
+import time
 from datetime import date, timedelta
 
 import mlflow
@@ -662,10 +663,10 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
                 "parkinson_rmse": gate["parkinson_rmse"],
                 "gate_passed": int(gate["passed"]),
             })
-            n_failed = sum(1 for v in prediction_results.values() if isinstance(v, str) and v.startswith("실패"))
-            n_success = len(prediction_results) - n_failed
+            n_success, n_failed, n_excluded = _count_prediction_results(prediction_results)
             mlflow.log_metrics({
                 "n_predictions_success": n_success, "n_predictions_failed": n_failed,
+                "n_predictions_excluded": n_excluded,
                 "n_input_suspect": n_success if input_data_suspect else 0,
             })
     except Exception as e:
@@ -713,6 +714,89 @@ def check_market_index_freshness(end_date):
     return lag
 
 
+# 종목별 주가 최신일 정렬 점검(2026-10-17). 10/13 05:02 실행이 Actions 주가 수집(05:02:58~05:07:15)과
+# 겹쳐 앞 12종목만 10/12 주가가 들어간 상태를 읽었고, 12종목은 prediction_date 10/12, 88종목은 10/08로
+# 예측했다(88종목의 10/12 기준 예측은 영영 만들어지지 않음).
+# 판정: 공통일 = 종목별 최신일(<= end_date)의 최빈값(동률이면 불일치). 이탈 종목 = 최신일이 공통일과
+# 다르거나(앞서든 뒤처지든) 가격 행이 없는 종목. 이탈이 MAX_DEVIANT_TICKERS 이하면 대기 없이 진행하되 그
+# 종목은 이번 실행에서 예측을 저장하지 않는다(학습 데이터는 그대로). 초과·동률이면 수집 진행 중일 수 있어
+# PRICE_ALIGNMENT_RETRY_INTERVAL_SEC마다 PRICE_ALIGNMENT_RETRIES번 재조회하고, 끝까지 같으면 학습 전에 중단한다.
+MAX_DEVIANT_TICKERS = 5
+PRICE_ALIGNMENT_RETRIES = 3          # 첫 조회 뒤 재조회 횟수(최대 대기 = RETRIES x INTERVAL)
+PRICE_ALIGNMENT_RETRY_INTERVAL_SEC = 300
+
+
+def summarize_price_alignment(latest_by_ticker, tickers, max_deviant=MAX_DEVIANT_TICKERS):
+    """종목별 최신일 딕셔너리를 판정한다(DB 없이 단위 확인 가능한 순수 함수).
+    반환: {"ok": 진행 가능 여부, "common_date": 최빈 최신일(동률·전부 없음이면 None),
+           "deviants": {이탈 종목: 최신일 또는 None}, "distribution": {날짜: 종목 수}, "missing": [행 없는 종목]}."""
+    missing = [t for t in tickers if latest_by_ticker.get(t) is None]
+    distribution = {}
+    for t in tickers:
+        d = latest_by_ticker.get(t)
+        if d is not None:
+            distribution[d] = distribution.get(d, 0) + 1
+    top = max(distribution.values(), default=0)
+    modes = [d for d, n in distribution.items() if n == top]
+    common_date = modes[0] if len(modes) == 1 else None
+    deviants = ({t: latest_by_ticker.get(t) for t in tickers if latest_by_ticker.get(t) != common_date}
+                if common_date is not None else {})
+    return {"ok": common_date is not None and len(deviants) <= max_deviant,
+            "common_date": common_date, "deviants": deviants,
+            "distribution": dict(sorted(distribution.items())), "missing": missing}
+
+
+def _fetch_latest_price_dates(tickers, end_date):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ticker, MAX(date) FROM daily_stock_prices "
+                "WHERE ticker = ANY(%s) AND date <= %s GROUP BY ticker",
+                (list(tickers), end_date),
+            )
+            return dict(cur.fetchall())
+
+
+def check_price_dates_aligned(tickers, end_date, retries=PRICE_ALIGNMENT_RETRIES,
+                              interval_sec=PRICE_ALIGNMENT_RETRY_INTERVAL_SEC,
+                              max_deviant=MAX_DEVIANT_TICKERS,
+                              fetch=_fetch_latest_price_dates, sleep=time.sleep):
+    """종목별 주가 최신일(<= end_date) 정렬을 점검한다(판정 규칙은 위 주석). 진행 가능하면
+    {"common_date", "deviants"}를 돌려주고, 재조회 후에도 불가하면 RuntimeError를 던진다."""
+    for attempt in range(retries + 1):
+        summary = summarize_price_alignment(fetch(tickers, end_date), tickers, max_deviant)
+        dist = ", ".join(f"{d}: {n}종목" for d, n in summary["distribution"].items())
+        if summary["ok"]:
+            deviants = summary["deviants"]
+            print(f"[PRICE-ALIGN] 공통 최신일 {summary['common_date']} — "
+                  f"{len(tickers) - len(deviants)}/{len(tickers)}종목 일치")
+            if deviants:
+                listing = ", ".join(f"{t}={d}" for t, d in deviants.items())
+                print(f"[PRICE-ALIGN] ⚠️ 이탈 {len(deviants)}종목(허용 {max_deviant}) — 이번 실행에서 예측을 "
+                      f"저장하지 않음(학습 데이터는 그대로): {listing}")
+            return {"common_date": summary["common_date"], "deviants": deviants}
+        reason = ("최빈 최신일 동률" if summary["common_date"] is None
+                  else f"이탈 {len(summary['deviants'])}종목 > 허용 {max_deviant}")
+        print(f"[PRICE-ALIGN] 주가 최신일 불일치 (조회 {attempt + 1}/{retries + 1}, {reason}) — "
+              f"분포 {{{dist}}}, 가격 없음 {len(summary['missing'])}종목 {summary['missing'][:10]}")
+        if attempt < retries:
+            print(f"[PRICE-ALIGN] {interval_sec}초 뒤 재조회합니다(수집 진행 중일 수 있음).")
+            sleep(interval_sec)
+    raise RuntimeError(
+        f"[PRICE-ALIGN] 재조회 {retries}회 후에도 종목별 주가 최신일 불일치({reason}) — 학습·예측·저장을 "
+        f"하지 않고 중단합니다. 분포 {{{dist}}}, 가격 없음 {summary['missing']}"
+    )
+
+
+def _count_prediction_results(results):
+    """종목별 결과를 (성공, 실패, 제외) 수로 센다. 성공 = dict, 실패 = "실패 ..." 문자열,
+    제외 = "제외 ..." 문자열(가격 정렬 이탈로 예측을 저장하지 않은 종목, 2026-10-17)."""
+    n_success = sum(1 for v in results.values() if isinstance(v, dict))
+    n_failed = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("실패"))
+    n_excluded = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("제외"))
+    return n_success, n_failed, n_excluded
+
+
 def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
     통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> 종목별 다음 거래일 예측(run_isolated로
@@ -742,6 +826,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     A-2(예측값 NaN/inf/음수 sanity check)는 게이트와 무관한 별개 로직이라 이번 결정과
     무관하게 그대로 유지된다. 체크포인트 저장(학습 자체가 성공했다는 기록)도 게이트와
     무관하게 항상 수행하는 기존 동작 그대로."""
+    # 종목별 주가 최신일 정렬 점검(2026-10-17): 소수 이탈은 그 종목 저장만 빼고 진행, 다수 이탈은 학습 전에 중단.
+    price_deviants = check_price_dates_aligned(tickers, end_date)["deviants"]
     # 지수 결측이 있으면 이번 실행의 예측 전부를 input_data_suspect=True로 기록한다(2026-09-27).
     input_data_suspect = any(n > 0 for n in check_market_index_freshness(end_date).values())
     # 거시지표·KOSPI·종목 가격은 실행 시작 시 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다(2026-10-05).
@@ -789,6 +875,9 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
 
     results = {}
     for ticker in tickers:
+        if ticker in price_deviants:
+            results[ticker] = f"제외 (가격 정렬 이탈, 최신일 {price_deviants[ticker]})"
+            continue
         r = run_isolated(
             predict_and_save_for_ticker, ticker, start_date, end_date,
             model, scaler, feature_cols, ticker_to_id, device, version, gate, baselines_by_ticker,
@@ -797,8 +886,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         )
         results[ticker] = r["result"] if r["status"] == "success" else f"실패 ({r['error']})"
 
-    n_failed = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("실패"))
-    print(f"\n=== 종목별 예측 결과 ({len(tickers) - n_failed}/{len(tickers)} 성공) ===")
+    n_success, n_failed, n_excluded = _count_prediction_results(results)
+    print(f"\n=== 종목별 예측 결과 ({n_success}/{len(tickers)} 성공, 실패 {n_failed}, 제외 {n_excluded}) ===")
     for ticker, r in results.items():
         print(f"  {ticker}: {r}")
     if n_failed:

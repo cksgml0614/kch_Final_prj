@@ -6,13 +6,17 @@ rem ENCODING NOTE: this file is saved as CP949 (ANSI, Korean OEM code page), NOT
 rem Do NOT add "chcp 65001" and do NOT re-save as UTF-8: after chcp 65001, cmd.exe
 rem miscomputes file offsets on lines containing multibyte UTF-8 text and starts
 rem executing fragments of later lines as commands (reproduced 2026-09-24 in a fresh
-rem cmd window). Keep all non-ASCII text limited to the module name below.
+rem cmd window). Keep all non-ASCII text limited to the module names below.
 rem PYTHONUTF8=1 makes Python write UTF-8 into the (redirected) log file regardless
 rem of the console code page, so emoji/Korean in script output do not crash.
 set PYTHONUTF8=1
 
-rem Price/indicator collection is done in the cloud (GitHub Actions,
-rem daily_data_collection.yml), so this local pipeline only trains/predicts.
+rem Price/indicator collection runs in the cloud (GitHub Actions,
+rem daily_data_collection.yml) AND locally right before the predict step (2026-10-17).
+rem The Actions start time drifts 4-9h past its 19:54 cron (observed 00:02-05:01 KST), so
+rem it often runs before ECOS publishes day-D KOSPI/KOSDAQ (estimated D+1 00:43-02:56 KST)
+rem or overlaps the 05:00 run (10/13: predict read prices mid-collection). Actions stays
+rem as a cloud backup; both collectors are incremental, so running twice is harmless.
 
 call .venv\Scripts\activate.bat
 
@@ -46,6 +50,28 @@ if errorlevel 1 (
     )
 ) else (
     echo [mlflow] already running on port 5000 >> %LOGFILE%
+)
+
+rem Local collection: stock then indicators. Neither failure stops the bat.
+rem - stock failure: logged; the price-date alignment check at the start of the predict
+rem   step decides (it aborts if per-ticker latest dates differ after retries).
+rem - indicator exit 1 is expected while the ECOS base-rate lag alarm fires; it exits only
+rem   after all upserts are committed, so KOSPI/KOSDAQ are already saved.
+echo [collect] stock collect start [%date% %time%] >> %LOGFILE%
+python -m 주가데이터.주가_일일수집 >> %LOGFILE% 2>&1
+set STOCK_RC=%errorlevel%
+if not "%STOCK_RC%"=="0" (
+    echo [collect] stock collect FAILED rc=%STOCK_RC% - continuing, price-date alignment check decides >> %LOGFILE%
+) else (
+    echo [collect] stock collect done rc=0 >> %LOGFILE%
+)
+echo [collect] indicator collect start [%date% %time%] >> %LOGFILE%
+python -m 시장지표.지표_일일수집 >> %LOGFILE% 2>&1
+set INDICATOR_RC=%errorlevel%
+if not "%INDICATOR_RC%"=="0" (
+    echo [collect] indicator collect exit rc=%INDICATOR_RC% - data already saved, continuing [lag alarm or load failure, see above] >> %LOGFILE%
+) else (
+    echo [collect] indicator collect done rc=0 >> %LOGFILE%
 )
 
 echo [predict] volatility predict start >> %LOGFILE%
