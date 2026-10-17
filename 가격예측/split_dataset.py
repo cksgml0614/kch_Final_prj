@@ -8,7 +8,6 @@ import sys
 import pandas as pd
 
 from 가격예측.dataset_builder import (
-    build_base_dataset_v2,
     build_base_dataset_v2_volatility,
     build_next_day_feature_window_volatility,
 )
@@ -23,42 +22,11 @@ VAL_RATIO = 0.15
 # TEST_RATIO는 나머지 전부 (반올림 오차를 test 쪽에 흡수)
 
 
-def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
-                            precomputed_prices=None):
-    """build_merged_dataset과 동일하나 build_base_dataset_v2(정상성 재설계 피처)를 쓴다.
-    momentum(excess_return_z_lag1)은 이미 정상성 있는 z-score라 변경 없이 그대로 재사용.
-
-    precomputed_indicators/true_kospi(선택, 2026-09-20 추가, 성능 최적화 — 100종목 pooled
-    파이프라인에서 종목과 무관한 데이터를 종목마다 재조회하던 것을 없앤다): 각각 시장지표.
-    feature_loader.load_indicator_cache(end_date) / momentum_feature.load_true_kospi(...)의
-    결과를 그대로 전달. 이전에는 이 함수가 get_features()를 build_base_dataset_v2 안에서
-    한 번, build_momentum_feature 안에서 또 한 번 — 종목당 총 두 번 호출했다. 여기서는
-    build_base_dataset_v2가 반환하는 raw를 그대로 build_momentum_feature에 넘겨 get_features
-    호출을 종목당 1회로 줄인다. 조인/계산 로직 자체는 전혀 바뀌지 않는다 — raw가 언제나
-    build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators)와 정확히
-    같은 값이기 때문(캐시가 있든 없든 get_features()의 반환값은 동일함이 캐시 추가 시점에
-    검증됨). 둘 다 None이면 기존과 완전히 동일하게 동작한다."""
-    base, raw = build_base_dataset_v2(ticker, start_date, end_date, precomputed_indicators=precomputed_indicators,
-                                      precomputed_prices=precomputed_prices)
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date, raw=raw, true_kospi=true_kospi)
-
-    merged = base.copy()
-    merged["excess_return_z_lag1"] = momentum
-    before = len(merged)
-    merged = merged.dropna(how="any")
-    after = len(merged)
-
-    return merged, {"base": base, "raw": raw, "momentum": momentum, "diag": diag,
-                     "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
-
-
 def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
                                        precomputed_prices=None):
-    """build_merged_dataset_v2의 변동성 버전(2026-09-06, Task T 변동성 예측). target이
-    |로그수익률x100|이고 피처에 recent_vol_ma20이 추가된 build_base_dataset_v2_volatility를
-    쓴다는 점만 다르다 — momentum(excess_return_z_lag1)은 방향/변동성 어느 쪽이든 "종목의
-    시장 대비 초과수익률 흐름"이라는 같은 의미의 입력 피처라 그대로 재사용한다(target 정의와
-    무관, 재계산 불필요).
+    """변동성 예측용 frame(2026-09-06): build_base_dataset_v2_volatility(target |로그수익률x100|, 피처에
+    recent_vol_ma20 포함) + excess_return_z_lag1. GARCH σ는 build_merged_dataset_v2_volatility_hybrid가 붙인다.
+    (2026-10-17: 같은 구조의 방향 예측판 build_merged_dataset_v2는 지웠다.)
 
     precomputed_indicators/true_kospi(선택, 2026-09-20): build_merged_dataset_v2와 동일한
     성능 최적화 — get_features() 종목당 중복 호출 제거. 둘 다 None이면 기존과 동일."""
@@ -75,6 +43,19 @@ def build_merged_dataset_v2_volatility(ticker, start_date, end_date, precomputed
 
     return merged, {"base": base, "raw": raw, "momentum": momentum, "diag": diag,
                      "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
+
+
+def valid_feature_dates(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
+                        precomputed_prices=None):
+    """분할 경계 기준 달력·월간 게이팅용 유효 날짜(2026-10-17) — GARCH σ를 붙이기 전 변동성 frame의 인덱스.
+    예전에는 방향 예측 frame(build_merged_dataset_v2)의 인덱스를 썼다. 두 인덱스는 momentum의 60일 창이 선행
+    결측을 가장 길게 만들어 같았고(recent_vol_ma20 20일, GARCH σ 1행), 정리 때 골든 비교로 분할 경계·게이팅
+    시퀀스 수가 같음을 확인했다. GARCH 적합이 필요 없어 train_end를 정하기 전에 부를 수 있다."""
+    merged, _ = build_merged_dataset_v2_volatility(
+        ticker, start_date, end_date, precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
+        precomputed_prices=precomputed_prices,
+    )
+    return merged.index
 
 
 def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, precomputed_sigma, garch_params,

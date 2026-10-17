@@ -49,9 +49,9 @@ from 가격예측.parkinson_baseline import compute_parkinson_vol_pct, load_high
 from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_split_dates
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import (
-    build_merged_dataset_v2,
     build_merged_dataset_v2_volatility_hybrid,
     build_next_day_merged_window_volatility_hybrid,
+    valid_feature_dates,
 )
 from 가격예측.train_common import (
     evaluate_pooled_predictions,
@@ -301,11 +301,19 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, p
 
 def load_shared_cache(start_date, end_date):
     """종목과 무관한 거시지표 9종·KOSPI 원자료를 한 번 읽어 학습·예측이 함께 쓰게 한다(2026-10-05,
-    Neon 전송량 절감). 반환 dict의 키는 build_merged_dataset_v2 계열의 키워드 인자 이름과 같다."""
+    Neon 전송량 절감). 반환 dict의 키는 split_dataset 피처 함수들의 키워드 인자 이름과 같다."""
     return {
         "precomputed_indicators": load_indicator_cache(end_date, start_date),
         "true_kospi": load_true_kospi(start_date, end_date),
     }
+
+
+def compute_split_dates(ref_ticker, start_date, end_date, shared_cache, prices):
+    """전역 train/val 분할 경계(2026-10-17 분리). 기준 종목(운영: ACTIVE_TICKERS[0])의 유효 피처 날짜
+    (split_dataset.valid_feature_dates — GARCH σ 전 변동성 frame 인덱스)로 compute_global_split_dates를 부른다.
+    예전에는 방향 예측 frame(build_merged_dataset_v2) 인덱스를 썼다(정리 골든 비교로 같은 경계 확인)."""
+    dates = valid_feature_dates(ref_ticker, start_date, end_date, **shared_cache, precomputed_prices=prices)
+    return compute_global_split_dates(dates)
 
 
 def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_cache=None, prices_by_ticker=None):
@@ -326,9 +334,8 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
     if prices_by_ticker is None:
         prices_by_ticker = load_price_cache(tickers, start_date, end_date)
 
-    ref, _ = build_merged_dataset_v2(tickers[0], start_date, end_date, **shared_cache,
-                                     precomputed_prices=prices_by_ticker[tickers[0]])
-    train_end, val_end = compute_global_split_dates(ref.index)
+    train_end, val_end = compute_split_dates(tickers[0], start_date, end_date, shared_cache,
+                                             prices_by_ticker[tickers[0]])
 
     baselines_by_ticker = {}
     for ticker in tickers:

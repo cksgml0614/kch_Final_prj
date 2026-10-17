@@ -35,8 +35,7 @@ import FinanceDataReader as fdr
 # 이 스크립트(및 월간 워크플로)가 torch·mlflow까지 import했다.
 from constants import ACTIVE_TICKERS, MIN_TRAIN_SEQUENCES, STOCK_INITIAL_LOAD_START, STOCKS
 from 가격예측.pooled_dataset import compute_global_split_dates
-from 가격예측.sequence_dataset import build_sequences, split_sequences_by_date
-from 가격예측.split_dataset import build_merged_dataset_v2
+from 가격예측.split_dataset import valid_feature_dates
 from 주가데이터.주가_공통 import _needs_initial_load, update_stock_data
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -90,18 +89,14 @@ def ensure_price_data(ticker):
 def count_train_sequences(ticker, train_end, val_end, lookback=20):
     """constants.MIN_TRAIN_SEQUENCES 게이팅을 위한 실제 train 시퀀스 수를 센다.
 
-    build_merged_dataset_v2(방향용, GARCH 적합 불필요)로 계산한다 — build_merged_dataset_v2와
-    build_merged_dataset_v2_volatility_hybrid는 momentum_feature.py의 WINDOW=60이 recent_vol_
-    ma20(20일)·garch_sigma(사실상 1행)보다 훨씬 긴 선행 결측을 만들어 momentum 쪽이 항상
-    binding constraint가 되므로, 두 데이터셋의 유효 행 수(따라서 시퀀스 수)가 항상 동일하다
-    (2026-09-07 100종목 코드 리뷰 세션에서 구조적으로 검증됨 — pooled_dataset.py의
-    train_end 일치 assert가 매 실행 통과하는 이유와 동일한 근거). GARCH 적합 없이 더 싸게
-    같은 결과를 얻기 위해 방향용 데이터셋을 쓴다."""
-    merged, _ = build_merged_dataset_v2(ticker, STOCK_INITIAL_LOAD_START, date.today().isoformat())
-    feature_cols = [c for c in merged.columns if c != "target"]
-    X, y, dates = build_sequences(merged, feature_cols, lookback)
-    splits = split_sequences_by_date(X, y, dates, train_end, val_end)
-    return len(splits["train"][0])
+    split_dataset.valid_feature_dates(GARCH σ 전 변동성 frame의 유효 날짜)로 센다 — GARCH 적합이 필요 없다.
+    학습 frame(GARCH σ 포함)과 유효 날짜가 같다(momentum 60일 창이 선행 결측을 가장 길게 만듦, pooled_dataset의
+    train_end 일치 assert가 매 실행 확인). 시퀀스 i(lookback-1 이상)의 target 날짜가 train_end 이하인 개수 =
+    sequence_dataset.build_sequences + split_sequences_by_date의 train 개수와 같다.
+    2026-10-17: 예전에는 방향 예측 frame(build_merged_dataset_v2)으로 시퀀스를 실제로 만들어 셌다."""
+    dates = valid_feature_dates(ticker, STOCK_INITIAL_LOAD_START, date.today().isoformat())
+    seq_dates = dates[lookback - 1:]
+    return int((seq_dates <= train_end).sum())
 
 
 # ── 3) constants.py 원본 텍스트 파싱/수정 ────────────────────────────────────────────
@@ -215,8 +210,8 @@ def plan_universe_update(target_size=TARGET_UNIVERSE_SIZE):
     current_by_ticker = {s.ticker: s for s in STOCKS}
     current_active = set(ACTIVE_TICKERS)
 
-    ref, _ = build_merged_dataset_v2("005930", STOCK_INITIAL_LOAD_START, date.today().isoformat())
-    train_end, val_end = compute_global_split_dates(ref.index)
+    train_end, val_end = compute_global_split_dates(
+        valid_feature_dates("005930", STOCK_INITIAL_LOAD_START, date.today().isoformat()))
 
     deactivate = []
     for ticker in current_active:

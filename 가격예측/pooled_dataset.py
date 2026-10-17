@@ -1,7 +1,7 @@
 # pooled_dataset.py — 다종목 pooled 시퀀스 구성과 전역 날짜 분할(2026-09-06, 운영 경로).
 # 2026-10-17 정리: compute_rolling_split_dates·build_pooled_sequences_with_split(진단·검증용)을 지웠다.
 #
-# 종목별 V2 피처(build_merged_dataset_v2)를 각자 독립적으로 계산한 뒤, 종목별 lookback
+# 종목별 피처 frame(호출부가 넘기는 build_fn, 운영은 GARCH σ 포함 15피처)을 각자 독립적으로 계산한 뒤, 종목별 lookback
 # 시퀀스를 만들고(시퀀스 내부는 항상 한 종목의 연속 구간만 사용 — 종목 경계를 넘지 않음),
 # 전 종목 공유 캘린더 기준 날짜 컷으로 train/val/test를 나눠 하나의 pooled 모집단으로 합친다.
 #
@@ -21,7 +21,7 @@ import pandas as pd
 
 from 가격예측.momentum_feature import load_true_kospi
 from 가격예측.sequence_dataset import build_sequences, split_sequences_by_date
-from 가격예측.split_dataset import TRAIN_RATIO, VAL_RATIO, build_merged_dataset_v2
+from 가격예측.split_dataset import TRAIN_RATIO, VAL_RATIO
 from 시장지표.feature_loader import load_indicator_cache
 
 
@@ -53,14 +53,12 @@ def _build_fn_accepts_shared_cache(build_fn):
     return "precomputed_indicators" in params and "true_kospi" in params
 
 
-def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=build_merged_dataset_v2,
+def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=None,
                            shared_cache=None):
-    """종목별 V2 피처 계산 + 종목별 시퀀스 구성 + 전역 날짜 컷 분할 + pooling.
+    """종목별 피처 계산 + 종목별 시퀀스 구성 + 전역 날짜 컷 분할 + pooling.
 
-    build_fn: 종목 하나의 (merged, meta)를 반환하는 함수(기본 build_merged_dataset_v2, 방향
-    예측용). 2026-09-06 변동성 예측 실험에서 build_merged_dataset_v2_volatility를 넘겨
-    재사용할 수 있도록 매개변수화했다 — 기본값을 그대로 두면 기존 호출부(가격예측_통합모델.py,
-    test_evaluation_pooled.py)는 동작이 전혀 바뀌지 않는다.
+    build_fn(필수): 종목 하나의 (merged, meta)를 반환하는 함수. 운영은 가격예측_변동성_공통의 hybrid_build_fn
+    (build_merged_dataset_v2_volatility_hybrid). 2026-10-17: 기본값(방향 예측 build_merged_dataset_v2)을 지웠다.
 
     shared_cache(선택, 2026-10-05): {"precomputed_indicators": load_indicator_cache(...),
     "true_kospi": load_true_kospi(start_date, end_date)}를 호출부가 이미 로드했으면 그대로 넘긴다
@@ -80,6 +78,8 @@ def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=
     """
     if not tickers:
         raise ValueError("tickers가 비어있음")
+    if build_fn is None:
+        raise ValueError("build_fn은 필수다")
 
     ticker_to_id = {t: i for i, t in enumerate(tickers)}
     merged_by_ticker = {}
@@ -139,25 +139,3 @@ def build_pooled_sequences(tickers, start_date, end_date, lookback=20, build_fn=
         )
 
     return splits, feature_cols, ticker_to_id, (train_end, val_end)
-
-
-if __name__ == "__main__":
-    import sys
-
-    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-    from constants import ACTIVE_TICKERS, STOCK_INITIAL_LOAD_START
-    from datetime import date
-
-    splits, feature_cols, ticker_to_id, (train_end, val_end) = build_pooled_sequences(
-        ACTIVE_TICKERS, STOCK_INITIAL_LOAD_START, date.today().isoformat(), lookback=20
-    )
-    print(f"종목 {len(ACTIVE_TICKERS)}개: {ticker_to_id}")
-    print(f"전역 분할 경계: train_end={train_end.date()}  val_end={val_end.date()}")
-    print(f"feature_cols({len(feature_cols)}개): {feature_cols}")
-    for name, (X, y, tid, d, tname) in splits.items():
-        print(f"\n[{name}] X{X.shape} y{y.shape}  종목별 시퀀스 수:")
-        for ticker, idx in ticker_to_id.items():
-            n = int((tid == idx).sum())
-            print(f"  {ticker}: {n}개")
