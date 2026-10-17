@@ -5,10 +5,16 @@
 import torch
 import torch.nn as nn
 
+# 모델 계열 이름(2026-10-17 LSTM 단일화). 두 문자열은 체크포인트 meta.json의 model_class, model_registry.model_family/
+# model_class, MLflow 태그 model_family·파라미터 MODEL_ARCHITECTURE/model_class에 그대로 기록된다 — 바꾸지 말 것.
+# 2026-09-27 transformer -> lstm 전환(사람 결정), 2026-10-17 Transformer 학습 코드·MODEL_ARCHITECTURE 환경변수 삭제.
+MODEL_FAMILY = "lstm"
+MODEL_CLASS_NAME = "PooledLSTMRegressor"
+
 
 class PooledLSTMRegressor(nn.Module):
     """다종목 pooled LSTM 모델(2026-09-27, 지도교수님 피드백 — "수치형 시계열은 수치형답게
-    다루는 모델" 검토 트랙). PooledTransformerRegressor와 아키텍처만 다르고 나머지 조건(피처,
+    다루는 모델" 검토 트랙). 당시 PooledTransformerRegressor(2026-10-17 삭제)와 아키텍처만 다르고 나머지 조건(피처,
     split, 학습 루프)은 동일하게 두어 "아키텍처만 바꿨을 때의 효과"를 순수하게 비교하기 위한
     클래스다.
 

@@ -1,15 +1,12 @@
-# train_common.py — 운영 pooled LSTM 변동성 모델의 학습 루프·배포 게이트·체크포인트 저장·예외 격리.
+# train_common.py — 학습 단계: 운영 pooled LSTM 변동성 모델의 학습 설정(TrainConfig)과 학습 루프(train_model).
 #
 # 2026-10-17 정리: Transformer 계열(TransformerRegressor/PooledTransformerRegressor 학습), 1세대 단일 종목
 # 방향 예측 유틸(train_transformer, 방향 게이트, confusion 등), 급변 구간 손실 실험(가중 MSE·pinball),
-# load_checkpoint를 지웠다. 지운 코드는 git 태그 pre-cleanup 시점에 있다.
+# load_checkpoint를 지웠다(git 태그 pre-cleanup 시점에 있음). 배포 게이트·val 예측 평가는 evaluate.py로,
+# 체크포인트 저장·예외 격리(run_isolated)는 store.py로 옮겼다.
 
-import json
-import os
 import random
-import traceback
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 import numpy as np
 import torch
@@ -45,102 +42,6 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-# ── 변동성 예측 배포 게이트 (2026-09-06) ──
-
-def passes_deployment_gate_volatility(hybrid_rmse, garch_rmse, sma_rmse, parkinson_rmse):
-    """하이브리드(GARCH σ 피처 + LSTM) 변동성 예측 배포 게이트 — 하이브리드 RMSE가 GARCH(1,1)·
-    SMA20·Parkinson-SMA20 baseline **셋 다**보다 낮아야(개선돼야) 통과한다.
-
-    2026-09-07 확정(100종목 검증 세션): 50종목 검증까지는 GARCH·SMA20 둘만 기준이었으나
-    (Parkinson-SMA20은 "비교 대상 포함 여부"가 다음 세션 결정 사항으로 남아있었음), 100종목
-    확장 검증에서 하이브리드가 종목평균 제거 후 지표 기준으로 Parkinson-SMA20까지 셋 다
-    이기는 것을 확인해(결과_TaskT_변동성예측_최종.md) 세 번째 baseline으로 정식 포함시켰다.
-    이전 시그니처(garch_rmse, sma_rmse 2개)를 호출하는 코드는 없음을 확인 후 하위호환 없이
-    바로 확장(2026-09-07 grep 확인 — 이 함수의 실제 호출부가 아직 없었음).
-
-    네 RMSE는 호출부가 동일한 held-out(val) 구간·동일한 실현 변동성 정의(|로그수익률x100|)로
-    미리 계산해서 넘겨야 한다 — 이 함수 자체는 비교만 한다."""
-    beats_garch = hybrid_rmse < garch_rmse
-    beats_sma = hybrid_rmse < sma_rmse
-    beats_parkinson = hybrid_rmse < parkinson_rmse
-    return {
-        "hybrid_rmse": hybrid_rmse, "garch_rmse": garch_rmse, "sma_rmse": sma_rmse,
-        "parkinson_rmse": parkinson_rmse,
-        "beats_garch": beats_garch, "beats_sma": beats_sma, "beats_parkinson": beats_parkinson,
-        "passed": beats_garch and beats_sma and beats_parkinson,
-    }
-
-
-# ── 모델 체크포인트 저장/로드 (신규, 2026-09-06 — Task T 자동화 착수) ──────────────
-#
-# 이전에는 어떤 스크립트도 torch.save를 호출하지 않았다(best_state를 메모리에만 들고
-# 있다가 평가 후 버림 — 가격예측/checkpoints/에 진단용 png 3개만 있고 .pt 파일이 전혀
-# 없었음을 실측 확인). 버전 디렉터리(날짜+시각 기반)를 매번 새로 만들어 이전 버전을
-# 덮어쓰지 않는다(롤백 가능) — latest.txt 텍스트 파일로 최신 버전을 가리킨다
-# (심볼릭 링크는 Windows 권한 문제가 있을 수 있어 피함 — huggingface_hub 캐시가 이
-# 프로젝트 환경에서 심링크 미지원 경고를 냈던 선례 참고).
-
-def save_checkpoint(model, scaler, feature_cols, model_kwargs, checkpoint_dir, version=None,
-                     extra_meta=None, model_class_name=None):
-    """model.state_dict() + FeatureScaler + 피처 목록 + 모델 하이퍼파라미터 + 메타데이터를
-    버전 디렉터리(checkpoint_dir/<version>/)에 저장한다. version 생략 시 UTC 날짜+시각
-    (YYYYMMDD_HHMMSS)으로 자동 태깅 — 같은 날 여러 번 실행해도 초 단위까지 있어 겹치지 않는다.
-    model_class_name 생략 시 model의 실제 클래스 이름을 자동으로 기록한다.
-    반환: 저장된 version 문자열."""
-    if version is None:
-        version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    version_dir = os.path.join(checkpoint_dir, version)
-    os.makedirs(version_dir, exist_ok=True)
-
-    torch.save(model.state_dict(), os.path.join(version_dir, "model.pt"))
-    scaler.save(os.path.join(version_dir, "scaler.npz"))
-
-    meta = {
-        "version": version,
-        "feature_cols": list(feature_cols),
-        "model_kwargs": model_kwargs,
-        "model_class": model_class_name or type(model).__name__,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
-    }
-    if extra_meta:
-        meta.update(extra_meta)
-    with open(os.path.join(version_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    with open(os.path.join(checkpoint_dir, "latest.txt"), "w", encoding="utf-8") as f:
-        f.write(version)
-
-    return version
-
-
-# ── 무인 실행 예외 격리 (신규, 2026-09-06) ────────────────────────────────────
-#
-# 다른 트랙(주가_일일수집.py 등)의 원칙과 동일: 예외를 print만 하고 삼키지 않는다.
-# 종목 단위로 격리해 하나가 실패해도 나머지가 계속 진행되게 하되, 실패는 콘솔 + 로그
-# 파일에 traceback까지 명확히 남긴다(그냥 죽지도, 조용히 삼키지도 않음).
-
-def run_isolated(fn, *args, label="", log_dir=None, **kwargs):
-    """fn(*args, **kwargs)을 실행하고 성공/실패를 status dict로 반환한다. 예외가 나면
-    traceback을 콘솔에 출력하고(log_dir이 주어지면 파일로도 저장) 예외를 다시 던지지
-    않는다 — 호출부(오케스트레이션 스크립트의 종목별 루프)가 다음 항목을 계속 처리할 수 있다.
-
-    반환: {"label", "status"("success"/"failed"), "result", "error", "traceback"}"""
-    try:
-        result = fn(*args, **kwargs)
-        return {"label": label, "status": "success", "result": result, "error": None, "traceback": None}
-    except Exception as e:
-        tb = traceback.format_exc()
-        print(f"❌ [{label}] 실패: {e}")
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            log_path = os.path.join(log_dir, f"error_{label}_{ts}.log")
-            with open(log_path, "w", encoding="utf-8") as f:
-                f.write(tb)
-            print(f"   상세 로그: {log_path}")
-        return {"label": label, "status": "failed", "result": None, "error": str(e), "traceback": tb}
-
-
 # ── Pooled(다종목) 학습/평가 루프 (2026-09-06) — 배치마다 (x, y, ticker_ids), 모델 호출은 model(x, ticker_ids) ──
 
 def make_pooled_loader(X, y, ticker_ids, batch_size, shuffle):
@@ -163,18 +64,6 @@ def run_pooled_epoch(model, loader, criterion, optimizer, device, train_mode):
             total_loss += loss.item() * len(xb)
             n += len(xb)
     return total_loss / n
-
-
-def evaluate_pooled_predictions(model, loader, device):
-    model.eval()
-    preds, actuals, tids = [], [], []
-    with torch.no_grad():
-        for xb, yb, tid in loader:
-            xb, tid = xb.to(device), tid.to(device)
-            preds.append(model(xb, tid).cpu().numpy())
-            actuals.append(yb.numpy())
-            tids.append(tid.cpu().numpy())
-    return np.concatenate(preds), np.concatenate(actuals), np.concatenate(tids)
 
 
 # ── 학습 루프 (2026-10-17 단일화: 옛 train_pooled_lstm과 같은 연산 순서) ──────────────────────
@@ -253,4 +142,3 @@ def train_model(X_train, y_train, tid_train, X_val, y_val, tid_val, num_stocks, 
         "val_loader": val_loader,
         "overfit_ratio_at_end": last_val_loss / last_train_loss if last_train_loss > 0 else float("inf"),
     }
-
