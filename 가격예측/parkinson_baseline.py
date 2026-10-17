@@ -1,8 +1,8 @@
 # parkinson_baseline.py — Parkinson(고가-저가 범위) 변동성 추정량 계산(2026-09-06, 원래
 # parkinson_volatility_check.py). recent_vol_ma20/GARCH σ보다 유용한 정보를 주는지 검증한
-# 실험(build_test_frame/main)은 검증용/parkinson_baseline_check.py로 분리됐다(2026-09-12,
-# 가격예측/ 활성·검증 재분리) — 그 검증 결과 Parkinson-SMA20이 GARCH·SMA20을 이기는 유일한
-# baseline으로 확인돼(결과_TaskT_변동성예측_최종.md), 아래 두 함수 + PARK_WINDOW가
+# 실험(build_test_frame/main)은 pre-cleanup 태그 시점의 검증용/parkinson_baseline_check.py로 분리됐었다(2026-09-12,
+# 가격예측/ 활성·검증 재분리, 2026-10-17 삭제) — 그 검증 결과 Parkinson-SMA20이 GARCH·SMA20을 이기는 유일한
+# baseline으로 확인돼(pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md), 아래 두 함수 + PARK_WINDOW가
 # 가격예측_변동성_공통.py의 활성 피처 계산에 쓰인다.
 #
 # ⚠️ 리크 방지 설계: Parkinson 추정량 자체(parkinson_vol(t), high(t)/low(t) 사용)는 t일

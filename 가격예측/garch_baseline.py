@@ -28,8 +28,8 @@
 #     동일함을 이미 실측 확인)를 그대로 재사용해 Transformer 실험과 조건을 맞췄다.
 #
 # 2026-09-12(가격예측/ 활성·검증 재분리): 운영 파이프라인이 쓰지 않는 fit_and_forecast_garch()/
-# compute_full_period_sigma()/main()은 검증용/garch_baseline_check.py로 분리했다(값 변경 없음).
-# 이 파일에는 활성 파이프라인(가격예측_변동성_공통.py)이 실제로 쓰는 함수만 남는다.
+# compute_full_period_sigma()/main()은 검증용/garch_baseline_check.py로 분리했다(값 변경 없음 — 그 파일은
+# 2026-10-17 정리에서 삭제, pre-cleanup 태그 시점에 있음). 이 파일에는 운영 파이프라인이 실제로 쓰는 함수만 남는다.
 
 import sys
 
@@ -91,7 +91,7 @@ def forecast_with_fixed_params(returns, params, start_pos):
     함수 출력[i]가 수작업 재귀식의 (k+i+1) 위치 값과 정확히 일치하고 (k+i) 위치 값과는
     불일치함). 이전 코드는 이 행을 그대로 index[k+i]에 라벨링해 "t 시점 예측이 t 자신의
     수익률을 사용"하는 명백한 미래 정보 누수였다 — 이 버그가 하이브리드 Transformer의
-    garch_sigma 피처, GARCH baseline 자체의 test 평가, 조기경보 검증(`결과_변동성_조기경보_
+    garch_sigma 피처, GARCH baseline 자체의 test 평가, 조기경보 검증(pre-cleanup 태그 시점의 `결과_변동성_조기경보_
     검증.md`)에 전부 영향을 미쳤다(상세 재검증·수정 결과는 해당 문서 갱신판 참고).
 
     수정: 원시 출력 행 i를 실제 의미에 맞는 날짜 index[start_pos+i+1]로 재라벨링한다. 배열
@@ -110,6 +110,13 @@ def forecast_with_fixed_params(returns, params, start_pos):
     keep = target_positions < len(returns)
     dates = returns.index[target_positions[keep]]
     return pd.Series(sigma_raw[keep], index=dates)
+
+
+def garch_sigma_series(returns, params):
+    """고정 params로 전체 구간 GARCH σ(라벨 t = returns t-1까지로 낸 t 예측)를 재귀 계산한다 — 학습 frame과
+    서빙 창이 함께 쓰는 단일 경로(2026-10-17). forecast_with_fixed_params(start_pos=0)과 같다(서빙이 예전에 쓰던
+    start_pos=target_pos-1과도 값이 같음을 정리 전 점검에서 5종목x20일로 확인, 최대 차 0.0)."""
+    return forecast_with_fixed_params(returns, params, 0)
 
 
 def forecast_next_day_sigma(returns, params):

@@ -1,14 +1,16 @@
 # 가격예측_변동성_공통.py
-# Task T 100종목 검증된 하이브리드(GARCH+Transformer) 변동성 예측 자동화 파이프라인 —
-# 데이터 로드~피처 생성~학습~배포 게이트~다음 거래일 예측 공용 로직(2026-09-07 신규 작성).
+# 하이브리드(GARCH σ 피처 + pooled LSTM) 변동성 예측 일일 파이프라인의 오케스트레이터와 설정(2026-09-07 신규 작성).
 #
-# 배경: 결과_TaskT_변동성예측_최종.md의 100종목 검증(원본·종목평균 제거 지표 둘 다 GARCH·
+# 단계(2026-10-17 정리): 수집(주가데이터/·시장지표/, 이 파일 밖) -> 입력 점검(이 파일: 가격 정렬·지수 신선도)
+# -> 피처(dataset_builder·momentum_feature·split_dataset, GARCH σ·baseline은 이 파일의 compute_ticker_baselines)
+# -> 학습(train_common.train_model) -> 평가(evaluate.evaluate_gate) -> 저장+예측(store: 체크포인트·registry·
+# model_predictions·MLflow). run_pooled_volatility_pipeline은 이 단계를 순서대로 부르는 얇은 함수다.
+#
+# 배경: pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md의 100종목 검증(원본·종목평균 제거 지표 둘 다 GARCH·
 # SMA20·Parkinson-SMA20 셋을 이김, N=5 셔플 격차 90~120σ)을 그대로 운영 파이프라인으로
-# 옮긴다. 하이퍼파라미터·게이트 기준의 정본은 가격예측/test_evaluation_pooled100_hybrid.py다
-# — 이 파일의 상수들은 그 검증 스크립트 값을 그대로 가져온 것이며, 검증 재현성을 위해
-# 임의로 바꾸지 않는다.
+# 옮겼다(검증 정본은 pre-cleanup 태그 시점의 가격예측/검증용/test_evaluation_pooled100_hybrid.py).
 #
-# 방향예측 파이프라인(쓰래기통/가격예측_공통.py, 가격예측_통합모델.py — 둘 다 폐기)과의 관계:
+# 방향예측 파이프라인(pre-cleanup 태그 시점의 가격예측_공통.py·가격예측_통합모델.py — 둘 다 폐기)과의 관계:
 #   - "공통/일일수집" 파일 분리, run_isolated를 통한 종목별 예측 격리, next_weekday() 근사,
 #     save_checkpoint 버전 태깅은 그대로 계승했다.
 #   - pooled(전 종목 통합) 학습이라 종목별 격리가 원천적으로 불가능하다는 점도 가격예측_
@@ -22,250 +24,112 @@
 # garch_params 인자는 2026-09-06에 정확히 이 캐싱 용도로 이미 만들어져 있었다(당시엔 실제
 # 호출부가 없었음 — 이 파일이 최초 호출부다). 종목당 GARCH MLE 적합(arch_model.fit())은
 # 비용이 커서 매일 100종목분을 재추정하면 낭비이므로, (omega, alpha, beta)만 파일 캐시에
-# 남기고 재귀적 σ 계산(forecast_with_fixed_params, 비용이 훨씬 작음)은 매일 최신 가격 이력
+# 남기고 재귀적 σ 계산(garch_sigma_series, 비용이 훨씬 작음)은 매일 최신 가격 이력
 # 전체에 대해 새로 돌린다.
 
 import json
 import os
 import time
-from datetime import date, timedelta
+from datetime import date
 
-import mlflow
 import numpy as np
 import pandas as pd
-import requests
 import torch
 from arch import arch_model
 
-from config import redact
+from constants import MIN_TRAIN_SEQUENCES
 from db_manager import get_db_connection
+from 가격예측 import store
+from 가격예측.evaluate import evaluate_gate
 from 가격예측.garch_baseline import (
-    compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
-    forecast_with_fixed_params, load_close_prices, rmse_mae,
+    SMA_WINDOW, compute_log_returns_pct, compute_sma_baseline, forecast_next_day_sigma,
+    garch_sigma_series, load_close_prices, rmse_mae,
 )
 from 가격예측.momentum_feature import load_true_kospi
 from 가격예측.parkinson_baseline import compute_parkinson_vol_pct, load_high_low, PARK_WINDOW
 from 가격예측.pooled_dataset import build_pooled_sequences, compute_global_split_dates
 from 가격예측.sequence_dataset import FeatureScaler
 from 가격예측.split_dataset import (
-    build_merged_dataset_v2,
     build_merged_dataset_v2_volatility_hybrid,
-    build_next_day_merged_window_volatility_hybrid,
+    valid_feature_dates,
 )
-from 가격예측.train_common import (
-    evaluate_pooled_predictions,
-    passes_deployment_gate_volatility,
-    run_isolated,
-    save_checkpoint,
-    train_pooled_lstm,
-    train_pooled_transformer,
-)
+from 가격예측.model import MODEL_CLASS_NAME
+from 가격예측.train_common import TrainConfig, train_model
 from 시장지표.feature_loader import load_indicator_cache, load_price_cache
 
 LOOKBACK = 20
 
-# test_evaluation_pooled100_hybrid.py(100종목 검증 정본)와 완전히 동일한 하이퍼파라미터 —
-# 배포 모델이 검증된 설정과 달라지면 검증 결과가 더 이상 이 모델을 대변하지 못하므로 값을
-# 절대 바꾸지 않고 그대로 가져온다.
-D_MODEL = 32
-NHEAD = 2
-NUM_LAYERS = 2
-DIM_FEEDFORWARD = 64
-DROPOUT = 0.3
-BATCH_SIZE = 32
-LR = 1e-3
-WEIGHT_DECAY = 1e-4
-SMOKE_EPOCHS = 2
-MAX_EPOCHS = 60
-PATIENCE = 8
-SEED = 42
-EMBEDDING_DIM = 20  # test_evaluation_pooled100_hybrid.EMBEDDING_DIM_100과 동일값.
-# ⚠️ 종목 수(현재 100)가 크게 달라지면(종목_월간갱신.py 누적 결과) 이 값의 적정성도 사람이
+# 학습 하이퍼파라미터는 train_common.TrainConfig(2026-10-17, 모듈 상수에서 설정 객체로). 기본값은 운영값 그대로다
+# (hidden 32·2층·dropout 0.3·embedding 20·batch 32·lr 1e-3·wd 1e-4·smoke 2·max 60·patience 8·seed 42).
+# 쓰지 않던 Transformer 전용 값(NHEAD=2, DIM_FEEDFORWARD=64)은 지웠다.
+# ⚠️ 종목 수(현재 100)가 크게 달라지면(종목_월간갱신.py 누적 결과) embedding_dim의 적정성도 사람이
 # 재검토해야 한다 — 자동으로 재조정되지 않는다.
+DEFAULT_TRAIN_CONFIG = TrainConfig()
 
 # GARCH 파라미터를 이 일수 이내에 이미 재추정했으면 캐시를 그대로 재사용(월 1회 재추정 원칙,
 # 위 헤더 설명 참고).
 GARCH_REFIT_MAX_AGE_DAYS = 30
 
-# ── 아키텍처 스위치 (2026-09-24, LSTM/GAF+CNN 등 향후 아키텍처 추가 대비 구조만 마련) ──
-# "lstm"(2026-09-27부터 기본값) + "transformer". MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
-# 고르는 자리를 미리 만들어둔다. 새 아키텍처를 추가할 때 손대야 하는 곳은 이 세 곳뿐이다:
-#   1) train_common.py에 그 아키텍처용 train_pooled_<arch>() 학습 함수 추가 — 시그니처와
-#      반환값(dict: model/history/best_epoch/best_val_loss/val_loader/overfit_ratio_at_end)을
-#      train_pooled_transformer()와 동일하게 맞추고, 모델의 forward(x, ticker_ids)도 동일
-#      인터페이스를 지켜야 한다(predict_and_save_for_ticker가 이 인터페이스로 범용 호출한다).
-#   2) model.py에 Pooled<Arch>Regressor 클래스 추가 + train_common._MODEL_CLASSES에 등록
-#      (지금은 daily 파이프라인이 "매일 전체 재학습" 원칙이라 load_checkpoint()를 안 거치지만,
-#      나중에 체크포인트를 불러와 쓰는 경로가 생기면 이 등록이 필요해진다)
-#   3) 아래 _ARCHITECTURES에 항목 추가
-# 하이퍼파라미터 블록(D_MODEL 등)은 지금은 transformer 전용이라 그대로 둔다 — 아키텍처마다
-# 하이퍼파라미터 셋이 달라지면 그때 _ARCHITECTURES 항목별로 분리한다.
-# 2026-09-27 기본값 transformer -> lstm 전환(사람 결정, 지도교수님 피드백 "수치형 시계열은 수치형답게").
-# 근거: 대칭 게이트 기준 LSTM seed 42/43/44 = 1.9643/1.9666/1.9680으로 3 seed 전부 통과, Transformer(1.9594)와
-# 동급. Transformer로 되돌리려면 환경변수 MODEL_ARCHITECTURE=transformer.
-MODEL_ARCHITECTURE = os.environ.get("MODEL_ARCHITECTURE", "lstm").strip().lower()
 
-_ARCHITECTURES = {
-    "transformer": {
-        "model_class_name": "PooledTransformerRegressor",
-        "train_fn": train_pooled_transformer,
-    },
-    # 2026-09-27: LSTM 등록(아키텍처 비교 트랙). 하이퍼파라미터 블록은 그대로 공유 — D_MODEL은
-    # hidden_size, NUM_LAYERS는 LSTM 층 수로 해석되고 NHEAD/DIM_FEEDFORWARD는 무시된다(train_
-    # common.train_pooled_lstm 위 주석 참고).
-    "lstm": {
-        "model_class_name": "PooledLSTMRegressor",
-        "train_fn": train_pooled_lstm,
-    },
-}
-
-
-def _get_architecture_config(name):
-    if name not in _ARCHITECTURES:
-        raise ValueError(
-            f"알 수 없는 MODEL_ARCHITECTURE={name!r} (지원: {list(_ARCHITECTURES)})"
-        )
-    return _ARCHITECTURES[name]
-
-
-# 이 pooled 모델이 종목 하나를 학습에 포함시키기 위한 최소 train 시퀀스 수. 2026-09-07 100종목
-# 확장 세션 실측 기준: 443060(HD현대마린솔루션, 실제 train 시퀀스 13개)은 그대로 포함해도
-# 문제가 없었고, 0126Z0/064400(train 0개)은 애초에 종목 리스트에서 제외했다 — "13은 포함,
-# 0은 제외"라는 그 경계 사이에서 여유를 두고 10으로 정했다. 종목_월간갱신.py의 신규 진입
-# 게이팅이 이 상수를 그대로 가져다 쓴다(단일 출처 유지).
-MIN_TRAIN_SEQUENCES = 10
+# MIN_TRAIN_SEQUENCES(최소 train 시퀀스 수)는 2026-10-17부터 constants.py에 있다 — 종목_월간갱신.py가 이 상수
+# 하나 때문에 이 모듈(torch·mlflow)을 import하지 않게 하려고 옮겼다. 값과 근거는 constants.py 참고.
 
 _HERE = os.path.dirname(__file__)
 CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints", "pooled_volatility_hybrid")
-# ⚠️ 8종목 시절 방향예측 pooled 모델의 checkpoints/pooled/ 와는 다른 별도 디렉터리다 — 같은
-# 곳을 쓰면 model_class는 같지만(PooledTransformerRegressor) feature_cols(13 vs 15)와
-# embedding_dim이 달라 load_checkpoint()가 latest.txt로 엉뚱한 모델을 집어올 위험이 있다.
+# (8종목 시절 방향예측 pooled 모델의 checkpoints/pooled/ 와는 다른 디렉터리다. 운영 경로는 run_pooled_volatility_pipeline의
+# checkpoint_dir·garch_cache_dir·log_dir 인자로 바꿀 수 있다 — 기본값이 아래 세 상수다.)
 GARCH_PARAM_CACHE_DIR = os.path.join(_HERE, "checkpoints", "garch_params")
 LOG_DIR = os.path.join(_HERE, "logs")
 
-# MLflow 일일 자동화 로깅 (2026-09-14 신규). 자동화 스크립트는 서버와 같은 컴퓨터에서
-# 돌기 때문에 기본값은 127.0.0.1이다. 2026-10-11부터 서버를 127.0.0.1에만 바인딩하므로
-# (mlflow_server_start.bat) 다른 기기에서는 UI에 접속할 수 없다 — 원격 조회가 필요하면 인증을
-# 갖춘 터널을 따로 검토한다. 환경변수로 덮어쓸 수 있게 해 서버 위치가 바뀌어도 코드 수정 없이
-# 대응 가능하게 함.
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-MLFLOW_EXPERIMENT_NAME = "일일_자동화"
-# 2026-10-11: 로깅 직전 서버 확인 타임아웃(초). 서버가 없거나 멈췄으면 기록을 건너뛴다(_log_mlflow_run).
-MLFLOW_HEALTH_TIMEOUT_SEC = 3
-# MLflow HTTP 재시도 상한(setdefault — 사람이 환경변수로 덮어쓸 수 있다). MLflow 기본값(재시도 7, 대기 계수 2,
-# 타임아웃 120초)이면 서버가 없을 때 약 4분 24초(2026-10-11 실측), 멈췄을 때 약 20분(추정)을 기다린다.
-MLFLOW_HTTP_LIMITS = {
-    "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "3",
-    "MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR": "1",
-    "MLFLOW_HTTP_REQUEST_TIMEOUT": "15",
-}
 
-# 2026-10-11: 체크포인트를 저장한 직후 그 version을 model_registry에 등록한다(_register_model_version).
-# 일일 경로 전용 값이다. 백테스트 분리 때는 source를 인자로 받게 바꾼다(백테스트_월간.py는 지금 실행 금지).
-# 끄려면 환경변수 MODEL_REGISTRY_AUTO=0.
-REGISTRY_SOURCE = "live"
-REGISTRY_GATE_DEFINITION = "tickermean"
-REGISTRY_MISSING_SHOW = 10  # [REGISTRY-MISSING] 줄에 보여줄 최대 version 수
-
-
-def _register_model_version(version):
-    """체크포인트 meta.json으로 model_registry에 1행을 INSERT ... ON CONFLICT DO NOTHING 한다(2026-10-11).
-    이어서 로컬 체크포인트 version과 model_predictions의 version 중 registry에 없는 것을 찾아 경고한다
-    (자동 보충 등록은 하지 않는다 — 시험 실행 체크포인트를 'live'로 잘못 넣을 수 있어 사람이 보고 넣는다).
-    부가 기록이라 실패해도 예외를 던지지 않는다. 줄 맨 앞 [REGISTRY-SKIP]을 붙인 경고만 남기고 돌아간다.
-    경고에는 예외 클래스명만 넣고(원문에 접속 정보가 섞일 수 있음), 출력 전에 redact를 거친다."""
-    try:
-        if os.environ.get("MODEL_REGISTRY_AUTO", "1") == "0":
-            print(f"[REGISTRY-OFF] model_registry 자동 등록 꺼짐(MODEL_REGISTRY_AUTO=0) — version {version} 등록 안 함")
-            return
-        with open(os.path.join(CHECKPOINT_DIR, version, "meta.json"), encoding="utf-8") as f:
-            meta = json.load(f)
-        family = next(k for k, v in _ARCHITECTURES.items() if v["model_class_name"] == meta["model_class"])
-        row = (version, family, meta["model_class"], "checkpoint_meta", REGISTRY_SOURCE, REGISTRY_GATE_DEFINITION,
-               meta["train_end"], meta["split_train_end"], meta["split_val_end"], meta["n_train"])
-        local_versions = {d for d in os.listdir(CHECKPOINT_DIR)
-                          if os.path.isfile(os.path.join(CHECKPOINT_DIR, d, "meta.json"))}
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO model_registry (model_version, model_family, model_class, family_basis, source, "
-                    "gate_definition, train_end, split_train_end, split_val_end, n_train) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (model_version) DO NOTHING", row)
-                inserted = cur.rowcount
-                cur.execute("SELECT model_version FROM model_registry")
-                registered = {r[0] for r in cur.fetchall()}
-                cur.execute("SELECT DISTINCT model_version FROM model_predictions")
-                predicted = {r[0] for r in cur.fetchall()}
-            conn.commit()
-        print(f"[registry] {version} {'신규 등록' if inserted == 1 else '이미 등록돼 있음'}({family})")
-        missing = sorted((local_versions | predicted) - registered)
-        if missing:
-            shown = ", ".join(missing[:REGISTRY_MISSING_SHOW]) + (" …" if len(missing) > REGISTRY_MISSING_SHOW else "")
-            print(f"[REGISTRY-MISSING] ⚠️ model_registry에 없는 version {len(missing)}개: {shown}")
-    except Exception as e:
-        print(redact(f"[REGISTRY-SKIP] ⚠️ model_registry 등록 실패({type(e).__name__}) — 예측·저장은 계속된다. "
-                     f"version {version}은 registry에 없으므로 수동 등록이 필요하다."))
-
-
-def _mlflow_health_problem(uri):
-    """MLflow 서버 /health를 MLFLOW_HEALTH_TIMEOUT_SEC 안에 확인한다(2026-10-11). 정상(HTTP 200)이면 None,
-    아니면 원인 요약(예외 클래스명 또는 HTTP 상태)을 돌려준다. URL·예외 원문은 돌려주지 않는다."""
-    try:
-        r = requests.get(uri.rstrip("/") + "/health", timeout=MLFLOW_HEALTH_TIMEOUT_SEC)
-    except requests.RequestException as e:
-        return type(e).__name__
-    return None if r.status_code == 200 else f"HTTP {r.status_code}"
-
-
-def _model_kwargs(num_stocks):
-    # 체크포인트 meta에 저장돼 load_checkpoint()가 cls(**model_kwargs)로 그대로 넘기므로, 모델
-    # 클래스 생성자가 받는 인자만 담아야 한다(LSTM은 nhead/dim_feedforward가 없음, 2026-09-27).
-    if MODEL_ARCHITECTURE == "lstm":
-        return dict(
-            lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
-            hidden_size=D_MODEL, num_layers=NUM_LAYERS, dropout=DROPOUT,
-        )
+def _model_kwargs(num_stocks, config):
+    # 체크포인트 meta의 model_kwargs — PooledLSTMRegressor 생성자가 받는 인자만 담는다(2026-09-27).
     return dict(
-        lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
-        d_model=D_MODEL, nhead=NHEAD, num_layers=NUM_LAYERS,
-        dim_feedforward=DIM_FEEDFORWARD, dropout=DROPOUT,
+        lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=config.embedding_dim,
+        hidden_size=config.hidden_size, num_layers=config.num_layers, dropout=config.dropout,
     )
 
 
 # ── GARCH 파라미터 캐싱 ──────────────────────────────────────────────────────────
 
-def _garch_cache_path(ticker):
-    return os.path.join(GARCH_PARAM_CACHE_DIR, f"{ticker}.json")
+def _garch_cache_path(ticker, cache_dir=None):
+    return os.path.join(cache_dir or GARCH_PARAM_CACHE_DIR, f"{ticker}.json")
 
 
-def _load_garch_cache(ticker):
-    path = _garch_cache_path(ticker)
+def _load_garch_cache(ticker, cache_dir=None):
+    path = _garch_cache_path(ticker, cache_dir)
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def _save_garch_cache(ticker, params, train_end):
-    os.makedirs(GARCH_PARAM_CACHE_DIR, exist_ok=True)
+def _save_garch_cache(ticker, params, train_end, cache_dir=None):
+    os.makedirs(cache_dir or GARCH_PARAM_CACHE_DIR, exist_ok=True)
     payload = {
         "params": {k: float(v) for k, v in params.items()},
         "fitted_at": date.today().isoformat(),
         "train_end": str(pd.Timestamp(train_end).date()),
     }
-    with open(_garch_cache_path(ticker), "w", encoding="utf-8") as f:
+    with open(_garch_cache_path(ticker, cache_dir), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT_MAX_AGE_DAYS):
+def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT_MAX_AGE_DAYS, cache_dir=None,
+                            read_only=False):
     """캐시가 있고 max_age_days 이내면 재사용, 없거나 오래됐으면 train_end까지 데이터로
-    새로 MLE 적합해 캐시를 갱신한다. 반환: (params: pd.Series, refit_happened: bool)."""
-    cached = _load_garch_cache(ticker)
+    새로 MLE 적합해 캐시를 갱신한다. 반환: (params: pd.Series, refit_happened: bool).
+    cache_dir(2026-10-17): 기본 GARCH_PARAM_CACHE_DIR. read_only=True면 캐시가 없거나 만료됐을 때 적합·저장하지 않고
+    예외를 낸다(같은 params로 비교해야 하는 점검·백테스트용). ⚠️ 캐시 재사용은 fitted_at만 보고 train_end는 보지 않는다
+    (CLAUDE.md "GARCH 파라미터 캐시의 시점 무결성 문제")."""
+    cached = _load_garch_cache(ticker, cache_dir)
     if cached is not None:
         fitted_at = date.fromisoformat(cached["fitted_at"])
         age_days = (date.today() - fitted_at).days
         if age_days <= max_age_days:
             return pd.Series(cached["params"]), False
+    if read_only:
+        raise RuntimeError(f"[GARCH-READ-ONLY] {ticker}: 캐시가 없거나 {max_age_days}일 지나 만료됨 — 읽기 전용이라 적합하지 않음")
 
     train_returns = returns[returns.index <= train_end]
     am_train = arch_model(train_returns.values, mean="Constant", vol="Garch", p=1, q=1, dist="normal")
@@ -273,21 +137,20 @@ def get_or_fit_garch_params(ticker, returns, train_end, max_age_days=GARCH_REFIT
     # 기본값 "robust"의 추가 계산 비용을 뺀다(2026-09-20).
     res_train = am_train.fit(disp="off", cov_type="classic")
     params = res_train.params
-    _save_garch_cache(ticker, params, train_end)
+    _save_garch_cache(ticker, params, train_end, cache_dir)
     return params, True
 
 
 def compute_full_period_sigma_cached(returns, params):
-    """검증용/garch_baseline_check.compute_full_period_sigma()와 동일한 결과를 내되, 이미
-    가진(캐시된) params로 재적합 없이 재귀 계산만 한다 — compute_full_period_sigma가
-    내부적으로 하는 forecast_with_fixed_params(start_pos=0) 호출과 완전히 동일, fit() 단계만
-    스킵한 것(2026-09-12: compute_full_period_sigma는 검증용/garch_baseline_check.py로 이동됨)."""
-    return forecast_with_fixed_params(returns, params, 0)
+    """이미 가진(캐시된) params로 재적합 없이 전체 구간 GARCH σ를 재귀 계산한다
+    (garch_baseline.garch_sigma_series — 서빙 창과 같은 경로). 이름의 "cached"는 params가 캐시에서 온다는 뜻이다."""
+    return garch_sigma_series(returns, params)
 
 
 # ── baseline 3종: val 구간 RMSE(게이트용) + 다음 거래일 점예측(감사 컬럼용) ──────────────
 
-def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, prices=None):
+def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, prices=None, garch_cache_dir=None,
+                             garch_read_only=False):
     """종목 1개의 GARCH 파라미터를 캐시에서 가져오거나 새로 적합하고, 그 파라미터로:
       (a) 전체 구간 σ(하이브리드 피처용 — build_merged_dataset_v2_volatility_hybrid의
           precomputed_sigma로 그대로 재사용, 내부에서 다시 적합하지 않음)
@@ -300,6 +163,8 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, p
     load_close_prices/load_high_low 대신 여기서 close·high·low를 꺼낸다 — 두 함수와 같은 테이블·
     같은 구간(ticker, date BETWEEN start_date AND end_date, ORDER BY date)·같은 float 변환이다.
 
+    garch_cache_dir/garch_read_only(2026-10-17): get_or_fit_garch_params에 그대로 전달.
+
     반환 dict: params, sigma_full, val_rmse(garch/sma20/parkinson dict), n_val_valid,
     next_day(garch/sma20/parkinson dict)."""
     if prices is not None:
@@ -310,7 +175,8 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, p
         close = load_close_prices(ticker, start_date, end_date)
         hl = load_high_low(ticker, start_date, end_date)
     returns = compute_log_returns_pct(close)
-    params, refit = get_or_fit_garch_params(ticker, returns, train_end)
+    params, refit = get_or_fit_garch_params(ticker, returns, train_end, cache_dir=garch_cache_dir,
+                                            read_only=garch_read_only)
     sigma_full = compute_full_period_sigma_cached(returns, params)
 
     sma_full = compute_sma_baseline(returns)
@@ -329,7 +195,7 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, p
     park_rmse, _ = rmse_mae(park_val[valid].values, realized_val[valid].values)
 
     next_garch = forecast_next_day_sigma(returns, params)
-    next_sma = float(returns.abs().tail(PARK_WINDOW).mean())
+    next_sma = float(returns.abs().tail(SMA_WINDOW).mean())
     next_park = float(park_raw.tail(PARK_WINDOW).mean())
 
     return {
@@ -344,44 +210,48 @@ def compute_ticker_baselines(ticker, start_date, end_date, train_end, val_end, p
 
 def load_shared_cache(start_date, end_date):
     """종목과 무관한 거시지표 9종·KOSPI 원자료를 한 번 읽어 학습·예측이 함께 쓰게 한다(2026-10-05,
-    Neon 전송량 절감). 반환 dict의 키는 build_merged_dataset_v2 계열의 키워드 인자 이름과 같다."""
+    Neon 전송량 절감). 반환 dict의 키는 split_dataset 피처 함수들의 키워드 인자 이름과 같다."""
     return {
         "precomputed_indicators": load_indicator_cache(end_date, start_date),
         "true_kospi": load_true_kospi(start_date, end_date),
     }
 
 
-def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_cache=None, prices_by_ticker=None):
-    """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(쓰래기통/
-    가격예측_공통.py의 run_daily_pipeline 주석과 동일 근거: 파라미터 규모가 작아 재학습
-    자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
+def compute_split_dates(ref_ticker, start_date, end_date, shared_cache, prices):
+    """전역 train/val 분할 경계(2026-10-17 분리). 기준 종목(운영: ACTIVE_TICKERS[0])의 유효 피처 날짜
+    (split_dataset.valid_feature_dates — GARCH σ 전 변동성 frame 인덱스)로 compute_global_split_dates를 부른다.
+    예전에는 방향 예측 frame(build_merged_dataset_v2) 인덱스를 썼다(정리 골든 비교로 같은 경계 확인)."""
+    dates = valid_feature_dates(ref_ticker, start_date, end_date, **shared_cache, precomputed_prices=prices)
+    return compute_global_split_dates(dates)
 
-    shared_cache(선택, 2026-10-05): load_shared_cache(start_date, end_date) 결과. None이면 여기서
-    로드한다(검증용 스크립트 등 기존 호출부 호환).
+
+def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, shared_cache=None,
+                             prices_by_ticker=None, garch_cache_dir=None, garch_read_only=False):
+    """전 종목을 하나의 pooled 데이터셋으로 묶어 학습한다 — "매일 전체 재학습" 원칙(파라미터 규모가
+    작아 재학습 자체가 저렴하고, 조건부 재학습 트리거는 새로운 버그 지점만 늘린다).
+
+    shared_cache(선택, 2026-10-05): load_shared_cache(start_date, end_date) 결과. None이면 여기서 로드한다.
     prices_by_ticker(선택, 2026-10-05): load_price_cache(tickers, start_date, end_date) 결과. None이면
     여기서 한 번에 로드한다 — 예전에는 종목마다 baseline용(종가, 고가·저가)과 피처용(OHLCV)으로
     같은 구간을 세 번 읽었다.
 
     반환: model, scaler, feature_cols, ticker_to_id, device, gate, baselines_by_ticker,
     train_end/val_end, n_train/n_val, n_train_by_ticker, history/best_epoch/best_val_loss/
-    overfit_ratio_at_end(2026-09-14, MLflow 로깅용으로 추가 — train_pooled_transformer가
-    이미 계산해 반환하던 값을 여기서 버리고 있었을 뿐, 학습 로직 자체는 변경 없음)."""
-    arch = _get_architecture_config(MODEL_ARCHITECTURE)  # 잘못된 값이면 GARCH 적합 등 무거운
-    # 작업을 시작하기 전에 바로 실패시킨다(fail fast).
+    overfit_ratio_at_end(2026-09-14, MLflow 로깅용)."""
 
     if shared_cache is None:
         shared_cache = load_shared_cache(start_date, end_date)
     if prices_by_ticker is None:
         prices_by_ticker = load_price_cache(tickers, start_date, end_date)
 
-    ref, _ = build_merged_dataset_v2(tickers[0], start_date, end_date, **shared_cache,
-                                     precomputed_prices=prices_by_ticker[tickers[0]])
-    train_end, val_end = compute_global_split_dates(ref.index)
+    train_end, val_end = compute_split_dates(tickers[0], start_date, end_date, shared_cache,
+                                             prices_by_ticker[tickers[0]])
 
     baselines_by_ticker = {}
     for ticker in tickers:
         baselines_by_ticker[ticker] = compute_ticker_baselines(
             ticker, start_date, end_date, train_end, val_end, prices=prices_by_ticker[ticker],
+            garch_cache_dir=garch_cache_dir, garch_read_only=garch_read_only,
         )
 
     def hybrid_build_fn(ticker, s, e, precomputed_indicators=None, true_kospi=None):
@@ -390,7 +260,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
         # — 성능 최적화일 뿐 조인/계산 로직은 동일(값 변경 없음 검증 완료).
         b = baselines_by_ticker[ticker]
         return build_merged_dataset_v2_volatility_hybrid(
-            ticker, s, e, train_end, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
+            ticker, s, e, precomputed_sigma=b["sigma_full"], garch_params=b["params"],
             precomputed_indicators=precomputed_indicators, true_kospi=true_kospi,
             precomputed_prices=prices_by_ticker[ticker],
         )
@@ -414,30 +284,13 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
     X_val_s = scaler.transform(X_val).astype(np.float32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    result = arch["train_fn"](
+    result = train_model(
         X_train_s, y_train, tid_train, X_val_s, y_val, tid_val,
-        len(feature_cols), LOOKBACK, len(tickers), EMBEDDING_DIM,
-        D_MODEL, NHEAD, NUM_LAYERS, DIM_FEEDFORWARD, DROPOUT,
-        BATCH_SIZE, LR, WEIGHT_DECAY, SMOKE_EPOCHS, MAX_EPOCHS, PATIENCE,
-        device, seed=seed, label="pooled-volatility-hybrid",
+        len(tickers), LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
     )
 
-    val_preds, val_actuals, val_tids = evaluate_pooled_predictions(result["model"], result["val_loader"], device)
-    # 2026-09-27 게이트 집계 버그 수정: 아래 baseline 3종은 "종목별 val RMSE의 단순 평균"인데,
-    # 하이브리드만 전체 val 행을 한데 모은(pooled) RMSE로 계산해 비교하고 있었다 — 같은 오차라도
-    # 종목별 RMSE 평균 <= pooled RMSE(젠센 부등식)라 baseline에 구조적으로 유리한 비교였다(2026-09-12
-    # 첫 운영 실행부터 게이트가 계속 미통과한 원인). 100종목 검증 정본(검증용/test_evaluation_pooled100_
-    # hybrid.py:253)과 같은 방식으로 하이브리드도 종목별 RMSE 평균으로 맞춘다. 경위는 CLAUDE.md 참고.
-    hybrid_val_rmse = float(np.mean([
-        rmse_mae(val_preds[val_tids == tid], val_actuals[val_tids == tid])[0]
-        for tid in np.unique(val_tids)
-    ]))
-
-    avg_garch_rmse = float(np.mean([b["val_rmse"]["garch"] for b in baselines_by_ticker.values()]))
-    avg_sma_rmse = float(np.mean([b["val_rmse"]["sma20"] for b in baselines_by_ticker.values()]))
-    avg_park_rmse = float(np.mean([b["val_rmse"]["parkinson"] for b in baselines_by_ticker.values()]))
-
-    gate = passes_deployment_gate_volatility(hybrid_val_rmse, avg_garch_rmse, avg_sma_rmse, avg_park_rmse)
+    # 평가 단계: 하이브리드 종목평균 RMSE vs baseline 3종(종목별 val RMSE 평균) — evaluate.evaluate_gate.
+    gate = evaluate_gate(result["model"], result["val_loader"], device, baselines_by_ticker)
 
     return {
         "model": result["model"], "scaler": scaler, "feature_cols": feature_cols,
@@ -449,228 +302,8 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
         "history": result["history"], "best_epoch": result["best_epoch"],
         "best_val_loss": result["best_val_loss"],
         "overfit_ratio_at_end": result["overfit_ratio_at_end"],
+        "train_config": train_config,
     }
-
-
-# ── 다음 거래일 예측 + 저장 ───────────────────────────────────────────────────────
-
-def next_weekday(d):
-    """쓰래기통/가격예측_공통.py·가격예측_통합모델.py에서 쓰던 근사를 값 변경 없이 그대로
-    가져옴 — 실제 거래소 캘린더가 없어 공휴일은 반영 못 한다. target_date가 실제 거래일과
-    어긋나면 actual_volatility 백필 시 그냥 매치되는 실제 거래일이 없어 NULL로 남는다
-    (조용히 틀린 값이 채워지는 것보다 안전한 실패 모드)."""
-    wd = d.weekday()  # Mon=0 .. Sun=6
-    if wd == 4:  # 금요일 -> 월요일
-        return d + timedelta(days=3)
-    if wd == 5:  # 토요일 -> 월요일
-        return d + timedelta(days=2)
-    return d + timedelta(days=1)
-
-
-def _trailing_predicted_volatility_mean(ticker, before_target_date, n=60):
-    """model_predictions에서 이 종목의 직전 n개 target_date(< before_target_date)
-    predicted_volatility 평균을 가져온다. is_early_warning 계산용.
-
-    ⚠️ 이 규칙(예측σ > 직전60일 평균의 1.5배) 자체의 조기경보 "능력"은 결과_변동성_조기경보_
-    검증.md 원 검증이 GARCH 라벨링 버그로 무효화된 뒤 재검증에서 우연 수준으로 확인됐다
-    (CLAUDE.md 참고). 여기서 채우는 is_early_warning은 감사/기록용 descriptive 값일 뿐,
-    검증된 운영 신호로 취급하면 안 된다."""
-    with get_db_connection() as conn:
-        if not conn:
-            raise RuntimeError("DB 연결 실패 — _trailing_predicted_volatility_mean")
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT predicted_volatility FROM model_predictions
-                WHERE ticker = %s AND target_date < %s
-                ORDER BY target_date DESC LIMIT %s
-                """,
-                (ticker, before_target_date, n),
-            )
-            rows = cur.fetchall()
-    if len(rows) < 10:  # 이력이 너무 적으면 판단을 보류(과거 데이터 부족 -> 조기경보 False로 안전하게)
-        return None
-    return float(np.mean([r[0] for r in rows]))
-
-
-def save_prediction(ticker, target_date, prediction_date, predicted_volatility,
-                     garch_baseline, sma20_baseline, parkinson_sma20_baseline,
-                     is_early_warning, model_version, gate, input_data_suspect=False):
-    """model_predictions에 UPSERT((ticker, target_date) 기준) — 재실행 시 최신 값으로 덮어씀.
-    input_data_suspect(2026-09-27): 입력 데이터 오염 의심 플래그 — 재실행으로 예측값이 바뀌면
-    플래그도 그 실행 기준으로 함께 덮어쓴다(깨끗한 재실행 후에도 true가 남지 않도록)."""
-    query = """
-        INSERT INTO model_predictions
-            (ticker, target_date, prediction_date, predicted_volatility,
-             garch_baseline, sma20_baseline, parkinson_sma20_baseline,
-             is_early_warning, model_version,
-             gate_passed, gate_vs_garch, gate_vs_sma20, gate_vs_parkinson, input_data_suspect)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (ticker, target_date) DO UPDATE
-            SET prediction_date = EXCLUDED.prediction_date,
-                predicted_volatility = EXCLUDED.predicted_volatility,
-                garch_baseline = EXCLUDED.garch_baseline,
-                sma20_baseline = EXCLUDED.sma20_baseline,
-                parkinson_sma20_baseline = EXCLUDED.parkinson_sma20_baseline,
-                is_early_warning = EXCLUDED.is_early_warning,
-                model_version = EXCLUDED.model_version,
-                gate_passed = EXCLUDED.gate_passed,
-                gate_vs_garch = EXCLUDED.gate_vs_garch,
-                gate_vs_sma20 = EXCLUDED.gate_vs_sma20,
-                gate_vs_parkinson = EXCLUDED.gate_vs_parkinson,
-                input_data_suspect = EXCLUDED.input_data_suspect
-    """
-    with get_db_connection() as conn:
-        if not conn:
-            raise RuntimeError("DB 연결 실패 — save_prediction")
-        with conn.cursor() as cur:
-            cur.execute(query, (
-                ticker, target_date, prediction_date, float(predicted_volatility),
-                float(garch_baseline), float(sma20_baseline), float(parkinson_sma20_baseline),
-                bool(is_early_warning), model_version,
-                bool(gate["passed"]), bool(gate["beats_garch"]), bool(gate["beats_sma"]), bool(gate["beats_parkinson"]),
-                bool(input_data_suspect),
-            ))
-        conn.commit()
-
-
-def predict_and_save_for_ticker(ticker, start_date, end_date, model, scaler, feature_cols,
-                                 ticker_to_id, device, version, gate, baselines_by_ticker,
-                                 input_data_suspect=False, shared_cache=None,
-                                 prices=None):
-    """pooled 하이브리드 모델로 한 종목의 다음 거래일 변동성을 예측하고 model_predictions에
-    저장한다. run_isolated로 감싸 호출하는 것을 전제로 예외를 그대로 던진다(격리 책임은
-    호출부에 있음).
-
-    shared_cache(선택, 2026-10-05): load_shared_cache() 결과. None이면 종목마다 거시지표·KOSPI를
-    다시 조회한다(예전 동작 — 일일 실행 전송량의 대부분을 차지했던 경로).
-    prices(선택, 2026-10-05): load_price_cache(...)[ticker]. None이면 가격을 직접 조회한다."""
-    params = baselines_by_ticker[ticker]["params"]
-    window_df, last_confirmed_date = build_next_day_merged_window_volatility_hybrid(
-        ticker, start_date, end_date, LOOKBACK, params, **(shared_cache or {}),
-        precomputed_prices=prices,
-    )
-    X_next = window_df[feature_cols].values[np.newaxis, :, :].astype(np.float32)
-    X_next_s = scaler.transform(X_next)
-    tid = np.array([ticker_to_id[ticker]], dtype=np.int64)
-
-    model.eval()
-    with torch.no_grad():
-        pred = model(
-            torch.from_numpy(X_next_s).to(device), torch.from_numpy(tid).to(device)
-        ).cpu().numpy()[0]
-
-    predicted_volatility = float(pred)
-    # sanity check(2026-09-14, 사람 결정): NaN/inf/음수만 차단 — 변동성은 음수가 될 수 없는
-    # 값이라 확실한 결함 신호지만, 상한선은 일부러 두지 않는다. 실제 급변장에서는 크게 튀는
-    # 예측이 정상일 수 있어 임의 상한이 오히려 정상 예측을 막을 위험이 있다는 판단.
-    if not np.isfinite(predicted_volatility) or predicted_volatility < 0:
-        raise ValueError(
-            f"[{ticker}] 예측값 비정상(NaN/inf/음수) — predicted_volatility={predicted_volatility!r}. "
-            f"저장을 건너뜁니다."
-        )
-
-    prediction_date = pd.Timestamp(last_confirmed_date).date()
-    target_date = next_weekday(prediction_date)
-
-    trailing_mean = _trailing_predicted_volatility_mean(ticker, target_date)
-    is_early_warning = bool(trailing_mean is not None and predicted_volatility > 1.5 * trailing_mean)
-
-    next_day = baselines_by_ticker[ticker]["next_day"]
-    save_prediction(
-        ticker, target_date, prediction_date, predicted_volatility,
-        next_day["garch"], next_day["sma20"], next_day["parkinson"],
-        is_early_warning, version, gate, input_data_suspect=input_data_suspect,
-    )
-
-    return {
-        "predicted_volatility": predicted_volatility,
-        "garch_baseline": next_day["garch"], "sma20_baseline": next_day["sma20"],
-        "parkinson_sma20_baseline": next_day["parkinson"],
-        "is_early_warning": is_early_warning,
-        "prediction_date": str(prediction_date), "target_date": str(target_date),
-    }
-
-
-def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input_data_suspect=False):
-    """일일 실행 결과(학습 곡선, 게이트 판정, 종목별 예측 성공/실패 수)를 MLflow
-    "일일_자동화" experiment에 기록한다. 게이트 통과/미통과 여부와 무관하게 항상 호출된다
-    — MLflow는 "무슨 일이 있었는지 전부 보는" 관측 도구이기 때문(2026-09-14, MLflow 통합
-    설계 결정).
-
-    2026-09-14(D-1/D-2, A-1의 "저장 스킵" 결정 철회): 예전에는 게이트 미통과 시
-    run_pooled_volatility_pipeline()이 예측 루프 자체를 건너뛰어 이 함수도 "스킵됨" 분기
-    (skip_reason 태그만 남기고 종목별 성공/실패 카운트는 생략)를 탔었다. 이제 예측 루프가
-    게이트 결과와 무관하게 항상 실행되므로 그 분기 자체가 코드상 도달 불가능해져
-    prediction_results를 필수 인자로 바꾸고 skip 관련 분기를 제거했다 — model_predictions에
-    저장되는지 여부와 무관하게(지금은 항상 저장됨) MLflow에는 항상 같은 형태로 기록된다.
-
-    ⚠️ 이 함수 전체를 하나의 try/except로 감싼다 — MLflow 서버가 꺼져있거나 응답이 없어도
-    파이프라인 본체(학습/예측/DB저장)는 절대 중단되면 안 된다는 요구사항 때문. A-2의
-    예측값 sanity check(잘못된 예측값 자체를 막는 것)와는 성격이 다른 방어 코드다: 이쪽은
-    "로깅이라는 부가 기능의 실패를 흡수"하는 것이 목적이라 실패해도 예외를 다시 던지지
-    않고 경고만 출력한다.
-
-    2026-10-11 기록 정정(과거 run은 고치지 않는다, 읽는 법은 CLAUDE.md "MLflow 읽는 법"):
-    - run 이름: 실행일(date.today()) 대신 "pd<prediction_date>_v<체크포인트 버전>". 실행일은 run_date 태그.
-    - params: 운영 아키텍처의 실제 생성자 인자(_model_kwargs — 체크포인트 meta와 같은 출처)와
-      MODEL_ARCHITECTURE. 예전에는 LSTM 운영 중에도 Transformer 전용 값(NHEAD, DIM_FEEDFORWARD)이 찍혔다.
-    - tag model_family = MODEL_ARCHITECTURE 값('lstm'/'transformer'), model_registry.model_family와 같은 어휘.
-    - 하이브리드 게이트 RMSE는 hybrid_rmse_tickermean으로만 기록한다. 옛 이름 hybrid_rmse는 2026-09-28
-      실행부터 pooled에서 종목평균으로 정의가 바뀌어 한 줄로 읽으면 안 된다.
-    - input_data_suspect는 실행 단위 플래그라 n_input_suspect는 0 또는 저장 성공 종목 수다.
-
-    2026-10-11 지연 상한: 시작할 때 /health를 3초 안에 확인하고, 응답이 없으면 줄 맨 앞에 [MLFLOW-SKIP]을 붙인
-    경고를 출력한 뒤 기록 없이 돌아간다(except를 거치지 않으므로 여기서 직접 출력한다). 확인을 통과한 뒤 실패해도
-    MLFLOW_HTTP_LIMITS로 재시도를 줄여 상한을 둔다. 둘 다 예측 저장 이후라 결과·종료 코드에는 영향이 없다."""
-    try:
-        for k, v in MLFLOW_HTTP_LIMITS.items():
-            os.environ.setdefault(k, v)
-        if MLFLOW_TRACKING_URI.startswith("http"):
-            problem = _mlflow_health_problem(MLFLOW_TRACKING_URI)
-            if problem:
-                print(f"[MLFLOW-SKIP] ⚠️ MLflow 서버 응답 없음 — 기록 건너뜀({problem}). "
-                      f"예측 저장은 끝났고, 이번 실행의 MLflow run은 남지 않는다.")
-                return
-        pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
-        pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-        mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
-        with mlflow.start_run(run_name=f"pd{pred_date_tag}_v{version}"):
-            mlflow.set_tags({
-                "n_tickers": len(tickers), "version": version,
-                "model_family": MODEL_ARCHITECTURE,
-                "prediction_date": pred_date_tag,
-                "run_date": date.today().isoformat(),
-                "input_data_suspect": str(bool(input_data_suspect)).lower(),
-            })
-            mlflow.log_params({
-                "MODEL_ARCHITECTURE": MODEL_ARCHITECTURE,
-                "model_class": _get_architecture_config(MODEL_ARCHITECTURE)["model_class_name"],
-                **{f"model_{k}": v for k, v in _model_kwargs(len(tickers)).items()},
-                "BATCH_SIZE": BATCH_SIZE, "LR": LR, "WEIGHT_DECAY": WEIGHT_DECAY,
-                "SMOKE_EPOCHS": SMOKE_EPOCHS, "MAX_EPOCHS": MAX_EPOCHS, "PATIENCE": PATIENCE, "SEED": SEED,
-            })
-            for epoch, train_loss, val_loss in train_out["history"]:
-                mlflow.log_metric("train_loss", train_loss, step=epoch)
-                mlflow.log_metric("val_loss", val_loss, step=epoch)
-            mlflow.log_metrics({
-                "best_val_loss": train_out["best_val_loss"],
-                "overfit_ratio_at_end": train_out["overfit_ratio_at_end"],
-                "hybrid_rmse_tickermean": gate["hybrid_rmse"],
-                "garch_rmse": gate["garch_rmse"],
-                "sma_rmse": gate["sma_rmse"],
-                "parkinson_rmse": gate["parkinson_rmse"],
-                "gate_passed": int(gate["passed"]),
-            })
-            n_success, n_failed, n_excluded = _count_prediction_results(prediction_results)
-            mlflow.log_metrics({
-                "n_predictions_success": n_success, "n_predictions_failed": n_failed,
-                "n_predictions_excluded": n_excluded,
-                "n_input_suspect": n_success if input_data_suspect else 0,
-            })
-    except Exception as e:
-        print(f"⚠️ MLflow 로깅 실패(파이프라인은 계속 진행됩니다) — {e}")
 
 
 # 주가지수(KOSPI/KOSDAQ) 신선도 점검(2026-09-27, 가시성 확보용 경고만 — 파이프라인은 멈추지 않음).
@@ -788,19 +421,18 @@ def check_price_dates_aligned(tickers, end_date, retries=PRICE_ALIGNMENT_RETRIES
     )
 
 
-def _count_prediction_results(results):
-    """종목별 결과를 (성공, 실패, 제외) 수로 센다. 성공 = dict, 실패 = "실패 ..." 문자열,
-    제외 = "제외 ..." 문자열(가격 정렬 이탈로 예측을 저장하지 않은 종목, 2026-10-17)."""
-    n_success = sum(1 for v in results.values() if isinstance(v, dict))
-    n_failed = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("실패"))
-    n_excluded = sum(1 for v in results.values() if isinstance(v, str) and v.startswith("제외"))
-    return n_success, n_failed, n_excluded
+def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, sinks=None,
+                                   checkpoint_dir=None, garch_cache_dir=None, garch_read_only=False, log_dir=None,
+                                   version=None):
+    """전체 파이프라인: 입력 점검 -> baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
+    통합) -> 배포 게이트 판정 -> 체크포인트 저장 -> 종목별 다음 거래일 예측(run_isolated로
+    종목별 격리) -> 예측 저장(게이트 결과와 무관하게 항상 저장) -> 실행 기록.
 
-
-def run_pooled_volatility_pipeline(tickers, start_date, end_date):
-    """전체 파이프라인: baseline 3종 계산(GARCH 캐시 포함) -> pooled 하이브리드 학습(전 종목
-    통합) -> 체크포인트 저장 -> 배포 게이트 판정 -> 종목별 다음 거래일 예측(run_isolated로
-    종목별 격리) -> model_predictions 저장(게이트 결과와 무관하게 항상 저장).
+    2026-10-17 단계 분리: 저장 대상은 sinks(store.Sink)로 바꿔 끼운다. 기본값 None = 운영
+    [store.DbSink(), store.MlflowSink()](model_registry·model_predictions·MLflow "일일_자동화"). 저장 없이 돌리려면
+    sinks=[store.CollectSink()], checkpoint_dir=<임시 폴더>, garch_read_only=True(+ garch_cache_dir)를 넘긴다.
+    checkpoint_dir/garch_cache_dir/log_dir 기본값은 CHECKPOINT_DIR/GARCH_PARAM_CACHE_DIR/LOG_DIR,
+    version 기본값은 체크포인트 저장 시각(UTC)이다.
 
     학습 자체는 격리하지 않는다(가격예측_통합모델.py와 동일 근거 — 모델이 하나라 학습 실패는
     전체 실패, 단일 종목 파이프라인처럼 "한 종목만 실패, 나머지는 계속"이 구조적으로 불가능).
@@ -811,7 +443,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     엄격한 방식을 채택했다 — 그전에는 gate_passed=False가 model_predictions에 기록만 될
     뿐 저장을 막지 않아 게이트가 사실상 장식이었기 때문. 이후 actual_volatility 백필로 A-1
     적용 *이전*에 저장됐던 100행을 실제 결과와 대조해보니 하이브리드가 세 baseline 전부에
-    뒤졌음이 확인돼(결과_TaskT_변동성예측_최종.md 및 아래 "actual_volatility 백필" 절
+    뒤졌음이 확인돼(pre-cleanup 태그 시점의 결과_TaskT_변동성예측_최종.md 및 아래 "actual_volatility 백필" 절
     참고) 게이트 강제의 방향성 자체는 지지됐다. 그런데 A-1 적용 이후 게이트가 연속
     미통과하면서 예측 계산 자체가 아예 안 일어나 "미래 예측이 실제로 얼마나 정확한지"를
     계속 검증할 데이터가 더 이상 쌓이지 않는 문제가 드러났다 — 게이트를 검증하려면 게이트가
@@ -826,6 +458,10 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     A-2(예측값 NaN/inf/음수 sanity check)는 게이트와 무관한 별개 로직이라 이번 결정과
     무관하게 그대로 유지된다. 체크포인트 저장(학습 자체가 성공했다는 기록)도 게이트와
     무관하게 항상 수행하는 기존 동작 그대로."""
+    if sinks is None:
+        sinks = [store.DbSink(), store.MlflowSink()]
+    checkpoint_dir = checkpoint_dir or CHECKPOINT_DIR
+    log_dir = log_dir or LOG_DIR
     # 종목별 주가 최신일 정렬 점검(2026-10-17): 소수 이탈은 그 종목 저장만 빼고 진행, 다수 이탈은 학습 전에 중단.
     price_deviants = check_price_dates_aligned(tickers, end_date)["deviants"]
     # 지수 결측이 있으면 이번 실행의 예측 전부를 input_data_suspect=True로 기록한다(2026-09-27).
@@ -833,26 +469,32 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
     # 거시지표·KOSPI·종목 가격은 실행 시작 시 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다(2026-10-05).
     shared_cache = load_shared_cache(start_date, end_date)
     prices_by_ticker = load_price_cache(tickers, start_date, end_date)
-    train_out = train_daily_pooled_model(tickers, start_date, end_date, shared_cache=shared_cache,
-                                         prices_by_ticker=prices_by_ticker)
+    train_out = train_daily_pooled_model(tickers, start_date, end_date, train_config=train_config, shared_cache=shared_cache,
+                                         prices_by_ticker=prices_by_ticker, garch_cache_dir=garch_cache_dir,
+                                         garch_read_only=garch_read_only)
     model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
     ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
     baselines_by_ticker = train_out["baselines_by_ticker"]
 
-    version = save_checkpoint(
-        model, scaler, feature_cols, _model_kwargs(len(tickers)), CHECKPOINT_DIR,
-        model_class_name=_get_architecture_config(MODEL_ARCHITECTURE)["model_class_name"],
-        extra_meta={
-            "tickers": tickers, "ticker_to_id": ticker_to_id,
-            "gate": {k: v for k, v in gate.items()},
-            "n_train": train_out["n_train"], "n_val": train_out["n_val"],
-            "n_train_by_ticker": train_out["n_train_by_ticker"],
-            "train_start": start_date, "train_end": end_date,
-            "split_train_end": str(train_out["train_end"].date()),
-            "split_val_end": str(train_out["val_end"].date()),
-        },
+    model_kwargs = _model_kwargs(len(tickers), train_out["train_config"])
+    extra_meta = {
+        "tickers": tickers, "ticker_to_id": ticker_to_id,
+        "gate": {k: v for k, v in gate.items()},
+        "n_train": train_out["n_train"], "n_val": train_out["n_val"],
+        "n_train_by_ticker": train_out["n_train_by_ticker"],
+        "train_start": start_date, "train_end": end_date,
+        "split_train_end": str(train_out["train_end"].date()),
+        "split_val_end": str(train_out["val_end"].date()),
+    }
+    version = store.save_checkpoint(
+        model, scaler, feature_cols, model_kwargs, checkpoint_dir, version=version,
+        model_class_name=MODEL_CLASS_NAME, extra_meta=extra_meta,
     )
-    _register_model_version(version)
+    ckpt = {"version": version, "checkpoint_dir": checkpoint_dir, "model": model, "scaler": scaler,
+            "feature_cols": feature_cols, "model_kwargs": model_kwargs, "model_class": MODEL_CLASS_NAME,
+            "extra_meta": extra_meta}
+    for sink in sinks:
+        sink.on_checkpoint(ckpt)
 
     gate_str = "통과" if gate["passed"] else "미통과"
     print(f"\n📊 pooled 하이브리드 변동성 모델 학습 완료(버전 {version}, "
@@ -878,20 +520,23 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
         if ticker in price_deviants:
             results[ticker] = f"제외 (가격 정렬 이탈, 최신일 {price_deviants[ticker]})"
             continue
-        r = run_isolated(
-            predict_and_save_for_ticker, ticker, start_date, end_date,
-            model, scaler, feature_cols, ticker_to_id, device, version, gate, baselines_by_ticker,
+        r = store.run_isolated(
+            store.predict_and_save_for_ticker, ticker, start_date, end_date, LOOKBACK,
+            model, scaler, feature_cols, ticker_to_id, device, version, gate, baselines_by_ticker, sinks,
             input_data_suspect=input_data_suspect, shared_cache=shared_cache,
-            prices=prices_by_ticker[ticker], label=ticker, log_dir=LOG_DIR,
+            prices=prices_by_ticker[ticker], label=ticker, log_dir=log_dir,
         )
         results[ticker] = r["result"] if r["status"] == "success" else f"실패 ({r['error']})"
 
-    n_success, n_failed, n_excluded = _count_prediction_results(results)
+    n_success, n_failed, n_excluded = store._count_prediction_results(results)
     print(f"\n=== 종목별 예측 결과 ({n_success}/{len(tickers)} 성공, 실패 {n_failed}, 제외 {n_excluded}) ===")
     for ticker, r in results.items():
         print(f"  {ticker}: {r}")
     if n_failed:
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
-    _log_mlflow_run(tickers, version, train_out, gate, results, input_data_suspect=input_data_suspect)
+    payload = store.build_run_payload(tickers, version, train_out, gate, results, model_kwargs,
+                                      input_data_suspect=input_data_suspect)
+    for sink in sinks:
+        sink.log_run(payload)
     return {"version": version, "gate": gate, "predictions": results}

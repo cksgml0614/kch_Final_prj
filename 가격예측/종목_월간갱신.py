@@ -5,7 +5,7 @@
 # 로직: fdr.StockListing('KOSPI') 재조회 -> 우선주 제외(2026-09-06/09-07 세션과 동일 정규식,
 # 시가총액 상위 TARGET_UNIVERSE_SIZE(기본 100)위 재산정 -> constants.STOCKS와 비교해:
 #   - 신규 진입(상위권에 새로 들어왔고 현재 목록에 없거나 비활성) -> 가격 데이터 없으면 백필 후
-#     MIN_TRAIN_SEQUENCES(가격예측_변동성_공통.py, 오늘 세션 기준 10) 이상인지 확인하고
+#     MIN_TRAIN_SEQUENCES(constants.py, 10) 이상인지 확인하고
 #     통과해야만 활성화
 #   - 이탈(현재 active=True인데 더 이상 상위권 아님) -> active=False로 전환
 # constants.py는 절대 통째로 재생성하지 않는다 — 해당 Stock(...) 줄만 정확히 찾아 boolean만
@@ -31,11 +31,11 @@ from datetime import date, datetime
 
 import FinanceDataReader as fdr
 
-from constants import ACTIVE_TICKERS, STOCK_INITIAL_LOAD_START, STOCKS
-from 가격예측.가격예측_변동성_공통 import MIN_TRAIN_SEQUENCES
+# MIN_TRAIN_SEQUENCES는 constants.py에서 가져온다(2026-10-17) — 예전에는 가격예측_변동성_공통에서 가져와
+# 이 스크립트(및 월간 워크플로)가 torch·mlflow까지 import했다.
+from constants import ACTIVE_TICKERS, MIN_TRAIN_SEQUENCES, STOCK_INITIAL_LOAD_START, STOCKS
 from 가격예측.pooled_dataset import compute_global_split_dates
-from 가격예측.sequence_dataset import build_sequences, split_sequences_by_date
-from 가격예측.split_dataset import build_merged_dataset_v2
+from 가격예측.split_dataset import valid_feature_dates
 from 주가데이터.주가_공통 import _needs_initial_load, update_stock_data
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -87,20 +87,16 @@ def ensure_price_data(ticker):
 
 
 def count_train_sequences(ticker, train_end, val_end, lookback=20):
-    """가격예측_변동성_공통.MIN_TRAIN_SEQUENCES 게이팅을 위한 실제 train 시퀀스 수를 센다.
+    """constants.MIN_TRAIN_SEQUENCES 게이팅을 위한 실제 train 시퀀스 수를 센다.
 
-    build_merged_dataset_v2(방향용, GARCH 적합 불필요)로 계산한다 — build_merged_dataset_v2와
-    build_merged_dataset_v2_volatility_hybrid는 momentum_feature.py의 WINDOW=60이 recent_vol_
-    ma20(20일)·garch_sigma(사실상 1행)보다 훨씬 긴 선행 결측을 만들어 momentum 쪽이 항상
-    binding constraint가 되므로, 두 데이터셋의 유효 행 수(따라서 시퀀스 수)가 항상 동일하다
-    (2026-09-07 100종목 코드 리뷰 세션에서 구조적으로 검증됨 — pooled_dataset.py의
-    train_end 일치 assert가 매 실행 통과하는 이유와 동일한 근거). GARCH 적합 없이 더 싸게
-    같은 결과를 얻기 위해 방향용 데이터셋을 쓴다."""
-    merged, _ = build_merged_dataset_v2(ticker, STOCK_INITIAL_LOAD_START, date.today().isoformat())
-    feature_cols = [c for c in merged.columns if c != "target"]
-    X, y, dates = build_sequences(merged, feature_cols, lookback)
-    splits = split_sequences_by_date(X, y, dates, train_end, val_end)
-    return len(splits["train"][0])
+    split_dataset.valid_feature_dates(GARCH σ 전 변동성 frame의 유효 날짜)로 센다 — GARCH 적합이 필요 없다.
+    학습 frame(GARCH σ 포함)과 유효 날짜가 같다(momentum 60일 창이 선행 결측을 가장 길게 만듦, pooled_dataset의
+    train_end 일치 assert가 매 실행 확인). 시퀀스 i(lookback-1 이상)의 target 날짜가 train_end 이하인 개수 =
+    sequence_dataset.build_sequences + split_sequences_by_date의 train 개수와 같다.
+    2026-10-17: 예전에는 방향 예측 frame(build_merged_dataset_v2)으로 시퀀스를 실제로 만들어 셌다."""
+    dates = valid_feature_dates(ticker, STOCK_INITIAL_LOAD_START, date.today().isoformat())
+    seq_dates = dates[lookback - 1:]
+    return int((seq_dates <= train_end).sum())
 
 
 # ── 3) constants.py 원본 텍스트 파싱/수정 ────────────────────────────────────────────
@@ -214,8 +210,8 @@ def plan_universe_update(target_size=TARGET_UNIVERSE_SIZE):
     current_by_ticker = {s.ticker: s for s in STOCKS}
     current_active = set(ACTIVE_TICKERS)
 
-    ref, _ = build_merged_dataset_v2("005930", STOCK_INITIAL_LOAD_START, date.today().isoformat())
-    train_end, val_end = compute_global_split_dates(ref.index)
+    train_end, val_end = compute_global_split_dates(
+        valid_feature_dates("005930", STOCK_INITIAL_LOAD_START, date.today().isoformat()))
 
     deactivate = []
     for ticker in current_active:
