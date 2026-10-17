@@ -1,29 +1,15 @@
-# split_dataset.py — Task T-1 체크포인트 3
-# base 피처(체크포인트 1) + momentum 피처(체크포인트 2)를 merge한 실제 유효 행 기준으로
-# 정상 레짐/스트레스 구간을 분리하고, 정상 레짐 내에서 70/15/15 시계열 분할한다.
-#
-# 2026-09-06(Task T 자동화 착수): split_full_period() 추가 — 스트레스 구간 분리 없이 전체
-# 기간을 그대로 70/15/15 분할한다. split_normal_regime()은 Task T-1 진단 스크립트들이 계속
-# 참조하므로 그대로 남겨뒀다(값 변경 없음) — 새 자동화 파이프라인(가격예측_공통.py)은
-# split_full_period()만 사용한다.
-
-# 2026-09-06(실제 pooled 학습 최초 실행 중 발견·수정): build_next_day_merged_window() 추가.
-# dataset_builder.build_next_day_feature_window()는 base V2 피처(12개)만 만들고 momentum
-# 피처(excess_return_z_lag1)가 빠져있어, 실제 학습에 쓰는 feature_cols(13개, build_merged_
-# dataset_v2 기준)와 어긋나는 버그였다 — 서빙(다음 거래일 예측) 경로가 한 번도 실제로
-# 끝까지 실행된 적이 없어(가격예측_공통.py도 설계만 되고 실행은 이번이 처음) 발견되지 않고
-# 있었다. 단일 종목/pooled 두 파이프라인 모두 이 버그의 영향을 받으므로 여기 한 곳에서 고친다.
+# split_dataset.py — 기본 피처 + excess_return_z + GARCH σ를 합친 학습용 frame과 서빙용 다음 거래일 창.
+# (파일 이름은 1세대에서 정상/스트레스 분할을 하던 시절 이름이다 — 분할은 pooled_dataset.py가 한다.)
+# 2026-10-17 정리: 1세대 build_merged_dataset·build_next_day_merged_window·split_full_period·
+# split_normal_regime·__main__ 데모를 지웠다(git 태그 pre-cleanup 시점에 있음).
 
 import sys
 
 import pandas as pd
 
-from constants import STRESS_PERIOD_END, STRESS_PERIOD_START
 from 가격예측.dataset_builder import (
-    build_base_dataset,
     build_base_dataset_v2,
     build_base_dataset_v2_volatility,
-    build_next_day_feature_window,
     build_next_day_feature_window_volatility,
 )
 from 가격예측.momentum_feature import build_momentum_feature
@@ -35,21 +21,6 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 # TEST_RATIO는 나머지 전부 (반올림 오차를 test 쪽에 흡수)
-
-
-def build_merged_dataset(ticker, start_date, end_date):
-    """base(14피처+target) + momentum(1피처)을 merge하고, 둘 중 하나라도 NaN인 행은 제거한다."""
-    base, raw = build_base_dataset(ticker, start_date, end_date)
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date)
-
-    merged = base.copy()
-    merged["excess_return_z_lag1"] = momentum
-    before = len(merged)
-    merged = merged.dropna(how="any")
-    after = len(merged)
-
-    return merged, {"base": base, "raw": raw, "momentum": momentum, "diag": diag,
-                     "rows_before_momentum_dropna": before, "rows_after_momentum_dropna": after}
 
 
 def build_merged_dataset_v2(ticker, start_date, end_date, precomputed_indicators=None, true_kospi=None,
@@ -158,39 +129,6 @@ def build_merged_dataset_v2_volatility_hybrid(ticker, start_date, end_date, trai
     return merged, meta
 
 
-def build_next_day_merged_window(ticker, start_date, end_date, lookback):
-    """서빙(추론) 전용 — build_next_day_feature_window()(base V2 피처)에 momentum 피처
-    (excess_return_z_lag1)를 합쳐, 실제 학습에 쓰는 feature_cols(build_merged_dataset_v2
-    기준 13개)와 정확히 일치하는 lookback 시퀀스를 만든다.
-
-    momentum 쪽도 동일한 원리를 적용한다: build_momentum_feature()가 반환하는 momentum
-    시리즈(momentum[t] = z_(t-1), 이미 실현된 과거 target들의 피처)의 마지막 (lookback-1)개는
-    그대로 쓰고, 마지막 행(=아직 실현 안 된 T+1행의 momentum)은 diag["z"]의 마지막 값(오늘 T
-    시점에 계산된 z_T)을 그대로 가져다 쓴다 — build_next_day_feature_window()가 base 피처에
-    적용한 것과 완전히 동일한 "오늘 원값 = 다음 행 피처" 관계의 momentum 버전이다.
-
-    반환: (window, last_confirmed_date) — window는 build_next_day_feature_window()와 같은
-    컬럼(12개) + 'excess_return_z_lag1' 1개 = 13개, feature_cols와 순서만 다를 수 있으니
-    호출부는 반드시 컬럼명으로 인덱싱해서 쓸 것(위치 의존 금지)."""
-    base_window, last_confirmed_date = build_next_day_feature_window(ticker, start_date, end_date, lookback)
-
-    momentum, diag = build_momentum_feature(ticker, start_date, end_date)
-    momentum_next = diag["z"].iloc[-1]
-    if pd.isna(momentum_next):
-        raise RuntimeError(f"{ticker}: 최신 momentum 값이 NaN — 가격 이력이 window보다 짧을 수 있음")
-
-    past_momentum = momentum.tail(lookback - 1).values
-    momentum_col = list(past_momentum) + [float(momentum_next)]
-    if len(momentum_col) != lookback:
-        raise RuntimeError(
-            f"{ticker}: momentum 시퀀스 길이 불일치 — 기대 {lookback}, 실제 {len(momentum_col)}"
-        )
-
-    window = base_window.copy()
-    window["excess_return_z_lag1"] = momentum_col
-    return window, last_confirmed_date
-
-
 def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date, lookback, garch_params,
                                                    precomputed_indicators=None, true_kospi=None,
                                                    precomputed_prices=None):
@@ -260,90 +198,3 @@ def build_next_day_merged_window_volatility_hybrid(ticker, start_date, end_date,
     window["excess_return_z_lag1"] = momentum_col
     window["garch_sigma"] = garch_col
     return window, last_confirmed_date
-
-
-def split_full_period(merged, train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO):
-    """merged 전체 기간을 정상/스트레스 구분 없이 시계열 70/15/15로 분할한다(2026-09-06,
-    Task T 자동화 착수 시 설계 확정 — 특정 구간을 하드코딩으로 예외 처리하는 방식은 다종목
-    확장과 맞지 않다는 판단, 뉴스 트랙 D-3와 동일 논리). split_normal_regime()과 달리
-    STRESS_PERIOD_START/END를 전혀 참조하지 않는다 — 그 상수와 analysis/detect_stress_period.py는
-    Task T-1 진단 기록으로만 보존하고 새 파이프라인은 참조하지 않는다(CLAUDE.md 명시)."""
-    n = len(merged)
-    n_train = round(n * train_ratio)
-    n_val = round(n * val_ratio)
-
-    train = merged.iloc[:n_train]
-    val = merged.iloc[n_train:n_train + n_val]
-    test = merged.iloc[n_train + n_val:]
-
-    return train, val, test
-
-
-def split_normal_regime(merged, stress_start):
-    """merged를 stress_start 기준으로 정상/스트레스로 나누고, 정상 구간을 70/15/15로 분할한다."""
-    stress_start_ts = pd.Timestamp(stress_start)
-
-    normal = merged[merged.index < stress_start_ts]
-    stress = merged[merged.index >= stress_start_ts]
-
-    n = len(normal)
-    n_train = round(n * TRAIN_RATIO)
-    n_val = round(n * VAL_RATIO)
-
-    train = normal.iloc[:n_train]
-    val = normal.iloc[n_train:n_train + n_val]
-    test = normal.iloc[n_train + n_val:]
-
-    return train, val, test, normal, stress
-
-
-if __name__ == "__main__":
-    TICKER = "005930"
-    START = "2020-01-02"
-    END = "2026-07-31"  # 전체 구간(정상+스트레스) 통째로 merge 후 상수 기준 분리
-
-    merged, meta = build_merged_dataset(TICKER, START, END)
-
-    print(f"=== build_merged_dataset({TICKER}, {START}, {END}) ===")
-    print(f"base(체크포인트1) 행 수: {len(meta['base'])}")
-    print(f"momentum(체크포인트2) NaN 제외 유효 행 수: {meta['momentum'].notna().sum()}")
-    print(f"merge 직후(dropna 전) 행 수: {meta['rows_before_momentum_dropna']}")
-    print(f"merge 후 실제 유효 행 수(dropna 후, 최종 학습 가능 행 수): {meta['rows_after_momentum_dropna']}")
-    print(f"merge로 추가 소실된 행 수: {meta['rows_before_momentum_dropna'] - meta['rows_after_momentum_dropna']}")
-    print(f"컬럼: {list(merged.columns)}")
-
-    train, val, test, normal, stress = split_normal_regime(merged, STRESS_PERIOD_START)
-
-    print(f"\n=== 정상 레짐 / 스트레스 분리 (기준: STRESS_PERIOD_START={STRESS_PERIOD_START}) ===")
-    print(f"정상 레짐: {len(normal)}행 ({normal.index.min().date()} ~ {normal.index.max().date()})")
-    print(f"스트레스: {len(stress)}행 ({stress.index.min().date()} ~ {stress.index.max().date()})")
-    print(f"합계 = merge 후 유효 행 수와 일치: {len(normal) + len(stress) == len(merged)}")
-
-    print(f"\n=== 정상 레짐 내 70/15/15 분할 (실제 merge 유효 행 {len(normal)}행 기준) ===")
-    print(f"train: {len(train)}행 ({train.index.min().date()} ~ {train.index.max().date()})")
-    print(f"val:   {len(val)}행 ({val.index.min().date()} ~ {val.index.max().date()})")
-    print(f"test:  {len(test)}행 ({test.index.min().date()} ~ {test.index.max().date()})")
-    print(f"비율: train {len(train)/len(normal)*100:.1f}% / val {len(val)/len(normal)*100:.1f}% / "
-          f"test {len(test)/len(normal)*100:.1f}%")
-
-    # --- 스트레스 구간 상수와 test셋 경계 겹침 최종 확인 ---
-    print("\n=== 스트레스 구간(2026-02-02~2026-07-31) vs test셋 경계 최종 확인 ===")
-    stress_start_ts = pd.Timestamp(STRESS_PERIOD_START)
-    stress_end_ts = pd.Timestamp(STRESS_PERIOD_END)
-
-    test_max = test.index.max()
-    no_overlap_test = test_max < stress_start_ts
-    print(f"test셋 최종일 = {test_max.date()}  <  스트레스 시작일 = {stress_start_ts.date()}  →  겹침 없음: {no_overlap_test}")
-
-    all_normal_before_stress = bool((normal.index < stress_start_ts).all())
-    print(f"정상 레짐(train/val/test 전체) 모든 행이 스트레스 시작일 이전인가: {all_normal_before_stress}")
-
-    all_stress_in_range = bool(((stress.index >= stress_start_ts) & (stress.index <= stress_end_ts)).all())
-    print(f"스트레스 구간 모든 행이 [{STRESS_PERIOD_START}, {STRESS_PERIOD_END}] 안에 있는가: {all_stress_in_range}")
-
-    gap_days = (stress.index.min() - test_max).days
-    print(f"test 마지막날 → 스트레스 첫날 간격: {gap_days}일 (음수/0이면 겹침, CLAUDE.md 정의상 거래일 갭이라 "
-          f"실제 거래일 기준으로는 test 다음 거래일이 스트레스 첫 거래일이어야 정상)")
-
-    assert no_overlap_test and all_normal_before_stress and all_stress_in_range, "스트레스 구간과 정상 레짐이 겹친다 — 확인 필요"
-    print("\n✅ 최종 확인: merge 후에도 스트레스 구간과 test셋(정상 레짐 전체) 겹침 없음.")

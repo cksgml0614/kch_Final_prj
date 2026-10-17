@@ -58,7 +58,6 @@ from 가격예측.train_common import (
     run_isolated,
     save_checkpoint,
     train_pooled_lstm,
-    train_pooled_transformer,
 )
 from 시장지표.feature_loader import load_indicator_cache, load_price_cache
 
@@ -87,45 +86,13 @@ EMBEDDING_DIM = 20  # test_evaluation_pooled100_hybrid.EMBEDDING_DIM_100과 동�
 # 위 헤더 설명 참고).
 GARCH_REFIT_MAX_AGE_DAYS = 30
 
-# ── 아키텍처 스위치 (2026-09-24, LSTM/GAF+CNN 등 향후 아키텍처 추가 대비 구조만 마련) ──
-# "lstm"(2026-09-27부터 기본값) + "transformer". MODEL_ARCHITECTURE 환경변수로 학습 함수·모델 클래스명을
-# 고르는 자리를 미리 만들어둔다. 새 아키텍처를 추가할 때 손대야 하는 곳은 이 세 곳뿐이다:
-#   1) train_common.py에 그 아키텍처용 train_pooled_<arch>() 학습 함수 추가 — 시그니처와
-#      반환값(dict: model/history/best_epoch/best_val_loss/val_loader/overfit_ratio_at_end)을
-#      train_pooled_transformer()와 동일하게 맞추고, 모델의 forward(x, ticker_ids)도 동일
-#      인터페이스를 지켜야 한다(predict_and_save_for_ticker가 이 인터페이스로 범용 호출한다).
-#   2) model.py에 Pooled<Arch>Regressor 클래스 추가 + train_common._MODEL_CLASSES에 등록
-#      (지금은 daily 파이프라인이 "매일 전체 재학습" 원칙이라 load_checkpoint()를 안 거치지만,
-#      나중에 체크포인트를 불러와 쓰는 경로가 생기면 이 등록이 필요해진다)
-#   3) 아래 _ARCHITECTURES에 항목 추가
-# 하이퍼파라미터 블록(D_MODEL 등)은 지금은 transformer 전용이라 그대로 둔다 — 아키텍처마다
-# 하이퍼파라미터 셋이 달라지면 그때 _ARCHITECTURES 항목별로 분리한다.
-# 2026-09-27 기본값 transformer -> lstm 전환(사람 결정, 지도교수님 피드백 "수치형 시계열은 수치형답게").
-# 근거: 대칭 게이트 기준 LSTM seed 42/43/44 = 1.9643/1.9666/1.9680으로 3 seed 전부 통과, Transformer(1.9594)와
-# 동급. Transformer로 되돌리려면 환경변수 MODEL_ARCHITECTURE=transformer.
-MODEL_ARCHITECTURE = os.environ.get("MODEL_ARCHITECTURE", "lstm").strip().lower()
-
-_ARCHITECTURES = {
-    "transformer": {
-        "model_class_name": "PooledTransformerRegressor",
-        "train_fn": train_pooled_transformer,
-    },
-    # 2026-09-27: LSTM 등록(아키텍처 비교 트랙). 하이퍼파라미터 블록은 그대로 공유 — D_MODEL은
-    # hidden_size, NUM_LAYERS는 LSTM 층 수로 해석되고 NHEAD/DIM_FEEDFORWARD는 무시된다(train_
-    # common.train_pooled_lstm 위 주석 참고).
-    "lstm": {
-        "model_class_name": "PooledLSTMRegressor",
-        "train_fn": train_pooled_lstm,
-    },
-}
-
-
-def _get_architecture_config(name):
-    if name not in _ARCHITECTURES:
-        raise ValueError(
-            f"알 수 없는 MODEL_ARCHITECTURE={name!r} (지원: {list(_ARCHITECTURES)})"
-        )
-    return _ARCHITECTURES[name]
+# ── 모델 계열 (2026-10-17: LSTM 단일화) ──
+# 2026-09-27에 transformer -> lstm으로 전환했고(사람 결정, 지도교수님 피드백 "수치형 시계열은 수치형답게"),
+# 2026-10-17 정리에서 Transformer 학습 코드와 MODEL_ARCHITECTURE 환경변수 스위치를 지웠다(git 태그 pre-cleanup).
+# 아래 두 문자열은 체크포인트 meta.json의 model_class, model_registry.model_family/model_class, MLflow 태그
+# model_family·파라미터 MODEL_ARCHITECTURE/model_class에 그대로 기록된다 — 바꾸지 말 것.
+MODEL_FAMILY = "lstm"
+MODEL_CLASS_NAME = "PooledLSTMRegressor"
 
 
 # 이 pooled 모델이 종목 하나를 학습에 포함시키기 위한 최소 train 시퀀스 수. 2026-09-07 100종목
@@ -180,7 +147,9 @@ def _register_model_version(version):
             return
         with open(os.path.join(CHECKPOINT_DIR, version, "meta.json"), encoding="utf-8") as f:
             meta = json.load(f)
-        family = next(k for k, v in _ARCHITECTURES.items() if v["model_class_name"] == meta["model_class"])
+        if meta["model_class"] != MODEL_CLASS_NAME:
+            raise ValueError(f"예상하지 못한 model_class {meta['model_class']!r}")
+        family = MODEL_FAMILY
         row = (version, family, meta["model_class"], "checkpoint_meta", REGISTRY_SOURCE, REGISTRY_GATE_DEFINITION,
                meta["train_end"], meta["split_train_end"], meta["split_val_end"], meta["n_train"])
         local_versions = {d for d in os.listdir(CHECKPOINT_DIR)
@@ -218,17 +187,10 @@ def _mlflow_health_problem(uri):
 
 
 def _model_kwargs(num_stocks):
-    # 체크포인트 meta에 저장돼 load_checkpoint()가 cls(**model_kwargs)로 그대로 넘기므로, 모델
-    # 클래스 생성자가 받는 인자만 담아야 한다(LSTM은 nhead/dim_feedforward가 없음, 2026-09-27).
-    if MODEL_ARCHITECTURE == "lstm":
-        return dict(
-            lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
-            hidden_size=D_MODEL, num_layers=NUM_LAYERS, dropout=DROPOUT,
-        )
+    # 체크포인트 meta의 model_kwargs — PooledLSTMRegressor 생성자가 받는 인자만 담는다(2026-09-27).
     return dict(
         lookback=LOOKBACK, num_stocks=num_stocks, embedding_dim=EMBEDDING_DIM,
-        d_model=D_MODEL, nhead=NHEAD, num_layers=NUM_LAYERS,
-        dim_feedforward=DIM_FEEDFORWARD, dropout=DROPOUT,
+        hidden_size=D_MODEL, num_layers=NUM_LAYERS, dropout=DROPOUT,
     )
 
 
@@ -364,10 +326,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
 
     반환: model, scaler, feature_cols, ticker_to_id, device, gate, baselines_by_ticker,
     train_end/val_end, n_train/n_val, n_train_by_ticker, history/best_epoch/best_val_loss/
-    overfit_ratio_at_end(2026-09-14, MLflow 로깅용으로 추가 — train_pooled_transformer가
-    이미 계산해 반환하던 값을 여기서 버리고 있었을 뿐, 학습 로직 자체는 변경 없음)."""
-    arch = _get_architecture_config(MODEL_ARCHITECTURE)  # 잘못된 값이면 GARCH 적합 등 무거운
-    # 작업을 시작하기 전에 바로 실패시킨다(fail fast).
+    overfit_ratio_at_end(2026-09-14, MLflow 로깅용)."""
 
     if shared_cache is None:
         shared_cache = load_shared_cache(start_date, end_date)
@@ -414,7 +373,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, seed=SEED, shared_ca
     X_val_s = scaler.transform(X_val).astype(np.float32)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    result = arch["train_fn"](
+    result = train_pooled_lstm(
         X_train_s, y_train, tid_train, X_val_s, y_val, tid_val,
         len(feature_cols), LOOKBACK, len(tickers), EMBEDDING_DIM,
         D_MODEL, NHEAD, NUM_LAYERS, DIM_FEEDFORWARD, DROPOUT,
@@ -613,9 +572,9 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
 
     2026-10-11 기록 정정(과거 run은 고치지 않는다, 읽는 법은 CLAUDE.md "MLflow 읽는 법"):
     - run 이름: 실행일(date.today()) 대신 "pd<prediction_date>_v<체크포인트 버전>". 실행일은 run_date 태그.
-    - params: 운영 아키텍처의 실제 생성자 인자(_model_kwargs — 체크포인트 meta와 같은 출처)와
-      MODEL_ARCHITECTURE. 예전에는 LSTM 운영 중에도 Transformer 전용 값(NHEAD, DIM_FEEDFORWARD)이 찍혔다.
-    - tag model_family = MODEL_ARCHITECTURE 값('lstm'/'transformer'), model_registry.model_family와 같은 어휘.
+    - params: 모델 생성자 인자(_model_kwargs — 체크포인트 meta와 같은 출처)와 MODEL_ARCHITECTURE(= MODEL_FAMILY).
+      예전에는 LSTM 운영 중에도 Transformer 전용 값(NHEAD, DIM_FEEDFORWARD)이 찍혔다.
+    - tag model_family = MODEL_FAMILY('lstm'), model_registry.model_family와 같은 어휘.
     - 하이브리드 게이트 RMSE는 hybrid_rmse_tickermean으로만 기록한다. 옛 이름 hybrid_rmse는 2026-09-28
       실행부터 pooled에서 종목평균으로 정의가 바뀌어 한 줄로 읽으면 안 된다.
     - input_data_suspect는 실행 단위 플래그라 n_input_suspect는 0 또는 저장 성공 종목 수다.
@@ -639,14 +598,14 @@ def _log_mlflow_run(tickers, version, train_out, gate, prediction_results, input
         with mlflow.start_run(run_name=f"pd{pred_date_tag}_v{version}"):
             mlflow.set_tags({
                 "n_tickers": len(tickers), "version": version,
-                "model_family": MODEL_ARCHITECTURE,
+                "model_family": MODEL_FAMILY,
                 "prediction_date": pred_date_tag,
                 "run_date": date.today().isoformat(),
                 "input_data_suspect": str(bool(input_data_suspect)).lower(),
             })
             mlflow.log_params({
-                "MODEL_ARCHITECTURE": MODEL_ARCHITECTURE,
-                "model_class": _get_architecture_config(MODEL_ARCHITECTURE)["model_class_name"],
+                "MODEL_ARCHITECTURE": MODEL_FAMILY,
+                "model_class": MODEL_CLASS_NAME,
                 **{f"model_{k}": v for k, v in _model_kwargs(len(tickers)).items()},
                 "BATCH_SIZE": BATCH_SIZE, "LR": LR, "WEIGHT_DECAY": WEIGHT_DECAY,
                 "SMOKE_EPOCHS": SMOKE_EPOCHS, "MAX_EPOCHS": MAX_EPOCHS, "PATIENCE": PATIENCE, "SEED": SEED,
@@ -841,7 +800,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date):
 
     version = save_checkpoint(
         model, scaler, feature_cols, _model_kwargs(len(tickers)), CHECKPOINT_DIR,
-        model_class_name=_get_architecture_config(MODEL_ARCHITECTURE)["model_class_name"],
+        model_class_name=MODEL_CLASS_NAME,
         extra_meta={
             "tickers": tickers, "ticker_to_id": ticker_to_id,
             "gate": {k: v for k, v in gate.items()},
