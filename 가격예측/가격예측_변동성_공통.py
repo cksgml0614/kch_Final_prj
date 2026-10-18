@@ -142,6 +142,15 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
     data = prepare_pooled_training_data(tickers, start_date, end_date, shared_cache=shared_cache,
                                         prices_by_ticker=prices_by_ticker, garch_cache_dir=garch_cache_dir,
                                         garch_read_only=garch_read_only)
+    return train_and_gate(data, len(tickers), train_config)
+
+
+def train_and_gate(data, num_stocks, train_config):
+    """
+    설명: prepare_pooled_training_data 결과로 train 학습(val로 early stopping) → val 게이트 판정까지 하는 일일 학습 경로.
+    주의 사항: 주간 튜닝의 최종 후보 게이트 판정도 이 함수를 그대로 쓴다(따로 구현하지 말 것). 시드는 train_config.seed로 고정된다.
+    입력 타입->반환 타입: (dict, int, TrainConfig) -> dict
+    """
     splits, scaler = data["splits"], data["scaler"]
     X_train_s, X_val_s = data["X_train_s"], data["X_val_s"]
     _, y_train, tid_train, _, _ = splits["train"]
@@ -151,7 +160,7 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     result = train_model(
         X_train_s, y_train, tid_train, X_val_s, y_val, tid_val,
-        len(tickers), LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
+        num_stocks, LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
     )
 
     gate = evaluate_gate(result["model"], result["val_loader"], device, baselines_by_ticker)
