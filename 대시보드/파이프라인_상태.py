@@ -150,7 +150,7 @@ def log_records():
 def db_state(since):
     """
     설명: since 이후 사이클 복원에 필요한 DB 사실(데이터가 있는 날짜, 최신일, 버전별 예측 행·게이트·실측, registry)을 읽는다.
-    주의 사항: DB 읽기(읽기 전용 연결). 버전별 n·게이트·실측은 그 버전의 마지막 prediction_date 기준, n_total은 버전 전체 행.
+    주의 사항: DB 읽기(읽기 전용 연결). 버전별 n·게이트·실측·target_date는 그 버전의 마지막 prediction_date 기준, n_total은 버전 전체 행.
     입력 타입->반환 타입: (date) -> dict
     """
     stock = 데이터.query("SELECT date FROM daily_stock_prices WHERE date >= %s GROUP BY date", (since,))
@@ -164,7 +164,7 @@ def db_state(since):
         WITH v AS (SELECT model_version, max(prediction_date) AS pd, count(*) AS n_total FROM model_predictions
                    WHERE model_version >= %s GROUP BY model_version)
         SELECT p.model_version, p.prediction_date, v.n_total, count(*) AS n, sum(p.gate_passed::int) AS n_gate,
-               count(*) FILTER (WHERE p.realized_status = 'confirmed') AS n_conf
+               count(*) FILTER (WHERE p.realized_status = 'confirmed') AS n_conf, max(p.target_date) AS target_date
         FROM model_predictions_realized p JOIN v ON v.model_version = p.model_version AND v.pd = p.prediction_date
         GROUP BY 1, 2, 3""", (since_v,))
     reg = 데이터.query("SELECT model_version, source FROM model_registry WHERE model_version >= %s", (since_v,))
@@ -349,7 +349,9 @@ def _cell_registry(v, src):
         return "success", "등록·덮어씀", f"{v} · 예측 행은 이후 실행이 덮어썼다"
     if p["n_conf"] == p["n"]:
         return "success", "등록·실측", f"{v} · 실측 {p['n_conf']}/{p['n']}"
-    return "waiting", "실측 대기", f"{v} · 실측 {p['n_conf']}/{p['n']}(평가일 전)"
+    # 대기 이유: 그 버전 마지막 기준일 예측의 대상일(target_date) 종가가 아직 없다. 대상일이 휴장이면 실측은 다음 거래일.
+    return ("waiting", "실측 대기", f"평가일 {데이터.fmt_day(p['target_date'])} 종가 확정 후 반영(휴장이면 다음 거래일) · "
+            f"{v} · 실측 {p['n_conf']}/{p['n']}")
 
 
 def _cell_tuning(d, src):
