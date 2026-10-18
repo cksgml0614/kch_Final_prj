@@ -1,12 +1,13 @@
-# 대시보드/운영_대시보드.py — 새 대시보드(2026-10-11 1단계 골격, 2026-10-18 2단계: 패널 B·C 실측 연결)
+# 대시보드/운영_대시보드.py — 새 대시보드(2026-10-11 1단계 골격, 2026-10-18 2단계: 패널 A·B·C 실측 연결)
 # 실행(프로젝트 루트에서 — .streamlit/config.toml 테마가 적용된다):
 #   streamlit run 대시보드/운영_대시보드.py --server.port 8599
 # 순서: 패널 A(파이프라인 상태) → 레벨 피처 트랙 → 패널 B → 백테스트 분리 → 패널 C.
 # 규칙: 자동 새로고침(st.fragment run_every 등) 금지 — Neon 컴퓨트가 계속 깨어난다. 캐시 ttl 300 + 수동 새로고침만.
 # st.info 상자와 marker_color 직접 지정 금지, 모든 차트는 테마.show_chart()를 거친다. DB는 db_manager로만(데이터.py).
 # 외부 조회가 실패해도 앱은 멈추지 않고 그 자리에 "조회 실패" 칩을 그린다(원문은 콘솔에만 남는다).
-# ⚠️ 패널 A(KPI·단계 표시줄·격자)의 값은 아직 하드코딩한 더미다.
+# 패널 A의 출처·사이클 날짜 규칙은 파이프라인_상태.py 머리 주석 참고. 백테스트 재생 파일은 대시보드/백테스트_재생.py가 만든다.
 
+import html
 import traceback
 
 import pandas as pd
@@ -15,6 +16,7 @@ import streamlit as st
 
 import 데이터
 import 테마
+import 파이프라인_상태 as 상태
 
 
 def lookup_failed(what):
@@ -39,54 +41,124 @@ with head_r:
         st.cache_data.clear()
         st.rerun()
 
-# ── KPI 카드 4개 ──
-KPIS = [
-    ("마지막 정상 실행", "10/11(일) 12:54", "버전 20261011_035645 · 예측 100/100 (더미)"),
-    ("배포 게이트", "✓ 통과", "hybrid 1.9700 vs GARCH 2.1486 / SMA20 2.0252 / Parkinson 2.0090 (더미)"),
-    ("데이터 최신일", "10/08(목)", "주가·KOSPI 같은 날 · 오늘·미래 휴장 여부는 다음 수집 후 확정 (더미)"),
-    ("최신 예측", "100종목", "예측 기준일 10/08(목) → 평가일 10/12(월) 예정 (더미)"),
-]
-for i, (col, (label, value, sub)) in enumerate(zip(st.columns(4), KPIS)):
-    with col, st.container(key=f"card_kpi_{i}"):
-        st.html(테마.kpi_html(label, value, sub))
+# ── 패널 A: 파이프라인 상태 ──
+GRID_DAYS = 14
 
-# ── 단계 표시줄 ──
-STEPS = [("수집", "success", "완료 10/10 19:58"), ("데이터 반영", "success", "100/100"),
-         ("학습", "success", "완료 12:56"), ("게이트", "success", "통과"),
-         ("예측 저장", "running", "진행 64/100"), ("MLflow", "waiting", "대기"),
-         ("registry·실측", "skipped", "평가일 전")]
-with st.container(key="card_stepper"):
-    st.subheader("오늘 사이클")
-    parts = []
-    for i, (name, status, text) in enumerate(STEPS):
-        if i:
-            parts.append('<span class="arrow">→</span>')
-        parts.append(f"<span><b>{name}</b> {테마.status_chip(status, text)}</span>")
-    parts.append('<span class="arrow">→ 다음 실행 10/12(월) 05:00</span>')
-    st.html('<div class="stepper">' + "".join(parts) + "</div>")
 
-# ── 최근 14일 × 7단계 격자 (6가지 상태가 모두 보이도록 하드코딩) ──
-DAYS = ["9/28(월)", "9/29(화)", "9/30(수)", "10/1(목)", "10/2(금)", "10/3(토)", "10/4(일)",
-        "10/5(월)", "10/6(화)", "10/7(수)", "10/8(목)", "10/9(금)", "10/10(토)", "10/11(일)"]
-STAGES = ["① 수집", "② 데이터 반영", "③ 학습", "④ 게이트", "⑤ 예측 저장", "⑥ MLflow", "⑦ registry·실측"]
-PATTERN = "SSSWSKSSFSSSRZ"   # S 성공, W 경고, F 실패, R 진행, Z 대기, K 건너뜀 — 더미
-CODE = {"S": "success", "W": "warning", "F": "failure", "R": "running", "Z": "waiting", "K": "skipped"}
-with st.container(key="card_grid"):
-    st.subheader("최근 14일 × 단계")
-    head = "".join(f"<th>{d}</th>" for d in DAYS)
-    rows = []
-    for si, stage in enumerate(STAGES):
-        cells = []
-        for di in range(len(DAYS)):
-            status = CODE[PATTERN[(di + si) % len(PATTERN)]]
-            s = 테마.STATUS[status]
-            cls = {"skipped": ' class="status-skipped"', "failure": ' class="status-failure"'}.get(status, "")
-            cells.append(f'<td{cls} style="background:{s["bg"]};color:{s["fg"]}" '
-                         f'title="{stage} · {DAYS[di]} · {s["label"]} (더미)">{s["icon"]} {s["label"]}</td>')
-        rows.append(f'<tr><td class="stage">{stage}</td>{"".join(cells)}</tr>')
-    st.html(f'<table class="grid14"><tr><th></th>{head}</tr>{"".join(rows)}</table>')
-    legend = " ".join(테마.status_chip(k) for k in 테마.STATUS)
-    st.html(f'<div style="margin-top:8px">{legend}</div>')
+def kpi_failed_html(label):
+    """
+    설명: 조회에 실패한 KPI 카드 내용(라벨 + "조회 실패" 칩)을 만든다.
+    주의 사항: 원인은 콘솔에만 남긴다(lookup_failed와 달리 카드 높이를 맞추려고 HTML만 돌려준다).
+    입력 타입->반환 타입: (str) -> str
+    """
+    traceback.print_exc()
+    return (f'<div class="kpi"><div class="kpi-label">{label}</div>'
+            f'<div>{테마.status_chip("skipped", "조회 실패")}</div>'
+            '<div class="kpi-sub">불러오지 못했습니다.</div></div>')
+
+
+def kpi_cards(src):
+    """
+    설명: KPI 4장(마지막 정상 실행, 배포 게이트, 데이터 최신일, 최신 예측)의 HTML을 만든다.
+    주의 사항: 카드마다 따로 실패를 처리한다. 마지막 정상 실행·게이트는 MLflow 일일_자동화의 마지막 FINISHED run.
+    입력 타입->반환 타입: (dict) -> list[str]
+    """
+    cards = []
+    try:
+        run = 상태.last_finished_daily_run(src)
+        if run is None:
+            cards.append(테마.kpi_html("마지막 정상 실행", "기록 없음", f"MLflow {상태.EXP_DAILY}에 FINISHED run 없음"))
+            cards.append(테마.kpi_html("배포 게이트", "기록 없음", ""))
+        else:
+            n = "-" if pd.isna(run["n_success"]) else int(run["n_success"])
+            cards.append(테마.kpi_html("마지막 정상 실행", f"{데이터.fmt_day(run['start'])} {상태.hm(run['start'])}",
+                                     f"버전 {run['version']} · 예측 {n}/{상태.N_TICKERS} · 기준일 {run['prediction_date']}"))
+            ok = run["gate_passed"] is not None and run["gate_passed"] >= 1
+            cards.append(테마.kpi_html("배포 게이트", "✓ 통과" if ok else "✕ 미통과",
+                                     f"hybrid {run['hybrid']:.4f} vs GARCH {run['garch']:.4f} / SMA20 {run['sma']:.4f} / "
+                                     f"Parkinson {run['parkinson']:.4f} (val 종목평균 RMSE, 버전 {run['version']})"))
+    except Exception:
+        cards += [kpi_failed_html("마지막 정상 실행"), kpi_failed_html("배포 게이트")]
+    try:
+        if src["db"] is None:
+            raise RuntimeError("DB 조회 실패")
+        lt = src["db"]["latest"]
+        cards.append(테마.kpi_html("데이터 최신일", 데이터.fmt_day(lt.get("stock")),
+                                 f"주가 {데이터.fmt_day(lt.get('stock'))} · KOSPI {데이터.fmt_day(lt.get('KOSPI'))} · "
+                                 f"KOSDAQ {데이터.fmt_day(lt.get('KOSDAQ'))}"))
+    except Exception:
+        cards.append(kpi_failed_html("데이터 최신일"))
+    try:
+        df = 데이터.latest_predictions()
+        if df.empty:
+            cards.append(테마.kpi_html("최신 예측", "기록 없음", ""))
+        else:
+            cards.append(테마.kpi_html("최신 예측", f"{len(df)}종목",
+                                     f"예측 기준일 {데이터.fmt_day(df['prediction_date'].iloc[0])} → "
+                                     f"평가일 {데이터.fmt_day(df['target_date'].iloc[0])}"))
+    except Exception:
+        cards.append(kpi_failed_html("최신 예측"))
+    return cards
+
+
+def grid_cell(stage, day, cell):
+    """
+    설명: 격자 칸 하나의 <td>를 만든다(색 + 아이콘 + 글자, 마우스 올림에 근거).
+    주의 사항: 상태는 테마.STATUS 6종만 쓴다.
+    입력 타입->반환 타입: (str, date, tuple) -> str
+    """
+    status, text, tip = cell
+    s = 테마.STATUS[status]
+    cls = {"skipped": ' class="status-skipped"', "failure": ' class="status-failure"'}.get(status, "")
+    title = html.escape(f"{stage} · {데이터.fmt_day(day)} · {text} — {tip}")
+    return (f'<td{cls} style="background:{s["bg"]};color:{s["fg"]};white-space:normal" title="{title}">'
+            f'{s["icon"]} {html.escape(text)}</td>')
+
+
+def render_panel_a():
+    """
+    설명: KPI 4장, 오늘 사이클 표시줄, 최근 14일 × 8단계 격자를 출처에서 복원해 그린다.
+    주의 사항: 출처(GitHub·MLflow·로그·DB) 하나가 실패해도 그 칸만 "조회 실패"가 된다.
+    입력 타입->반환 타입: () -> None
+    """
+    today, next_run = 상태.today_cycle()
+    days = 상태.days_back(today, GRID_DAYS)
+    src = 상태.load_sources(days[0])
+    failed = [k for k, v in src.items() if v is None]
+
+    for i, (col, card) in enumerate(zip(st.columns(4), kpi_cards(src))):
+        with col, st.container(key=f"card_kpi_{i}"):
+            st.html(card)
+
+    grid = 상태.build_grid(days, src)
+    with st.container(key="card_stepper"):
+        st.subheader(f"오늘 사이클 — {데이터.fmt_day(today)}")
+        parts = []
+        for i, stage in enumerate(상태.STAGES[:7]):
+            status, text, _ = grid[stage][-1]
+            if i:
+                parts.append('<span class="arrow">→</span>')
+            parts.append(f"<span><b>{stage[2:]}</b> {테마.status_chip(status, text)}</span>")
+        parts.append(f'<span class="arrow">→ 다음 실행 {데이터.fmt_day(next_run)} 05:00</span>')
+        st.html('<div class="stepper">' + "".join(parts) + "</div>")
+        st.caption("사이클 날짜 = 시각에서 12시간을 뺀 KST 날짜(저녁 수집과 다음 날 05:00 예측이 한 사이클). "
+                   + (f"조회 실패한 출처: {', '.join(failed)}." if failed else "출처 4개(GitHub·MLflow·로그·DB) 모두 조회됨."))
+
+    with st.container(key="card_grid"):
+        st.subheader(f"최근 {GRID_DAYS}일 × 단계")
+        head = "".join(f"<th>{데이터.fmt_day(d)}</th>" for d in days)
+        rows = [f'<tr><td class="stage">{stage}</td>{"".join(grid_cell(stage, d, c) for d, c in zip(days, grid[stage]))}</tr>'
+                for stage in 상태.STAGES]
+        st.html(f'<div style="overflow-x:auto"><table class="grid14"><tr><th></th>{head}</tr>{"".join(rows)}</table></div>')
+        legend = " ".join(테마.status_chip(k) for k in 테마.STATUS)
+        st.html(f'<div style="margin-top:8px">{legend}</div>')
+        st.caption("칸에 마우스를 올리면 근거가 보인다. 기록 없음 = 출처에 그 날짜 기록이 없음(○), 조회 실패 = 출처 자체를 읽지 못함. "
+                   "① 수집은 GitHub Actions(최근 run 20개)·로컬 [collect], ② [PRICE-ALIGN], ③⑥ MLflow run(없으면 로그), "
+                   "④ gate_passed, ⑤ 그 버전 마지막 기준일의 예측 행 수(100 성공·90 이상 경고·미만 실패, 이후 재실행이 덮어썼으면 실행 기록의 저장 수), "
+                   "⑦ model_registry·실측, ⑧ MLflow 주간_튜닝. 시각만 적힌 칸은 그 시각에 끝났다는 뜻.")
+
+
+render_panel_a()
 
 # ── 패널 B: 오늘의 예측 ──
 def render_panel_b():
