@@ -3,6 +3,7 @@
 # 캐시는 st.cache_data(ttl=300)와 수동 새로고침만 쓴다(자동 새로고침 금지 — Neon 컴퓨트가 계속 깨어난다).
 # NUMERIC 컬럼은 SQL에서 float8로 바꿔 읽는다(Decimal 섞임 방지).
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -107,3 +108,87 @@ def latest_predictions():
     df = df.sort_values("predicted_volatility", ascending=False).reset_index(drop=True)
     df.insert(0, "rank", range(1, len(df) + 1))
     return df
+
+# ── 패널 C: 성능 ──────────────────────────────────────────────────────────────────
+
+# 그룹 이름(화면 라벨). model_registry.source='live' 행만 운영으로 보고, 'test'와 backtest_d4_20260914는 이 화면에서 뺀다.
+GROUP_PRE, GROUP_POST, GROUP_REPLAY = "운영(사전 예측)", "운영(사후 계산)", "백테스트 재생"
+PREDICTION_COLS = {"predicted_volatility": "하이브리드", "garch_baseline": "GARCH",
+                   "sma20_baseline": "SMA20", "parkinson_sma20_baseline": "Parkinson"}
+MIN_ROWS_PER_DAY = 90  # 이보다 행이 적은 평가일은 일별 RMSE에서 뺀다("불완전")
+PRE_CUTOFF_HOUR, PRE_CUTOFF_MINUTE = 8, 30  # model_version(KST)이 평가일 08:30보다 이르면 사전 예측
+REPLAY_DIR = os.environ.get("BACKTEST_REPLAY_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache"))
+REPLAY_PARQUET = os.path.join(REPLAY_DIR, "backtest_replay.parquet")
+REPLAY_META = os.path.join(REPLAY_DIR, "backtest_replay.meta.json")
+
+
+def is_pre_prediction(version, realized_date):
+    """
+    설명: model_version 시각(KST)이 평가일(realized_date) 08:30 KST보다 이르면 True(사전 예측).
+    주의 사항: model_version은 체크포인트 저장 시각이라 실제 저장보다 최대 약 11분 이르다(그래서 장 시작 09:00 대신 08:30).
+    입력 타입->반환 타입: (str, date) -> bool|None
+    """
+    v = version_kst(version)
+    if v is None or realized_date is None or pd.isna(realized_date):
+        return None
+    cut = datetime(realized_date.year, realized_date.month, realized_date.day, PRE_CUTOFF_HOUR, PRE_CUTOFF_MINUTE, tzinfo=KST)
+    return v < cut
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def operational_records():
+    """
+    설명: 운영(live) 예측 행과 실측(model_predictions_realized 뷰)을 읽어 사전/사후 그룹을 붙여 돌려준다.
+    주의 사항: DB 읽기. 실측 대기 행은 group이 '실측 대기'이고 계산에서 뺀다.
+    입력 타입->반환 타입: () -> pd.DataFrame
+    """
+    df = query("""
+        SELECT p.ticker, p.prediction_date, p.target_date, p.realized_date, p.realized_status,
+               p.realized_volatility, p.target_halted,
+               p.predicted_volatility::float8 AS predicted_volatility, p.garch_baseline::float8 AS garch_baseline,
+               p.sma20_baseline::float8 AS sma20_baseline, p.parkinson_sma20_baseline::float8 AS parkinson_sma20_baseline,
+               p.gate_passed, p.input_data_suspect, p.model_version
+        FROM model_predictions_realized p JOIN model_registry r USING (model_version)
+        WHERE r.source = 'live'""")
+    pre = [is_pre_prediction(v, d) if s == "confirmed" else None
+           for v, d, s in zip(df["model_version"], df["realized_date"], df["realized_status"])]
+    df["group"] = [GROUP_PRE if x else GROUP_POST if x is False else "실측 대기" for x in pre]
+    return df
+
+
+@st.cache_data(ttl=TTL, show_spinner=False)
+def replay_records():
+    """
+    설명: 백테스트 재생 파일(대시보드/cache/)을 읽어 (DataFrame, meta dict)로 돌려준다. 파일이 없으면 (None, None).
+    주의 사항: 파일 읽기만. 재생은 대시보드/백테스트_재생.py를 사람이 실행해 만든다.
+    입력 타입->반환 타입: () -> (pd.DataFrame|None, dict|None)
+    """
+    if not (os.path.exists(REPLAY_PARQUET) and os.path.exists(REPLAY_META)):
+        return None, None
+    df = pd.read_parquet(REPLAY_PARQUET)
+    with open(REPLAY_META, encoding="utf-8") as f:
+        meta = json.load(f)
+    df["group"] = [GROUP_REPLAY if s == "confirmed" else "실측 대기" for s in df["realized_status"]]
+    return df, meta
+
+
+def tickermean_rmse(df, col):
+    """
+    설명: 종목별 RMSE(예측 col vs realized_volatility)를 구해 종목 평균을 돌려준다(배포 게이트와 같은 집계).
+    주의 사항: 실측이 없는 행은 뺀다. 하루치(종목당 1행)면 종목별 RMSE = |오차|라 값은 평균 절대 오차와 같다.
+    입력 타입->반환 타입: (pd.DataFrame, str) -> float
+    """
+    d = df.dropna(subset=["realized_volatility", col])
+    if d.empty:
+        return float("nan")
+    err2 = (d[col] - d["realized_volatility"]) ** 2
+    return float(err2.groupby(d["ticker"]).mean().pow(0.5).mean())
+
+
+def rmse_row(df):
+    """
+    설명: 예측 4계열의 종목평균 RMSE를 {라벨: 값}으로 돌려준다.
+    주의 사항: 없음.
+    입력 타입->반환 타입: (pd.DataFrame) -> dict
+    """
+    return {label: tickermean_rmse(df, col) for col, label in PREDICTION_COLS.items()}

@@ -1,4 +1,4 @@
-# 대시보드/운영_대시보드.py — 새 대시보드(2026-10-11 1단계 골격, 2026-10-18 2단계: 패널 B 실측 연결)
+# 대시보드/운영_대시보드.py — 새 대시보드(2026-10-11 1단계 골격, 2026-10-18 2단계: 패널 B·C 실측 연결)
 # 실행(프로젝트 루트에서 — .streamlit/config.toml 테마가 적용된다):
 #   streamlit run 대시보드/운영_대시보드.py --server.port 8599
 # 순서: 패널 A(파이프라인 상태) → 레벨 피처 트랙 → 패널 B → 백테스트 분리 → 패널 C.
@@ -24,7 +24,8 @@ def lookup_failed(what):
     입력 타입->반환 타입: (str) -> None
     """
     traceback.print_exc()
-    st.html(f'{테마.status_chip("skipped", "조회 실패")} <span>{what}을(를) 불러오지 못했습니다.</span>')
+    st.html(f'{테마.status_chip("skipped", "조회 실패")} <span>{what} — 불러오지 못했습니다.</span>')
+
 
 st.set_page_config(page_title="변동성 예측 운영", layout="wide")
 테마.inject_css()
@@ -140,3 +141,141 @@ def render_panel_b():
 
 with st.container(key="card_panel_b"):
     render_panel_b()
+
+
+# ── 패널 C: 성능 ──
+def day_chips(g):
+    """
+    설명: 운영 기록 평가일 하나(g = 그날 행들)의 상태 칩 HTML과 일별 RMSE 사용 여부를 돌려준다.
+    주의 사항: 행이 MIN_ROWS_PER_DAY 미만이면 "불완전"(일별 RMSE 제외), 버전이 둘 이상이면 "버전 혼재".
+    입력 타입->반환 타입: (pd.DataFrame) -> (str, bool)
+    """
+    chips, n = [], len(g)
+    usable = n >= 데이터.MIN_ROWS_PER_DAY
+    if not usable:
+        chips.append(테마.status_chip("warning", f"불완전 — {n}행(90 미만), 일별 RMSE 제외"))
+    nv = g["model_version"].nunique()
+    if nv > 1:
+        chips.append(테마.status_chip("warning", f"버전 혼재 {nv}개"))
+    n_pre = int((g["group"] == 데이터.GROUP_PRE).sum())
+    if n_pre == n:
+        chips.append(테마.status_chip("success", "사전 예측"))
+    elif n_pre == 0:
+        chips.append(테마.status_chip("warning", "사후 계산"))
+    else:
+        chips.append(테마.status_chip("warning", f"사전 {n_pre} · 사후 {n - n_pre}"))
+    n_gate = int(g["gate_passed"].sum())
+    chips.append(테마.status_chip("success", f"게이트 통과 {n_gate}") if n_gate == n
+                 else 테마.status_chip("failure", f"게이트 미통과 {n - n_gate}"))
+    n_sus = int(g["input_data_suspect"].sum())
+    chips.append(테마.status_chip("success", "입력 정상") if n_sus == 0 else 테마.status_chip("warning", f"입력 의심 {n_sus}"))
+    return " ".join(chips), usable
+
+
+def render_panel_c():
+    """
+    설명: 운영 기록(사전·사후)과 백테스트 재생(최근 15거래일)의 예측 대 실현 성능을 그룹별로 나눠 그린다.
+    주의 사항: 실측 대기 행은 계산에서 뺀다. 재생 파일이 없으면 그 구역만 안내 문구로 바꾼다.
+    입력 타입->반환 타입: () -> None
+    """
+    st.subheader("성능 — 예측 대 실현")
+    try:
+        ops = 데이터.operational_records()
+    except Exception:
+        lookup_failed("운영 기록")
+        ops = None
+    try:
+        rep, meta = 데이터.replay_records()
+    except Exception:
+        lookup_failed("백테스트 재생 파일")
+        rep, meta = None, None
+
+    st.caption("RMSE는 배포 게이트와 같은 종목평균(종목별 RMSE의 평균)이다. 하루치는 종목당 1행이라 평균 절대 오차와 같다. "
+               "model_registry.source가 live가 아닌 행(test, backtest_d4_20260914)은 이 화면에서 뺐다. "
+               "사전 예측 = 모델 버전 시각(KST)이 평가일 08:30보다 이른 행.")
+
+    # 재생 구역 고정 문구
+    rep_conf = None
+    if rep is None:
+        st.html(테마.status_chip("waiting", "재생 파일 없음") + " 재생 파일 없음 — 대시보드\\백테스트_재생.py를 실행하세요")
+    else:
+        rep_conf = rep[rep["group"] == 데이터.GROUP_REPLAY]
+        ep = meta.get("eval_period") or ["-", "-"]
+        st.html(f'<div style="border-left:4px solid {테마.BORDER};padding:4px 12px">'
+                f"<b>백테스트 재생</b>: 현재 모델(버전 {meta['checkpoint_version']})로 과거 날짜를 다시 계산한 값이며 "
+                f"운영 중 기록이 아닙니다. 학습·검증 구간(~{meta['split_val_end']}) 밖의 날짜만 사용했습니다. "
+                f"생성 시각 {meta['generated_at_kst']} KST, 대상 기간 {ep[0]} ~ {ep[1]}(평가일 {meta['n_eval_days']}거래일), "
+                f"데이터 마지막 확정일 {meta['data_last_confirmed_date']}, 코드 {str(meta['code_commit'])[:12]}.</div>")
+
+    # 그룹별 요약 표
+    groups = []
+    if ops is not None:
+        groups += [(name, ops[ops["group"] == name]) for name in (데이터.GROUP_PRE, 데이터.GROUP_POST)]
+    if rep_conf is not None:
+        groups.append((데이터.GROUP_REPLAY, rep_conf))
+    summary = [{"그룹": name, "평가일 수": g["realized_date"].nunique(), "행 수": len(g),
+                "기간": f"{g['realized_date'].min()} ~ {g['realized_date'].max()}" if len(g) else "-",
+                **데이터.rmse_row(g)} for name, g in groups]
+    if summary:
+        st.dataframe(pd.DataFrame(summary), hide_index=True, width="stretch", column_config={
+            k: st.column_config.NumberColumn(format="%.4f") for k in 데이터.PREDICTION_COLS.values()})
+
+    # 일별 RMSE: 재생 4계열 선 + 운영 하이브리드 점(90행 이상인 평가일만)
+    fig = go.Figure()
+    if rep_conf is not None and len(rep_conf):
+        for col, label in 데이터.PREDICTION_COLS.items():
+            days = sorted(rep_conf["realized_date"].unique())
+            vals = [데이터.tickermean_rmse(rep_conf[rep_conf["realized_date"] == d], col) for d in days]
+            fig.add_trace(go.Scatter(x=days, y=vals, mode="lines+markers", name=f"재생 {label}"))
+    op_days = []
+    if ops is not None:
+        conf = ops[ops["realized_status"] == "confirmed"]
+        for d, g in conf.groupby("realized_date"):
+            chips, usable = day_chips(g)
+            op_days.append((d, g, chips, usable))
+        pts = [(d, 데이터.tickermean_rmse(g, "predicted_volatility"), bool((g["group"] == 데이터.GROUP_PRE).all()))
+               for d, g, _, usable in op_days if usable]
+        if pts:
+            fig.add_trace(go.Scatter(
+                x=[p[0] for p in pts], y=[p[1] for p in pts], mode="markers", name="운영 기록 하이브리드(●사전 ✕사후·혼재)",
+                marker=dict(size=11, symbol=["circle" if p[2] else "x" for p in pts]),
+                hovertemplate="%{x}<br>RMSE %{y:.4f}<extra></extra>"))
+    st.caption("일별 종목평균 RMSE — 선: 백테스트 재생 4계열, 점: 운영 기록 하이브리드(90행 이상인 평가일만)")
+    테마.show_chart(fig, height=360, yaxis_title="종목평균 RMSE", xaxis_title="평가일(실측일)")
+
+    # 산점도: 그룹별 예측(하이브리드) 대 실현
+    sc, hi = go.Figure(), 0.0
+    for name, g in groups:
+        g = g.dropna(subset=["realized_volatility"])
+        if len(g):
+            sc.add_trace(go.Scattergl(x=g["realized_volatility"], y=g["predicted_volatility"], mode="markers",
+                                      name=f"{name} ({len(g)}행)", opacity=0.5, marker=dict(size=5),
+                                      hovertemplate="실현 %{x:.2f}<br>예측 %{y:.2f}<extra></extra>"))
+            hi = max(hi, float(g["realized_volatility"].max()), float(g["predicted_volatility"].max()))
+    sc.add_shape(type="line", x0=0, y0=0, x1=hi, y1=hi, line=dict(dash="dot", color=테마.TEXT_MUTED, width=1))
+    st.caption("예측(하이브리드) 대 실현 — 점선은 예측 = 실현, 100종목 pooled")
+    테마.show_chart(sc, height=420, xaxis_title="실현 변동성", yaxis_title="예측 변동성")
+
+    # 운영 기록 표(평가일별)
+    if ops is None:
+        return
+    head = "".join(f"<th>{h}</th>" for h in ("평가일", "예측 기준일", "행", "상태", *데이터.PREDICTION_COLS.values()))
+    body = []
+    for t, g in ops[ops["realized_status"] != "confirmed"].groupby("target_date"):
+        body.append(f'<tr><td class="stage">{데이터.fmt_day(t)}</td><td>{데이터.fmt_day(g["prediction_date"].iloc[0])}</td>'
+                    f'<td>{len(g)}</td><td style="text-align:left">{테마.status_chip("waiting", "실측 대기")}</td>'
+                    + "<td>-</td>" * len(데이터.PREDICTION_COLS) + "</tr>")
+    for d, g, chips, usable in sorted(op_days, key=lambda x: x[0], reverse=True):
+        vals = 데이터.rmse_row(g) if usable else {}
+        cells = "".join(f"<td>{vals[k]:.4f}</td>" if usable else "<td>-</td>" for k in 데이터.PREDICTION_COLS.values())
+        pds = ", ".join(데이터.fmt_day(x) for x in sorted(g["prediction_date"].unique()))
+        body.append(f'<tr><td class="stage">{데이터.fmt_day(d)}</td><td>{pds}</td><td>{len(g)}</td>'
+                    f'<td style="text-align:left;white-space:normal">{chips}</td>{cells}</tr>')
+    dates = ops[ops["realized_status"] == "confirmed"]["realized_date"]
+    st.caption(f"운영 기록 — 평가일 {dates.nunique()}개({dates.min()} ~ {dates.max()}). 평가일 = prediction_date 뒤 첫 거래일, "
+               "신뢰 조건(게이트 통과·입력 정상)은 칩으로 표시")
+    st.html(f'<table class="grid14"><tr>{head}</tr>{"".join(body)}</table>')
+
+
+with st.container(key="card_panel_c"):
+    render_panel_c()
