@@ -122,6 +122,8 @@ def mlflow_runs():
                 rows.append({"experiment": names[eid], "run_uuid": run_uuid, "status": status,
                              "start": datetime.fromtimestamp(start / 1000, KST),
                              "version": tags.get("version"), "prediction_date": tags.get("prediction_date"),
+                             "run_kind": tags.get("run_kind"), "state": tags.get("state"),
+                             "tuned_params_id": tags.get("tuned_params_id"),
                              "gate_passed": mets.get("gate_passed"), "hybrid": mets.get("hybrid_rmse_tickermean"),
                              "garch": mets.get("garch_rmse"), "sma": mets.get("sma_rmse"),
                              "parkinson": mets.get("parkinson_rmse"), "n_success": mets.get("n_predictions_success")})
@@ -427,18 +429,41 @@ def _cell_registry(v, src):
             f"{v} · 실측 {p['n_conf']}/{p['n']}")
 
 
+# 주간 튜닝 부모 run의 state 태그 → (상태, 칸 글자 앞 단어, 툴팁 설명). 대시보드는 앞 단어로 아이콘을 고른다.
+TUNING_STATES = {
+    "adopted": ("success", "채택", "새 값 채택 — 다음 일일 학습부터 적용"),
+    "kept": ("success", "유지", "후보 기각 — 현재 적용 값 유지"),
+    "reverted": ("warning", "복귀", "현재 적용 값이 기본값보다 나빠 기본값으로 되돌림 — 다음 일일 학습은 기본값"),
+    "none": ("success", "기본", "후보 기각 — 채택값 없음, 기본값 유지"),
+}
+
+
 def _cell_tuning(d, src):
-    """⑧ 튜닝: MLflow 실험 주간_튜닝의 run."""
+    """
+    ⑧ 튜닝: 실험 주간_튜닝의 부모 run(태그 run_kind=tuning_parent)만 본다 — 시도별 중첩 run(tuning_trial)은 무시.
+    의존은 run_kind·state 태그와 run 시각·status뿐(지표 이름은 튜닝 브랜치에서 바뀔 수 있다). 부모 run이 없으면 기록 없음.
+    """
     if src["mlflow"] is None:
         return (*LOOKUP_FAILED, "MLflow 조회 실패")
     runs, exps = src["mlflow"]
     if EXP_TUNING not in exps:
         return (*NO_RECORD, f"MLflow 실험 '{EXP_TUNING}' 없음")
-    r = runs[(runs["experiment"] == EXP_TUNING) & (runs["start"].map(cycle_day) == d)] if len(runs) else runs
+    r = runs[(runs["experiment"] == EXP_TUNING) & (runs["run_kind"] == "tuning_parent")
+             & (runs["start"].map(cycle_day) == d)] if len(runs) else runs
     if not len(r):
-        return (*NO_RECORD, "튜닝 run 없음")
+        return (*NO_RECORD, "튜닝 부모 run 없음(시도별 중첩 run은 보지 않는다)")
     last = r.sort_values("start").iloc[-1]
-    return ("success" if last["status"] == "FINISHED" else "failure"), f"{last['status']} {hm(last['start'])}", EXP_TUNING
+    t = hm(last["start"])
+    head = f"주간 튜닝 {last['start']:%m/%d} {t} 시작"
+    if last["status"] == "RUNNING":
+        return "running", f"진행 {t}", f"{head} · 진행 중"
+    if last["status"] != "FINISHED":
+        return "failure", f"실패 {t}", f"{head} · 부모 run {last['status']} — 결과 파일은 바뀌지 않았을 수 있다"
+    tid = f" · {last['tuned_params_id']}" if last["tuned_params_id"] else ""
+    if last["state"] not in TUNING_STATES:
+        return "success", f"완료 {t}", f"{head} · 완료, state 태그 없음·알 수 없음({last['state']!r}){tid}"
+    status, word, desc = TUNING_STATES[last["state"]]
+    return status, f"{word} {t}", f"{head} · state={last['state']} · {desc}{tid}"
 
 
 def build_grid(days, src):

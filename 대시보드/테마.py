@@ -56,6 +56,14 @@ _ICON_SVG = {
     "failure": '<path d="M4 4l8 8M12 4l-8 8" stroke="#000" stroke-width="2" stroke-linecap="round"/>',
     "waiting": '<circle cx="8" cy="8" r="5" fill="none" stroke="#000" stroke-width="2"/>',
     "skipped": '<path d="M3.5 8h9" stroke="#000" stroke-width="2" stroke-linecap="round"/>',
+    # ⑧ 주간 튜닝 결과(같은 굵기): 채택 ↑, 유지 =, 복귀 ↩, 기본 유지 □
+    "tune-adopted": '<path d="M8 13V3.5M4 7.5l4-4 4 4" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" '
+                    'stroke-linejoin="round"/>',
+    "tune-kept": '<path d="M3.5 6h9M3.5 10h9" stroke="#000" stroke-width="2" stroke-linecap="round"/>',
+    "tune-reverted": '<path d="M6 3.5l-3 3 3 3" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" '
+                     'stroke-linejoin="round"/><path d="M3.5 6.5H10a3 3 0 0 1 0 6H7" fill="none" stroke="#000" '
+                     'stroke-width="2" stroke-linecap="round"/>',
+    "tune-none": '<rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="none" stroke="#000" stroke-width="2"/>',
 }
 
 

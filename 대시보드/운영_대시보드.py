@@ -177,8 +177,9 @@ def grid_cell(stage_no, stage, day, cell, basis=""):
     cls = " ".join(c for c in ({"skipped": "status-skipped", "failure": "status-failure"}.get(status, ""),
                                "over" if over else "") if c)
     label = f"<span>{esc(short)}</span>" if short else ""
+    ico = TUNE_ICONS.get(text.split(" ")[0], status) if stage_no == 8 else status
     return (f'<td class="{cls}" data-status="{status}" style="background:{s["bg"]};color:{s["fg"]}" '
-            f'title="{esc(title)}"><span class="cell">{테마.icon(status)}{label}</span></td>')
+            f'title="{esc(title)}"><span class="cell">{테마.icon(ico)}{label}</span></td>')
 
 
 def grid_header(day, today, current, basis=""):
@@ -195,12 +196,22 @@ def grid_header(day, today, current, basis=""):
             f'<span class="wd">{데이터.WEEKDAYS[day.weekday()]}</span></th>')
 
 
+# ⑧ 튜닝 칸: 파이프라인_상태.TUNING_STATES의 앞 단어 → 아이콘. 칸 글자는 부모 run 시각, 결과는 아이콘 모양으로 구분한다
+# (5글자·줄넘김 금지 칸이라 "채택 05:34"를 다 쓰면 1280 폭에서 넘친다 — 단어는 툴팁과 범례에 있다).
+TUNE_ICONS = {"채택": "tune-adopted", "유지": "tune-kept", "복귀": "tune-reverted", "기본": "tune-none"}
+TUNE_LEGEND = (("tune-adopted", "success", "채택", "새 값 채택"), ("tune-kept", "success", "유지", "현재 적용 값 유지"),
+               ("tune-reverted", "warning", "복귀", "기본값으로 되돌림"), ("tune-none", "success", "기본", "채택값 없음, 기본값 유지"))
+
+
 def grid_legend():
-    """범례 한 줄: 상태 6종 + 기록 없음 점 + 덮어씀 표시."""
+    """범례 한 줄: 상태 6종 + 기록 없음 점 + 덮어씀 표시 + ⑧ 튜닝 결과 4종."""
     items = [f'<span style="color:{s["fg"]}">{테마.icon(k)}<span style="color:{테마.TEXT_MUTED}">{s["label"]}</span></span>'
              for k, s in 테마.STATUS.items()]
     items.append('<span><span class="swatch"><span class="nodot"></span></span>기록 없음</span>')
-    items.append('<span><span class="swatch over"></span>이후 재실행이 덮어씀</span>')
+    items.append('<span title="이후 재실행이 같은 키를 덮어씀"><span class="swatch over"></span>덮어씀</span>')
+    items.append('<span title="⑧ 주간 튜닝 결과(칸 글자는 부모 run 시작 시각)">⑧</span>' + "".join(
+        f'<span title="{tip}" style="color:{테마.STATUS[st]["fg"]}">{테마.icon(ic)}<span style="color:{테마.TEXT_MUTED}">{lb}</span></span>'
+        for ic, st, lb, tip in TUNE_LEGEND))
     return '<div class="legend">' + "".join(items) + "</div>"
 
 
@@ -210,7 +221,7 @@ CYCLE_TIP = ("열 날짜 = 그 아침 05:00 실행 날짜. 전날 12:00~당일 1
 GRID_TIP = ("칸에 마우스를 올리면 전문과 근거가 보인다. 기록 없음 = 출처에 그 날짜 기록이 없음, 조회 실패 = 출처를 읽지 못함. "
             "① 수집: GitHub Actions·로컬 수집 / ② 가격 정렬 점검 / ③⑥ MLflow run(없으면 로그) / ④ 게이트 / "
             "⑤ 그 버전 마지막 기준일의 예측 행 수(100 성공·90 이상 경고·미만 실패, 이후 재실행이 덮어썼으면 실행 기록의 저장 수) / "
-            "⑦ 모델 등록·실측 / ⑧ 주간 튜닝. 시각은 그 단계가 끝난 시각. "
+            "⑦ 모델 등록·실측 / ⑧ 주간 튜닝(부모 run의 시작 시각, 아이콘 = 결과: 채택·유지·기본값으로 복귀·기본 유지). 시각은 그 단계가 끝난 시각(⑧은 시작 시각). "
             "건너뜀(휴장) = ①② 단계에서 수집 대상일이 휴장으로 확인되고(주가·KOSPI 행 없음 + 뒤 거래일 있음) 그 단계가 성공한 경우만.")
 
 
