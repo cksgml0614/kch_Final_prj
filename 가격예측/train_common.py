@@ -17,7 +17,7 @@ from 가격예측.model import PooledLSTMRegressor
 class TrainConfig:
     """
     설명: 운영 LSTM 학습 하이퍼파라미터 묶음. 기본값이 운영값이다.
-    주의 사항: 튜닝은 이 객체를 바꿔 train_model에 넘긴다. 튜닝 검증에 게이트 val 구간을 쓰지 말 것.
+    주의 사항: 주간 튜닝은 이 객체를 바꿔 train_model에 넘긴다(검증 구간 사용과 채택 규칙은 결정기록.md "주간 튜닝").
     입력 타입->반환 타입: (필드 키워드 인자) -> TrainConfig
     """
     hidden_size: int = 32

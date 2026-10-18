@@ -307,17 +307,18 @@ def count_prediction_results(results):
 
 # ── 실행 기록(MLflow) ─────────────────────────────────────────────────────────────
 
-def build_run_payload(tickers, version, train_out, gate, prediction_results, model_kwargs, input_data_suspect=False):
+def build_run_payload(tickers, version, train_out, gate, prediction_results, model_kwargs, input_data_suspect=False,
+                      tuned_params_id=None):
     """
     설명: MLflow에 남길 run 이름·태그·파라미터·손실 수열·지표를 dict로 만든다(run 이름 "pd<prediction_date>_v<version>").
-    주의 사항: 태그·파라미터·지표 이름은 기존 MLflow 기록과 같아야 한다(바꾸지 말 것). n_input_suspect는 0 또는 성공 종목 수.
-    입력 타입->반환 타입: (list[str], str, dict, dict, dict, dict, bool) -> dict
+    주의 사항: 태그·파라미터·지표 이름은 바꾸지 말 것. n_input_suspect는 0 또는 성공 종목 수. 채택된 튜닝 값으로 돈 실행만 param tuned_params_id를 더한다.
+    입력 타입->반환 타입: (list[str], str, dict, dict, dict, dict, bool, str|None) -> dict
     """
     cfg = train_out["train_config"]
     pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
     pred_date_tag = ",".join(pred_dates) if pred_dates else "none"
     n_success, n_failed, n_excluded = count_prediction_results(prediction_results)
-    return {
+    payload = {
         "run_name": f"pd{pred_date_tag}_v{version}",
         "tags": {
             "n_tickers": len(tickers), "version": version,
@@ -353,6 +354,9 @@ def build_run_payload(tickers, version, train_out, gate, prediction_results, mod
             },
         ],
     }
+    if tuned_params_id is not None:
+        payload["params"]["tuned_params_id"] = tuned_params_id
+    return payload
 
 
 def _mlflow_health_problem(uri):
