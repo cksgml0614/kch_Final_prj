@@ -6,6 +6,9 @@
 # 열 날짜(2026-10-18 변경): 그 사이클의 아침 05:00 실행 날짜 = cycle_day + 1일(column_day). 묶음 경계는 그대로 두고 이름만
 #   하루 뒤로 옮긴 것이다(예: 10/17 22:58 Actions, 10/18 05:02 예측 → 10/18 열). 사이클의 수집 대상 거래일은 cycle_day(열 날짜 - 1일).
 # 기록이 없는 칸은 새 상태를 만들지 않고 waiting + "기록 없음", 출처 조회가 실패한 칸은 skipped + "조회 실패".
+# 휴장 건너뜀(2026-10-18): ① 수집·② 데이터 반영만, 수집 대상일이 데이터로 휴장임이 증명되고 그 단계가 성공했을 때만
+#   skipped + "휴장"(non_trading_evidence). 학습·예측은 주말에도 돌므로 ③ 이후는 건너뜀으로 바꾸지 않는다.
+#   증명이 안 되거나 실패·경고면 원래 판정 그대로 — 실패를 휴장으로 덮지 않는다.
 # 로그의 [collect]·[PRICE-ALIGN] 줄은 2026-10-17부터만 있다(그 전 날짜의 해당 단계는 "기록 없음").
 
 import glob
@@ -175,6 +178,7 @@ def db_state(since):
     """
     stock = 데이터.query("SELECT date FROM daily_stock_prices WHERE date >= %s GROUP BY date", (since,))
     ind = 데이터.query("SELECT date FROM market_indicators WHERE date >= %s GROUP BY date", (since,))
+    kospi = 데이터.query("SELECT date FROM market_indicators WHERE indicator_code = 'KOSPI' AND date >= %s", (since,))
     latest = 데이터.query("""
         SELECT 'stock' AS k, max(date) AS d FROM daily_stock_prices
         UNION ALL SELECT indicator_code, max(date) FROM market_indicators WHERE indicator_code IN ('KOSPI', 'KOSDAQ')
@@ -188,7 +192,7 @@ def db_state(since):
         FROM model_predictions_realized p JOIN v ON v.model_version = p.model_version AND v.pd = p.prediction_date
         GROUP BY 1, 2, 3""", (since_v,))
     reg = 데이터.query("SELECT model_version, source FROM model_registry WHERE model_version >= %s", (since_v,))
-    return {"stock_dates": set(stock["date"]), "indicator_dates": set(ind["date"]),
+    return {"stock_dates": set(stock["date"]), "indicator_dates": set(ind["date"]), "kospi_dates": set(kospi["date"]),
             "latest": dict(zip(latest["k"], latest["d"])),
             "preds": {r["model_version"]: r for r in preds.to_dict("records")},
             "registry": dict(zip(reg["model_version"], reg["source"]))}
@@ -218,7 +222,41 @@ def _version_day(v):
     return cycle_day(t) if t else None
 
 
+def non_trading_evidence(x, db):
+    """
+    설명: 날짜 x가 휴장일(거래일 아님)임을 데이터로 증명할 수 있으면 그 근거 문구를, 아니면 None을 돌려준다.
+    주의 사항: 거래일 캘린더는 수집기와 같다 — daily_stock_prices에 있는 날짜(지표_공통.check_daily_indicator_lag).
+      휴장 = x에 주가 행도 ECOS KOSPI 행도 없고, x보다 뒤 거래일의 주가가 이미 있음(증분 수집은 MAX(date)+1부터라
+      그 뒤 날짜가 있으면 x는 소스에 없던 날이다). 뒤 거래일이 아직 없으면(가장 최근 주말 등) 증명할 수 없어 None.
+      요일·공휴일 목록은 쓰지 않는다.
+    입력 타입->반환 타입: (date, dict|None) -> str|None
+    """
+    if db is None or x in db["stock_dates"] or x in db["kospi_dates"]:
+        return None
+    later = [d for d in db["stock_dates"] if d > x]
+    if not later:
+        return None
+    return f"{데이터.fmt_day(x)} 주가·KOSPI 행 없음, 다음 거래일 {데이터.fmt_day(min(later))} 주가 있음"
+
+
 def _cell_collect(d, src):
+    """
+    ① 수집. 휴장 건너뜀: 그 사이클의 수집 대상일(d)이 휴장으로 증명되고, 있는 수집 기록이 모두 성공일 때만
+    (Actions 성공, 로컬 기록이 있으면 주가·지표 rc 모두 0). 실패·경고·진행·기록 없음은 휴장이어도 그대로 둔다.
+    """
+    status, text, tip = _collect_base(d, src)
+    if status != "success":
+        return status, text, tip
+    local = [r for r in (src["logs"] or []) if cycle_day(r["start"]) == d and r["stock_rc"] is not None]
+    if local and not (local[-1]["stock_rc"] == 0 and local[-1]["indicator_rc"] == 0):
+        return status, text, tip
+    why = non_trading_evidence(d, src["db"])
+    if why is None:
+        return status, text, tip
+    return "skipped", "휴장", f"수집할 새 거래일 없음({why}) · 원래 판정 {text} · {tip}"
+
+
+def _collect_base(d, src):
     """① 수집: Actions 결과 우선, 없으면 로컬 [collect] rc. Actions 실패여도 그날 데이터가 DB에 있으면 경고."""
     gh, logs, db = src["github"], src["logs"], src["db"]
     present = db is not None and (d in db["stock_dates"] or d in db["indicator_dates"])
@@ -246,6 +284,21 @@ def _cell_collect(d, src):
 
 
 def _cell_align(d, src):
+    """
+    ② 데이터 반영. 휴장 건너뜀: 수집 대상일(d)이 휴장으로 증명되고, 가격 정렬이 전 종목 일치이며 공통 최신일이 d보다
+    앞설 때만(반영할 새 거래일이 없음). 이탈·정렬 실패·기록 없음은 그대로 둔다.
+    """
+    status, text, tip = _align_base(d, src)
+    m = re.search(r"공통 최신일 (\d{4}-\d{2}-\d{2})", tip)
+    if status != "success" or not m or datetime.strptime(m.group(1), "%Y-%m-%d").date() >= d:
+        return status, text, tip
+    why = non_trading_evidence(d, src["db"])
+    if why is None:
+        return status, text, tip
+    return "skipped", "휴장", f"반영할 새 거래일 없음({why}) · 원래 판정 {text} · {tip}"
+
+
+def _align_base(d, src):
     """② 데이터 반영: 그 사이클 마지막 로그의 [PRICE-ALIGN] 줄."""
     if src["logs"] is None:
         return (*LOOKUP_FAILED, "로그 조회 실패")

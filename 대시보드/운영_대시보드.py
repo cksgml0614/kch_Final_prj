@@ -139,6 +139,8 @@ def grid_short(stage_no, status, text):
             return str(rec), True, f"이후 재실행으로 덮어씀, 저장 {rec} / DB 남은 {rec - over}"
         if (m := re.match(r"^(\d+)행$", text)):
             return (m.group(1) if status == "success" else text), False, ""
+    if status == "skipped" and text == "휴장":
+        return "휴장", False, ""
     if stage_no == 7 and text in SHORT_WORDS:
         return SHORT_WORDS[text], False, ""
     if (m := HHMM.search(text)):
@@ -208,7 +210,8 @@ CYCLE_TIP = ("열 날짜 = 그 아침 05:00 실행 날짜. 전날 12:00~당일 1
 GRID_TIP = ("칸에 마우스를 올리면 전문과 근거가 보인다. 기록 없음 = 출처에 그 날짜 기록이 없음, 조회 실패 = 출처를 읽지 못함. "
             "① 수집: GitHub Actions·로컬 수집 / ② 가격 정렬 점검 / ③⑥ MLflow run(없으면 로그) / ④ 게이트 / "
             "⑤ 그 버전 마지막 기준일의 예측 행 수(100 성공·90 이상 경고·미만 실패, 이후 재실행이 덮어썼으면 실행 기록의 저장 수) / "
-            "⑦ 모델 등록·실측 / ⑧ 주간 튜닝. 시각은 그 단계가 끝난 시각.")
+            "⑦ 모델 등록·실측 / ⑧ 주간 튜닝. 시각은 그 단계가 끝난 시각. "
+            "건너뜀(휴장) = ①② 단계에서 수집 대상일이 휴장으로 확인되고(주가·KOSPI 행 없음 + 뒤 거래일 있음) 그 단계가 성공한 경우만.")
 
 
 def render_panel_a():
