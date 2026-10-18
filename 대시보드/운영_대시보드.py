@@ -264,18 +264,39 @@ def render_panel_b():
             f'입력 의심 {int(df["input_data_suspect"].sum())}/{len(df)} {테마.info(tip)}</div>')
 
     t_l, t_r = st.columns([3, 2], vertical_alignment="center")
-    with t_l:
-        st.html('<div class="h4">상위 10종목 <span class="sub">예측 변동성 순</span></div>')
     with t_r, st.container(horizontal_alignment="right"):
         mode = st.segmented_control("막대 값", ["절대값", "평소 대비"], default="절대값", key="b_mode",
                                     label_visibility="collapsed") or "절대값"
-    top = df.head(10)
-    col, title, fmt = (("ratio", "평소 대비 배율(배)", ".2f") if mode == "평소 대비"
-                       else ("predicted_volatility", "예측 변동성(|로그수익률×100|)", ".2f"))
-    labels = [f"{r.rank}. {r.name or r.ticker} ({r.ticker})" for r in top.itertuples()]
-    fig = go.Figure(go.Bar(x=top[col], y=labels, orientation="h", texttemplate=f"%{{x:{fmt}}}",
-                           textposition="outside", hovertemplate="%{y}<br>%{x:.3f}<extra></extra>"))
-    테마.show_chart(fig, height=384, yaxis=dict(autorange="reversed"), xaxis_title=title, margin=dict(l=8, r=40, t=8, b=8))
+    ratio_mode = mode == "평소 대비"
+    with t_l:
+        st.html(f'<div class="h4">상위 10종목 <span class="sub">{"평소 대비 배율 순" if ratio_mode else "예측 변동성 순"}</span> '
+                + 테마.info("막대 끝 글자: 막대 값 · 다른 기준 값. 평소 대비 = 예측 ÷ 최근 "
+                          f"{데이터.USUAL_WINDOW}거래일 실현 변동성 평균 — 평소 값(분모)이 작으면 배율이 커 보이므로 "
+                          "배율 옆에 예측 ÷ 평소를 함께 적는다. 점선 = 평소 수준(1배). '입력 의심' = 오염 의심 입력으로 만든 예측.")
+                + "</div>")
+    # 순위와 막대 값이 같은 기준을 따른다. 평소 대비 모드는 배율 순(배율을 못 구한 종목은 뺀다), 표시 순위도 배율 순위.
+    if ratio_mode:
+        top = df.dropna(subset=["ratio"]).sort_values("ratio", ascending=False, kind="stable").head(10)
+        x = top["ratio"]
+        text = [f"{r.ratio:.2f}배 · {r.predicted_volatility:.2f} ÷ {r.usual_vol:.2f}" for r in top.itertuples()]
+        title = "평소 대비 배율(배)"
+    else:
+        top = df.head(10)
+        x = top["predicted_volatility"]
+        text = [f"{r.predicted_volatility:.2f} · " + ("-" if pd.isna(r.ratio) else f"{r.ratio:.2f}배")
+                for r in top.itertuples()]
+        title = "예측 변동성(|로그수익률×100|)"
+    labels = [f"{i}. {r.name or r.ticker} ({r.ticker})" + (" · 입력 의심" if r.input_data_suspect else "")
+              for i, r in enumerate(top.itertuples(), start=1)]
+    custom = list(zip(top["predicted_volatility"], top["usual_vol"], top["ratio"], top["n_days"], top["rank"]))
+    fig = go.Figure(go.Bar(x=x, y=labels, orientation="h", text=text, textposition="outside", cliponaxis=False,
+                           customdata=custom,
+                           hovertemplate="%{y}<br>예측 %{customdata[0]:.3f} · 평소 %{customdata[1]:.3f}"
+                                         "(%{customdata[3]}거래일 평균) · 배율 %{customdata[2]:.2f}배"
+                                         "<br>예측 변동성 순위 %{customdata[4]}위<extra></extra>"))
+    if ratio_mode:
+        fig.add_vline(x=1, line=dict(dash="dot", color=테마.TEXT_MUTED, width=1))
+    테마.show_chart(fig, height=384, yaxis=dict(autorange="reversed"), xaxis_title=title, margin=dict(l=8, r=136, t=8, b=8))
 
     table = pd.DataFrame({
         "순위": df["rank"], "코드": df["ticker"], "종목": df["name"].fillna("-"),
