@@ -5,7 +5,19 @@
 
 ## 지금 어디까지 왔는가 (세션 시작 시 먼저 읽을 것)
 
-### 📌 현재 상태 요약 — 2026-10-05 기준 (여기만 읽어도 되게 압축. 아래는 날짜순 상세 기록)
+### 📌 현재 상태 요약 — 2026-10-18 기준 (여기만 읽어도 되게 압축. 아래는 날짜순 상세 기록)
+
+**현재 상태·일정(2026-10-18 21시 기준)**
+| 항목 | 상태 |
+|---|---|
+| main | `d666dff`(정리 3단계) 이후 CLAUDE.md 문서 커밋만 쌓였다. 코드는 `d666dff`와 같다. **origin/main은 `a433ead` 그대로 — 로컬 main이 앞선다, push 여부 미결** |
+| 미병합 브랜치 | `feature/dashboard-live`(대시보드, 아래 1번) · `feature/weekly-tuning`(주간 튜닝, 아래 1-1번) — 둘 다 main 미병합·push 안 함 |
+| 10/19(월) 05:00 | `d666dff` 코드의 첫 무인 실행. 05:10 이후 로그의 `[collect]`·`[PRICE-ALIGN]`·`[registry]`·MLflow run·DB 행 점검(6번 16) |
+| 10/19 저녁~10/20 새벽 | ECOS 802Y001 거래일 값 공개 시각 실측(6번 14②), 10/20(화) 05:00이 로컬 선수집 효과를 보는 첫 거래일 다음 날 실행 |
+| 10/20 23:59 | 골든 하네스(G1/G2) 유효 기한 — GARCH 사본이 그 뒤 만료. 튜닝 규칙을 바꾸면 이 전에 G1/G2 재실행 |
+| 10/21 | 운영 GARCH 캐시 첫 재적합(fitted_at 9/20 + 30일 초과). 백테스트 재생은 그날 학습된 최신 체크포인트로 다시 만든다 |
+| 10/22 | 금통위 뒤 ECOS 기준금리(722Y001) 갱신 여부 재확인(6번 14③) |
+| 점검 뒤 | 대시보드 브랜치 병합(월요일 점검 뒤), worktree·정리 브랜치 정리, push 결정. 튜닝 브랜치는 1-1번 일정 |
 
 **0. 코드 정리(2026-10-17, 브랜치 `cleanup/pipeline-stages` — 10/17 main 병합, 10/18 정리 3단계 추가 병합, 아래 "병합·검증")**
 - **기준점**: 정리 전 코드는 git 태그 `pre-cleanup`(커밋 `739e6ea`, main)에 있다. 지운 파일·함수는 `git show pre-cleanup:<경로>`로 본다.
@@ -53,8 +65,8 @@
   - 2차(10/18): 정리 3단계를 fast-forward로 합쳐 **main = `d666dff`**. `cleanup/tidy-after-merge`(미사용 상수·함수·import 삭제,
     모듈 간 비공개 이름 공개화), `cleanup/baselines-merge`(`garch_baseline.py`·`parkinson_baseline.py`·GARCH 캐시를
     `가격예측/baselines.py`로 이동만), `cleanup/comments`(주석·docstring 정리, 코드 변경 없음 + `가격예측/결정기록.md` — 코드 주석에
-    흩어진 운영 결정 16개). 로컬 태그 `pre-tidy-merge`(= `a433ead`). **push하지 않았다 — origin/main은 `a433ead`, 로컬 main이
-    6커밋 앞선다.** bat·`.github/workflows`는 이 6커밋에서 바뀌지 않았다.
+    흩어진 운영 결정 16개). 로컬 태그 `pre-tidy-merge`(= `a433ead`). **push하지 않았다 — origin/main은 `a433ead`, 병합 시점에 로컬 main이
+    6커밋 앞섰고 그 뒤 CLAUDE.md 문서 커밋이 더 쌓였다(맨 위 "현재 상태·일정").** bat·`.github/workflows`는 이 6커밋에서 바뀌지 않았다.
   - d666dff 검증: py_compile·pyflakes 경고 0, import 스모크 15/15(삭제된 두 모듈의 `__pycache__` 잔여 .pyc는 import되지 않음),
     골든 G1 41/41·G2(예측 100행, 게이트, state_dict SHA256 `cec251d4…`, MLflow params·metrics·epoch 기록) 정확 일치, DB 지문 전후
     같음, 운영 GARCH 캐시·checkpoints 변화 없음. 하네스는 운영 폴더를 대상으로 돌지 못하게 막혀 있어(`assert tree != PROD`) 같은
@@ -78,8 +90,9 @@
   `--dry-run`의 DB 적재 문제 수정 후 해제.
 - **대시보드**: 새 대시보드 `streamlit run 대시보드/운영_대시보드.py`(작업 중, 패널 A → 레벨 피처 트랙 → 패널 B →
   백테스트 분리 → 패널 C 순서, 2026-10-11 사람 결정). **1단계 골격 완료**(커밋 `eab0e06` 보관 이동·도구,
-  `cc41d69` 테마·상태 6종·더미 화면 — 밝은 테마 고정, 파랑은 데이터 전용). **2단계(실측 연결)는 2026-10-18 브랜치
-  `feature/dashboard-live`(worktree `C:\kch_dashboard`, 시작점 `d666dff`)에서 완료, main 미병합·push 안 함**(아래 "대시보드 2단계").
+  `cc41d69` 테마·상태 6종·더미 화면 — 밝은 테마 고정, 파랑은 데이터 전용). **2단계(실측 연결)와 3단계(다듬기·격자 규칙)는
+  2026-10-18 브랜치 `feature/dashboard-live`(worktree `C:\kch_dashboard`, 시작점 `d666dff`, 9커밋, 마지막 `1e66de4`)에서 커밋 완료,
+  main 미병합·push 안 함**(아래 "대시보드 2단계"·"대시보드 3단계"). 병합은 10/19(월) 05:00 무인 실행 점검 뒤에 한다(사람 결정 대기).
   main의 대시보드는 아직 1단계 더미다. 옛 대시보드(날짜별 전 종목 예측·상위 10종목·게이트 통과·입력 오염 여부를
   보던 (d) 패널)는 정리 브랜치에서 지웠다(pre-cleanup 태그 시점의 `쓰래기통/대시보드/model_predictions_dashboard.py`). 브랜치를
   병합하기 전까지 main에서는 DB를 직접 조회하거나 브랜치 worktree에서 대시보드를 띄운다.
@@ -98,27 +111,50 @@
     (ticker, target_date) UPSERT라 운영 행을 덮어쓰게 된다). 학습 없음, GARCH 캐시 읽기 전용, 실측은 뷰 SQL 그대로, split_val_end 이전
     날짜는 뺀다. 검증(체크포인트 20261017_200618, 평가일 9/22~10/16, 약 44초): R1 10/19 행 100개 예측·baseline 3종이 DB와 일치
     (DB NUMERIC은 float8→numeric 15자리 저장 — 같은 캐스트 후 문자열 100/100), R2 실측 재계산 = 뷰 3,314행 완전 일치, R3 날짜를 잘라
-    다시 불러도 비트 일치(3개 날짜), R4 운영(사전) 대비 하이브리드 평균 절대 차이 0.21~0.72(baseline 3종은 0). ⚠️ 운영 GARCH 캐시가
-    만료되는 10/21부터는 옛 버전 재생이 캐시 만료로 실패한다(exit 1) — 최신 체크포인트로 다시 만든다.
+    다시 불러도 비트 일치(3개 날짜), R4 운영(사전) 대비 하이브리드 평균 절대 차이 0.21~0.72(baseline 3종은 0). ⚠️ 재생은 운영 GARCH 캐시를
+    읽기 전용으로 쓴다(코드 확인): 캐시가 30일을 넘긴 10/21 05:00 일일 실행 전에는 만료로 실패(exit 1)하고, 그 실행이 재적합한 뒤에는
+    실패하지 않지만 옛 체크포인트를 재생하면 그 모델이 학습할 때와 다른 GARCH 파라미터로 계산된다 — 10/21 이후에는 그날 학습된 최신
+    체크포인트로 다시 만든다(실제 10/21 동작은 미확인).
   - **패널 A(파이프라인 상태)**: KPI 4장(MLflow `일일_자동화` 마지막 FINISHED run과 그 게이트 지표, 주가·KOSPI·KOSDAQ 최신일, 최신
-    예측), 오늘 사이클 표시줄, 최근 14일 × 8단계 격자(⑧ 튜닝 = MLflow `주간_튜닝`, 실험이 없어 지금은 전부 "기록 없음"). 열 = 사이클
-    날짜(시각 − 12시간의 KST 날짜 — 저녁 Actions와 다음 날 05:00 예측이 한 열). 출처: GitHub Actions(인증 없이 새로고침당 1요청, 최근
+    예측), 현재 사이클 표시줄, 최근 14일 × 8단계 격자(⑧ 튜닝 = MLflow `주간_튜닝`의 부모 run — 3단계 참고, 운영에는 실험이 없어 지금은
+    전부 "기록 없음"). 열 규칙은 3단계(`9a592e4`)에서 바뀌었다: 묶음 경계는 매일 12:00 그대로(저녁 Actions·저녁 수동 실행과 다음 날
+    05:00 예측이 한 묶음), 열 이름 = 그 아침 05:00 실행 날짜(옛 "시각 − 12시간의 날짜" + 1일). 출처: GitHub Actions(인증 없이 새로고침당 1요청, 최근
     run 20개), 로컬 로그(`PIPELINE_LOG_DIR`), MLflow sqlite 읽기 전용(`MLFLOW_DB_PATH`), 운영 DB. Actions 실패여도 그날 데이터가 DB에
     있으면 "경고". 기록 없는 칸은 waiting "기록 없음", 출처 조회 실패는 "조회 실패" 칩(앱은 멈추지 않음 — AppTest로 확인).
     ⑤ 예측 저장은 그 버전 마지막 기준일 행 수(100 성공·90 이상 경고·미만 실패)인데, 나중 실행이 같은 키를 덮어써 버전 전체 행이
     실행 기록(MLflow·로그 저장 수)보다 적으면 실행 기록 수로 판정하고 "100(덮어씀 88)"처럼 쓴다(에이전트 판단, 사람 확인 대기). 그래서
-    10/13 경합 사고(10/12 열)는 "12행 실패"로 드러난다. 10/18 화면의 "기록 없음": ② 데이터 반영 10/4~10/16(`[PRICE-ALIGN]`은
-    10/17 사이클 로그부터), ③~⑦ 10/13(10/14 05:00 누락), ⑧ 튜닝 14칸.
+    10/13 경합 사고는 "12행 실패"로 드러난다(3단계 열 규칙으로는 10/13 열, 그 전에는 10/12 열). 10/14 05:00 누락은 3단계 열 규칙으로
+    10/14 열의 ③~⑦ 빈칸이다. `[PRICE-ALIGN]`은 10/17 16:58 실행 로그부터 있어(3단계 열 규칙으로 10/18 열) ② 데이터 반영은 그 전 열이 "기록 없음"이다.
   - **검증**: py_compile·pyflakes 경고 0, AppTest 예외 0(재생 파일 있음·없음·외부 출처 실패 3경우, 모든 DB 실행 read_only), 교차 확인
     (상위 10 순서 = SQL, 일별·그룹 RMSE = 독립 계산, 게이트 = MLflow REST) 전부 일치, 실행 전후 DB 지문 같음, 비밀값 검색 0건. 검증
     스크립트·로그·스크린샷은 저장소 밖 `C:\kch_snap\scratchpad_1017\dashboard\`.
   - **띄우기(worktree에는 `.env`가 없다)**: PowerShell에서 `$env:MLFLOW_DB_PATH="C:\kch_Final_prj\mlflow.db"`,
     `$env:PIPELINE_LOG_DIR="C:\kch_Final_prj\logs"`, `$env:PYTHONUTF8="1"` 뒤
     `& C:\kch_Final_prj\.venv\Scripts\python.exe C:\kch_snap\scratchpad_1017\dashboard\run_env.py -m streamlit run 대시보드/운영_대시보드.py --server.port 8599`
-    (`run_env.py`가 운영 `.env`의 NEON_DB_URL만 출력 없이 넣고 `C:\kch_dashboard`로 이동해 실행). 재생은 같은 방식으로
+    (`run_env.py`는 저장소에 없는 검증용 환경변수 래퍼로 scratchpad `C:\kch_snap\scratchpad_1017\dashboard\`에 있다 — 운영 `.env`의
+    NEON_DB_URL만 출력 없이 넣고 `C:\kch_dashboard`로 이동해 실행). 재생은 같은 방식으로
     `-m 대시보드.백테스트_재생 --version <버전> --checkpoint-root "C:\kch_Final_prj\가격예측\checkpoints\pooled_volatility_hybrid"
-    --garch-cache-dir "C:\kch_Final_prj\가격예측\checkpoints\garch_params"`(worktree에는 checkpoints가 없다). 종료는 Ctrl+C, 또는
-    8599 LISTEN PID를 `taskkill /PID <pid> /T /F`. 병합 후 운영 폴더에서는 환경변수·인자 없이 기본 경로로 돈다.
+    --garch-cache-dir "C:\kch_Final_prj\가격예측\checkpoints\garch_params"`(worktree에는 checkpoints가 없다). **10/21 이후에는 그날
+    학습된 최신 체크포인트로 다시 만든다**(`--version` 생략 = latest, 이유는 위 백테스트 재생 항목의 ⚠️). 종료는 Ctrl+C, 또는 8599 LISTEN PID를
+    `taskkill /PID <pid> /T /F`. 병합 후 운영 폴더에서는 환경변수·인자 없이 `streamlit run 대시보드/운영_대시보드.py`로 기본 경로를 쓴다.
+- **대시보드 3단계 — 다듬기·격자 규칙(2026-10-18, 브랜치 `feature/dashboard-live`, 전부 커밋됨, 변경은 `대시보드/` 안만)**:
+  - `b0732bb` 설명문 축소(정의·근거는 ⓘ·title 툴팁, 내부 식별자·커밋 해시는 화면에서 뺌), 격자 줄넘김 제거(table-layout fixed, 칸 5글자
+    이내, 좁은 폭은 가로 스크롤 + 첫 열 고정), 상태 아이콘을 CSS mask 선 아이콘으로 통일, 타입 스케일 24/20/16/14/12, 패널 C 요약 표
+    HTML화(행별 최저 굵게). 폭 1440·1280·1024 줄넘김 0, 전후 화면 숫자 비교 실패 0.
+  - `47510f8` ⑦ "대기" 칸 툴팁에 "평가일 M/D 종가 확정 후 반영(휴장이면 다음 거래일)" — 평가일은 그 버전 마지막 기준일 예측의 target_date.
+  - `7876f7e` 패널 B "평소 대비" 토글 시 순위도 배율 기준, 막대 끝에 "1.90배 · 1.24 ÷ 0.65"(분모를 같이 보여 작은 분모로 부푼 배율이
+    드러나게), 입력 의심 종목은 막대 이름에 표시. 상위 10을 pandas 독립 계산과 대조해 10/10 일치.
+  - `9a592e4` 격자 열 날짜 = 그 아침 05:00 실행 날짜(위 패널 A), 12:00 이후 진행 중 사이클은 다음 날 열(점선), 툴팁에 "예측 기준일 → 대상일".
+    새 열 D = 옛 열 D-1 112칸 일치, ③ 행을 MLflow 원본과 대조해 일치.
+  - `5a1c308` 휴장 건너뜀: ① 수집·② 데이터 반영만, 수집 대상일 X(열 − 1일)가 데이터로 휴장임이 증명될 때(X에 주가·KOSPI 행 없음 +
+    X 뒤 거래일 주가 있음 — 수집기와 같은 거래일 캘린더)이고 그 단계가 성공일 때만 "휴장". 실패·경고·증명 불가는 원래 판정 그대로.
+  - `1e66de4` ⑧ 튜닝 칸은 부모 run(태그 `run_kind=tuning_parent`)만 읽는다(중첩 run `tuning_trial` 무시). 칸 = 부모 run 시작 시각, 결과는
+    아이콘(↑ 채택 adopted · = 유지 kept · ↩ 복귀 reverted(경고색) · □ 기본 none), 의존은 `run_kind`·`state` 태그와 시각·status뿐.
+    스크래치 sqlite 샘플(네 상태·실패 부모·중첩만 있는 날)로 14열 대조 불일치 0.
+  - 검증 공통: py_compile·pyflakes 0, AppTest(재생 있음·없음·외부 실패, ⑧은 샘플 DB 추가) 예외 0·DB 실행 read_only, DB 지문 같음.
+    산출물은 저장소 밖 `C:\kch_snap\scratchpad_1017\dashboard\polish\`·`tune_grid\`.
+  - 미결(사람 확인): ⑤ "덮어씀이면 실행 기록 수로 판정" 규칙과 수동·재시도 실행 표시(6번 13), "조회 실패"와 "휴장"이 같은 건너뜀 모양을
+    쓰는 점(휴장 칸만 글자 "휴장"), 튜닝 브랜치가 `run_kind`·`state` 이름이나 state 값 4종을 바꾸면 ⑧도 함께 고쳐야 한다.
 - **Neon 전송량 절감(2026-10-05, 커밋 `7a030d0`·`0ab06b5`·`d72b231`)**: 무료 한도 5GB/월을 소진해 접속이 막힌 원인은
   예측 단계가 종목마다 거시지표 9종 전체 이력을 캐시 없이 두 번씩 읽은 것이었다(실행당 약 0.4GB, 추정).
   ① 거시지표·KOSPI를 실행 시작 시 한 번만 읽어 학습·예측이 공유, ② 지표 조회 하한을 "시작일 이전 마지막 공표일"로
@@ -131,6 +167,39 @@
 - **첫 trusted 예측(2026-10-05)**: 수정 후 첫 실행(모델 `20261005_024222`)이 게이트 통과(1.9672 vs GARCH 2.1462 /
   SMA20 2.0200 / Parkinson 2.0042), `input_data_suspect=false`로 끝나 `model_predictions_trusted`에 처음으로 행이
   들어왔다(prediction_date 10/02, target_date 10/05, 100행).
+
+**1-1. 주간 튜닝 단계 — 구현·검증 완료, 병합 금지 판단(2026-10-18, 브랜치 `feature/weekly-tuning`, worktree `C:\kch_tuning`)**
+- **사용자 입장**: 성능 유의성과 별개로 튜닝 단계는 파이프라인에 있어야 한다. 아래 "병합 금지"는 지금 채택 규칙에 대한 판단이다.
+- **커밋**(시작점 `d666dff`, main 미병합·push 안 함): `5a8eaee` 튜닝 단계 추가(1차 규칙), `ec1695b` bat·등록 스크립트·결정기록,
+  `17d0e70` 후보 선택을 train 안 3폴드로 교체(2차 규칙)·`train_and_gate` 분리·이름 정리, `60e5c5d` 결정기록의 최소 개선폭 근거 정정(문서만).
+- **구현**: 단계 위치 수집 → 피처 → 시퀀스 → [튜닝(주 1회)] → 학습 → 평가 → 저장. `가격예측/하이퍼파라미터_튜닝.py`(탐색·채점·채택,
+  결과 읽기) + `가격예측/주간_튜닝.py`(얇은 진입점, 실행 중 `SetThreadExecutionState`로 절전 방지·finally 해제). 오케스트레이터는 학습 전
+  준비를 `prepare_pooled_training_data`, 학습+게이트를 `train_and_gate`로 떼어 일일 학습과 튜닝이 같이 쓴다. 일일 학습은 학습 직전에
+  `가격예측/checkpoints/tuning/best_params.json`(gitignore)을 읽고, 없거나 adopted=false면 기본값("[TUNE] 없음→기본값"), 깨졌으면 경고 후
+  기본값, 채택값이면 MLflow param `tuned_params_id`(+체크포인트 extra_meta)만 더한다. 결과 파일 history는 최근 8개.
+  MLflow 실험 `주간_튜닝`: 부모 run `tune_YYYY-MM-DD`(태그 `run_kind=tuning_parent`·`state`(adopted/kept/reverted/none)·`adopted`)와 시도별
+  중첩 run(`run_kind=tuning_trial`). 탐색 12회(0번 기본값, 1~11번 시드 고정 무작위; hidden {24,32,48}, 층 {1,2,3}, dropout 0.2~0.4,
+  lr 5e-4~2e-3, wd 3e-5~3e-4). 새 의존성 없음.
+- **2차 규칙(현재 코드)**: 선택은 train 안 expanding-window 3폴드(평가 조각 각 15%, 학습 끝~평가 사이 20거래일 = LOOKBACK, 폴드 학습의
+  마지막 15%로 early stopping) — 게이트 val·테스트는 선택에 쓰지 않는다. 채택 = 기준(현재 적용 값, 없으면 기본값)보다 (a) 폴드 평균 0.5% 이상
+  상대 개선 (b) 3폴드 중 2개 이상 낮음 (c) `train_and_gate`로 학습해 게이트 통과. 현재 값이 기본값보다 (a)·(b) 기준으로 나쁘면 기본값으로
+  되돌림. 테스트(백테스트) 구간은 기록 전용. 상세 결정은 브랜치의 `가격예측/결정기록.md` 튜닝 3항목.
+- **실행 파일**: `주간_튜닝.bat`(CP949, 일일 실행이 Running이거나 `daily_pipeline.bat` cmd가 있으면 1분씩 최대 30분 기다린 뒤 포기·로그,
+  MLflow 자가 기동), `주간_튜닝_작업등록.ps1`(UTF-8 BOM, "Daily Pipeline" 설정을 읽어 같은 조건으로 "Weekly Tuning" 매주 일요일 05:30,
+  기본은 보기만·`-Register`일 때만 등록). **둘 다 실행·등록하지 않았다.**
+- **검증(전부 스크래치, 운영 DB·MLflow·checkpoints 쓰기 0)**: V1 py_compile·pyflakes 0·import 스모크 17. V2 튜닝 파일이 없을 때 골든
+  G1 41/41·G2 정확 일치(state_dict `cec251d4…`, 최종 코드 `17d0e70`로 재확인). V3 단위 50개 + 실제 경로 연동(채택 파일이면 학습 인자·
+  `tuned_params_id` 반영, 깨진·없는 파일은 기본값과 params 동일) + 현재 적용 값이 있는 실제 경로 2회(kept, 파일 그대로). V5 기본 설정의
+  일일 경로 게이트 RMSE `1.976464803814888` = G2 기준(비트 단위). V6 DB 지문 같음, 운영 checkpoints·MLflow 변화 없음.
+- **리허설 결과(end 2026-10-16, 산출물 `C:\kch_snap\scratchpad_1017\tuning\`)**:
+  - 1차 규칙(검증 구간 3조각으로 선택): 채택 없음(최선 04번 평균 1.9478 > 기본 1.9468). 12회 16분 35초.
+  - 2차 규칙(train 안 3폴드): **11번(hidden 32·1층·dropout 0.21·lr 0.0018·wd 6.8e-5) 채택** — 폴드 평균 1.6974 vs 기본 1.7340(+2.11%, 3/3).
+    그러나 검증 게이트 RMSE 1.987011 > 기본 1.976465, 백테스트 3.2768 vs 기본 2.7590(+18.8%). 폴드 상위가 1층 후보로 쏠렸고 폴드와 val·테스트
+    순위가 맞지 않았다 → **이 규칙으로는 병합 금지 판단**. 12회 약 36분(2,166초), 채택값이 있으면 약 45분(추정).
+  - 시드 변동: 기본 설정 폴드 평균이 시드 42·43·44만으로 표준편차 0.59%·범위 1.16% — 0.5% 기준은 시드 변동 안쪽이다.
+- **미결 결정**: ① 채택 조건에 "후보의 검증 게이트 RMSE ≤ 기준" 추가 여부, 시드 다중 채점(후보당 시간 약 3배), 자동 채택 끄기(기록만) 중
+  선택 ② 최소 개선폭 0.5% 유지 / 1.5% ③ 백테스트 기록 전용 유지 여부.
+- **일정**: 규칙을 바꾸면 10/20 23:59 전에 G1/G2 재실행 → 병합은 10/21 GARCH 재적합 확인 뒤 → 스케줄러 등록 10/22~24 → 첫 실제 튜닝 10/25(일) 05:30.
 
 **2. 데이터 품질 — 정리 완료(KOSPI/KOSDAQ 결측은 2026-10-03 ECOS 전환으로 해결)**
 - 공통 원인: 수집기가 **확정 전 잠정값**을 받아 저장한 뒤 다시 보지 않았다(지표는 `last_date+1`부터만 조회,
@@ -225,16 +294,15 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
 11. **10/08 잠정값 사고 후속(2026-10-10)**: 주가 최근 7일 `--force`(거래량 사후 정정 대응) 여부, 10/04 Actions 실행 실패
     원인 확인, USD_KRW 주말 날짜 라벨 문제 — 미조치. 하지 않기로 한 것(inserted_at 컬럼, USD_KRW 7일 재조회, 확정 시각
     측정 스크립트)은 아래 "알려진 이슈"의 해당 항목 참고.
-12. **`가격예측/종목_월간갱신.py:237` lookback 하드코딩 정리(2026-10-11)**: 신규 종목 게이팅이
+12. **`가격예측/종목_월간갱신.py` lookback 하드코딩 정리(2026-10-11)**: 신규 종목 게이팅(`d666dff` 기준 228행)이
     `count_train_sequences(..., lookback=20)`으로 20을 직접 쓴다. 지금은 운영 `LOOKBACK`(`가격예측_변동성_공통.LOOKBACK`)도
     20이라 결과가 같지만(확인), LOOKBACK을 바꾸면 게이팅과 실제 학습의 시퀀스 수가 어긋난다. 정리 브랜치에서
-    `MIN_TRAIN_SEQUENCES`를 constants.py로 옮겼듯 `LOOKBACK`도 torch를 끌어오지 않는 곳으로 옮겨 import해 쓰도록 고친다. LOOKBACK은 월간 튜닝 범위에서 뺐다(2026-10-11 사람 결정,
-    아래 로드맵 "하이퍼파라미터 월간 튜닝").
+    `MIN_TRAIN_SEQUENCES`를 constants.py로 옮겼듯 `LOOKBACK`도 torch를 끌어오지 않는 곳으로 옮겨 import해 쓰도록 고친다. LOOKBACK은 튜닝 범위에서 뺐다(2026-10-11 사람 결정,
+    아래 로드맵 "하이퍼파라미터 튜닝" — 주간 튜닝 브랜치도 LOOKBACK을 탐색하지 않는다).
 13. ~~새 대시보드 2단계(패널 A 데이터 연결)~~ — 2026-10-18 브랜치 `feature/dashboard-live`에서 패널 B·C·A 연결 완료(상태 요약
     1번 "대시보드 2단계"). `패널A_데이터.py` 대신 `데이터.py`·`파이프라인_상태.py`로 만들었고 더미 차트 카드는 지웠다. ⚠️ 10/11에 정한
     구현 조건 중 "수동·재시도 실행은 성공해도 경고 + '수동 · 성공'"은 **적용하지 않았다**(① 수집 칸은 Actions 결론만 보고 schedule/
-    workflow_dispatch·재시도 여부는 마우스 올림 설명에만 나온다). "휴장 판정 칸 설명"은 이번 격자에 휴장 판정 단계가 없어 해당 없음.
-    남은 일은 17번.
+    workflow_dispatch·재시도 여부는 마우스 올림 설명에만 나온다). 휴장 표시는 3단계 `5a1c308`에서 ①②에만 넣었다. 남은 일은 17번.
 14. **로컬 선수집 + 가격 정렬 점검 후속(2026-10-17)**: ① 첫 운영 05:00 실행 로그에서 `[collect]`·`[PRICE-ALIGN]` 줄과
     `input_data_suspect=false`를 확인한다(거래일 다음 날 05:00 = 10/20 화 05:00이 첫 기회, 10/18·19 05:00은 주말 데이터라
     KOSPI가 이미 최신). ② ECOS 802Y001 거래일 D 값의 공개 시각 실측(10/19 저녁~10/20 새벽, 15분 간격 읽기 전용 조회 — 추정
@@ -253,16 +321,24 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
     `sinks`·`checkpoint_dir`·`garch_cache_dir`·`garch_read_only`와 `store.DbSink(registry_source=...)`로 운영과 분리한다
     (2026-10-11 결정한 `model_predictions_backtest`·`backtest_runs` 테이블은 아직 없음).
 16. **병합 후속(2026-10-18)**: ① 10/19(월) 05:00이 `d666dff`로 도는 첫 무인 실행이다 — 로그의 `[collect]`·`[PRICE-ALIGN]`·
-    `[registry]`·MLflow run과 DB 행을 확인한다(PC는 종료 말고 절전, AC 전원 유지 — 작업에 배터리 조건이 있다). ② 확인 뒤 worktree 4개
-    (`C:\kch_cleanup`·`C:\kch_tidy`·`C:\kch_baselines`·`C:\kch_comments`)와 정리 브랜치를 정리하고, push 여부를 사람이 정한다.
+    `[registry]`·MLflow run과 DB 행을 확인한다(05:10 이후, PC는 종료 말고 절전, AC 전원 유지 — 작업에 배터리 조건이 있다). ② 확인 뒤
+    정리 worktree 4개(`C:\kch_cleanup`·`C:\kch_tidy`·`C:\kch_baselines`·`C:\kch_comments`)와 정리 브랜치를 정리하고, push 여부를 사람이
+    정한다. `C:\kch_baselines`에는 커밋 안 된 docstring 1줄 수정이 있다(main은 `d666dff`에서 같은 docstring을 이미 새 형식으로 바꿔 반영
+    불필요 — 지울 때 버려도 된다). 그 밖의 worktree: `C:\kch_dashboard`(17번), `C:\kch_tuning`(18번).
     ③ **운영 GARCH 캐시(fitted_at 2026-09-20 전 종목)는 10/21 실행부터 30일을 넘겨 100종목을 다시 적합한다**(`baselines.
     get_or_fit_garch_params`, `age_days <= 30`이면 재사용). 그날은 캐시 파일이 새로 쓰이고 GARCH baseline·σ 피처가 바뀌어 예측이 전날
     모델과 같은 기준이 아니다. 골든 하네스도 GARCH 복사본이 만료되는 10/20까지만 유효하다.
-17. **대시보드 2단계 후속(2026-10-18)**: ① 브랜치 `feature/dashboard-live`(d666dff 기준 3커밋)의 main 병합·push 여부를 사람이 정한다
-    (main은 이후 CLAUDE.md만 바뀐 상태라 충돌 예상 없음). 병합 뒤 worktree `C:\kch_dashboard` 정리. ② ⑤ 예측 저장 칸의 "덮어씀이면
+17. **대시보드 2·3단계 후속(2026-10-18)**: ① 브랜치 `feature/dashboard-live`(d666dff 기준 9커밋, 마지막 `1e66de4`)의 main 병합·push
+    여부를 사람이 정한다 — 병합은 10/19 05:00 점검 뒤(main은 이후 CLAUDE.md만 바뀐 상태라 충돌 예상 없음, 미확인). 병합 뒤 worktree
+    `C:\kch_dashboard` 정리. ② ⑤ 예측 저장 칸의 "덮어씀이면
     실행 기록 수로 판정" 규칙과 수동·재시도 실행 표시(13번)를 사람이 확인한다. ③ 백테스트 재생 파일은 10/21 GARCH 재적합 뒤 최신
     체크포인트로 다시 만든다. ④ 신뢰 조건(게이트 통과·입력 정상)을 만족한 실측 확정 운영 평가일은 10/18 기준 4일(10/06·10/08·10/12
-    12행·10/14 사후)뿐이다 — 15거래일이 쌓이면 패널 C의 운영 그룹만으로 성능을 볼 수 있다.
+    12행·10/14 사후)뿐이다 — 15거래일이 쌓이면 패널 C의 운영 그룹만으로 성능을 볼 수 있다. ⑤ 3단계 미결 항목(상태 요약 1번 "대시보드
+    3단계" 끝)을 사람이 확인한다.
+18. **주간 튜닝 후속(2026-10-18)**: 상태 요약 1-1번의 미결 결정 ①~③을 사람이 정한다. 규칙을 바꾸면 10/20 23:59 전에 G1/G2를 다시 돌리고
+    (하네스 `C:\kch_snap\scratchpad_1017\clean\`, 래퍼 `...\tuning\wrap.py`), 병합은 10/21 GARCH 재적합 확인 뒤, 작업 등록
+    (`주간_튜닝_작업등록.ps1 -Register`, 저장된 암호 입력 필요)은 10/22~24, 첫 실제 튜닝은 10/25(일) 05:30. 등록 전 `주간_튜닝.bat`은 실행한 적이
+    없다(그 안의 "일일 실행 중" 판정 명령만 따로 시험했다). 대시보드 ⑧ 칸이 `run_kind`·`state` 태그에 기댄다(17번).
 
 ---
 
@@ -841,7 +917,8 @@ kch_Final_prj/
 > 설정·입력 점검) · `dataset_builder.py` · `momentum_feature.py` · `split_dataset.py`(학습 frame·서빙 창) ·
 > `baselines.py`(GARCH·SMA20·Parkinson baseline, GARCH 캐시) · `결정기록.md`(운영 결정 16개) · `sequence_dataset.py` · `pooled_dataset.py` · `train_common.py`(TrainConfig·train_model) ·
 > `model.py`(PooledLSTMRegressor·MODEL_FAMILY) · `evaluate.py`(게이트) · `store.py`(체크포인트·registry·예측·MLflow·Sink) ·
-> `종목_월간갱신.py`. 위 상태 요약 0번 참고.
+> `종목_월간갱신.py`. 위 상태 요약 0번 참고. (2026-10-18 기준 main에는 없고 미병합 브랜치에만 있는 것: `feature/weekly-tuning`의
+> `하이퍼파라미터_튜닝.py`·`주간_튜닝.py`·루트 `주간_튜닝.bat`·`주간_튜닝_작업등록.ps1`, `feature/dashboard-live`의 `대시보드/` 2·3단계 — 상태 요약 1·1-1번.)
 
 > 2026-09-12: 위 트리의 `뉴스데이터/`, `감성분석/`, `라벨/`, `빅카인즈/`는 코드 의존성 검증 후
 > `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
@@ -1559,18 +1636,22 @@ garch_sigma 0.35 / hl_range_ratio 0.33은 전체 기간판 수치로 보이며, 
 백필 스크립트(pre-cleanup 태그 시점의 `actual_volatility_백필.py`)가 정리 브랜치에서 삭제돼 종료한다. "prediction_date 다음 첫 실제 거래일"
 매칭은 `model_predictions_realized` 뷰가 이미 하고 있다(2026-10-11). `next_weekday()`(예측 시점의 target_date 근사)는 그대로다.
 
-### 하이퍼파라미터 월간 튜닝 — 원칙만(2026-10-11, 설계 전)
+### 하이퍼파라미터 튜닝 — 원칙(2026-10-11) → 주간 튜닝으로 구현(2026-10-18, 브랜치 `feature/weekly-tuning`, 미병합)
+구현·검증·리허설 결과와 미결 결정은 상태 요약 1-1번. 아래 10/11 원칙 중 "train 안 폴드로만 선택"·"폴드 사이 LOOKBACK 이상 퍼지"·
+"LOOKBACK은 튜닝 범위에서 뺀다"는 2차 규칙(`17d0e70`)에 반영됐다. 주기는 월간이 아니라 주 1회로 바뀌었고, 기록 키는
+`hyperparameter_ref` 대신 `tuned_params_id`(MLflow param·체크포인트 extra_meta, 채택값으로 돈 실행만)로 구현했다(model_registry에는 없음).
 - **튜닝 검증은 train 구간 안의 expanding-window 폴드로만 한다.** 게이트 val(현재 2024-10-21~2025-10-16, 실행마다
   70/15/15로 하루씩 밀림)과 그 뒤 구간은 튜닝 선택에 쓰지 않는다 — 같은 val로 고르면 게이트가 낙관적으로 된다
   (위 상태 요약 4번 McLean & Pontiff 항목과 같은 이유). 폴드 경계 사이에는 LOOKBACK 이상 퍼지를 둔다. 선례:
   pre-cleanup 태그 시점의 `가격예측/검증용/ablation_walkforward_folds.py`. 정리 브랜치에서는 `train_common.TrainConfig`를 바꿔
   `run_pooled_volatility_pipeline(train_config=...)`·`train_model(..., config)`에 넘기는 방식으로 끼어든다.
 - **LOOKBACK은 튜닝 범위에서 뺀다**(구조 파라미터: 표본 집합·종목 게이팅·Transformer 위치 임베딩에 함께 영향, 2026-10-11
-  사람 결정). 필요하면 별도 일회성 실험으로 하고, 그 전에 `종목_월간갱신.py:237` 하드코딩부터 고친다(상태 요약 6번 12).
-- 바뀐 하이퍼파라미터는 `hyperparameter_ref`로 체크포인트 meta·MLflow·model_registry에 남긴다(구현 전).
+  사람 결정). 필요하면 별도 일회성 실험으로 하고, 그 전에 `종목_월간갱신.py`의 lookback=20 하드코딩부터 고친다(상태 요약 6번 12).
+- 바뀐 하이퍼파라미터는 `hyperparameter_ref`로 체크포인트 meta·MLflow·model_registry에 남긴다(10/11 원칙 — 실제 구현은 위 `tuned_params_id`).
 - 이미 효과 없음이 확인된 범위(LSTM dropout·wd 4조합 (0.3,1e-4)/(0.15,1e-4)/(0.15,1e-5)/(0.1,0))는 반복하지 않는다.
-  근거: 61행(상태 요약 "**3. 급변 구간 과소예측 — ✅ 완결, 재시도 불필요**" 표의 "규제 완화" 행)과 312~314행(날짜순 상세
-  기록 "**⚠️ 게이트 집계 버그 발견·수정**(2026-09-27)" 절의 "LSTM 규제 완화 — ❌ 효과 없음" 항목), 상세는
+  근거: 상태 요약 "**3. 급변 구간 과소예측 — ✅ 완결, 재시도 불필요**" 표의 "규제 완화" 행과 날짜순 상세
+  기록 "**⚠️ 게이트 집계 버그 발견·수정**(2026-09-27)" 절의 "LSTM 규제 완화 — ❌ 효과 없음" 항목(줄 번호는 문서가 바뀌면 달라져 절 이름으로 적는다),
+  주간 튜닝의 dropout 범위 0.2~0.4는 dropout 0.15·0.1 조합을 피한다((0.3,1e-4)는 기본값이라 0번 시도로 채점). 상세는
   pre-cleanup 태그 시점의 `결과_TaskT_급변구간_손실함수_시도.md` [11].
 
 ### 기타 정리 항목
