@@ -11,6 +11,7 @@
 import html
 import re
 import traceback
+from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -149,14 +150,22 @@ def grid_short(stage_no, status, text):
     return "", False, ""
 
 
-def grid_cell(stage_no, stage, day, cell):
+def basis_text(basis):
+    """열의 기준일 문구: '예측 기준일 10/16(금) → 대상일 10/19(월)'. 모르면 빈 문자열."""
+    pdate, tdate = basis
+    if pdate is None:
+        return ""
+    return f"예측 기준일 {데이터.fmt_day(pdate)}" + (f" → 대상일 {데이터.fmt_day(tdate)}" if tdate is not None else "")
+
+
+def grid_cell(stage_no, stage, day, cell, basis=""):
     """
     설명: 격자 칸 하나의 <td>를 만든다(색 + 아이콘 + 5글자 이내, 마우스 올림에 전문과 근거).
-    주의 사항: 상태는 테마.STATUS 6종만 쓴다. 기록 없음은 글자 없이 흐린 점 하나.
-    입력 타입->반환 타입: (int, str, date, tuple) -> str
+    주의 사항: 상태는 테마.STATUS 6종만 쓴다. 기록 없음은 글자 없이 흐린 점 하나. basis는 그 열의 기준일 문구.
+    입력 타입->반환 타입: (int, str, date, tuple, str) -> str
     """
     status, text, tip = cell
-    head = f"{stage} · {데이터.fmt_day(day)}"
+    head = f"{stage} · {데이터.fmt_day(day)} 실행" + (f" ({basis})" if basis else "")
     if (status, text) == 상태.NO_RECORD:
         return (f'<td class="none" data-status="none" title="{esc(f"{head} · 기록 없음 — {tip}")}">'
                 '<span class="nodot"></span></td>')
@@ -170,10 +179,17 @@ def grid_cell(stage_no, stage, day, cell):
             f'title="{esc(title)}"><span class="cell">{테마.icon(status)}{label}</span></td>')
 
 
-def grid_header(day, today):
-    """열 머리: 날짜와 요일 두 줄. 주말은 흐리게, 오늘 사이클 열은 위 선 + 옅은 배경."""
-    cls = " ".join(c for c in ("weekend" if day.weekday() >= 5 else "", "today" if day == today else "") if c)
-    return (f'<th class="{cls}" title="사이클 {데이터.fmt_day(day)}">{day.month}/{day.day}'
+def grid_header(day, today, current, basis=""):
+    """
+    설명: 열 머리(날짜와 요일 두 줄). 주말은 흐리게, 오늘 열은 위 선 + 옅은 배경, 오늘보다 뒤인 진행 중 열은 점선 위 선.
+    주의 사항: 열 날짜 = 그 아침 05:00 실행 날짜. 12:00 이후에는 진행 중 사이클(오늘 저녁 수집 → 내일 05:00)이 내일 열이다.
+    입력 타입->반환 타입: (date, date, date, str) -> str
+    """
+    flags = ["weekend" if day.weekday() >= 5 else "", "today" if day == today else "",
+             "now" if day == current and day != today else ""]
+    tip = (f"{데이터.fmt_day(day)} 05:00 실행 사이클(전날 12:00~당일 12:00)"
+           + (" · 진행 중(오늘 저녁 수집 → 내일 05:00 예측)" if "now" in flags else "") + (f" · {basis}" if basis else ""))
+    return (f'<th class="{" ".join(f for f in flags if f)}" title="{esc(tip)}">{day.month}/{day.day}'
             f'<span class="wd">{데이터.WEEKDAYS[day.weekday()]}</span></th>')
 
 
@@ -186,7 +202,8 @@ def grid_legend():
     return '<div class="legend">' + "".join(items) + "</div>"
 
 
-CYCLE_TIP = ("사이클 날짜 = 시각에서 12시간을 뺀 KST 날짜(저녁 수집과 다음 날 05:00 예측이 한 사이클). "
+CYCLE_TIP = ("열 날짜 = 그 아침 05:00 실행 날짜. 전날 12:00~당일 12:00 기록(전날 저녁 수집·수동 실행 포함)이 한 사이클이다. "
+             "12:00 이후에는 오늘 저녁 수집이 내일 아침 실행과 묶여 '현재 사이클'이 내일 날짜가 된다. "
              "출처: GitHub Actions(최근 run 20개)·로컬 로그·MLflow·운영 DB.")
 GRID_TIP = ("칸에 마우스를 올리면 전문과 근거가 보인다. 기록 없음 = 출처에 그 날짜 기록이 없음, 조회 실패 = 출처를 읽지 못함. "
             "① 수집: GitHub Actions·로컬 수집 / ② 가격 정렬 점검 / ③⑥ MLflow run(없으면 로그) / ④ 게이트 / "
@@ -200,9 +217,10 @@ def render_panel_a():
     주의 사항: 출처(GitHub·MLflow·로그·DB) 하나가 실패해도 그 칸만 "조회 실패"가 된다.
     입력 타입->반환 타입: () -> None
     """
-    today, next_run = 상태.today_cycle()
-    days = 상태.days_back(today, GRID_DAYS)
-    src = 상태.load_sources(days[0])
+    current, next_run = 상태.today_cycle()
+    today = datetime.now(데이터.KST).date()
+    days = 상태.days_back(current, GRID_DAYS)
+    src = 상태.load_sources(상태.cycle_of(days[0]))
     failed = [k for k, v in src.items() if v is None]
 
     for i, (col, card) in enumerate(zip(st.columns(4), kpi_cards(src))):
@@ -211,7 +229,7 @@ def render_panel_a():
 
     grid = 상태.build_grid(days, src)
     with st.container(key="card_stepper"):
-        st.subheader(f"오늘 사이클 — {데이터.fmt_day(today)}", anchor=False, help=CYCLE_TIP)
+        st.subheader(f"현재 사이클 — {데이터.fmt_day(current)} 05:00 실행분", anchor=False, help=CYCLE_TIP)
         parts = []
         for i, stage in enumerate(상태.STAGES[:7]):
             status, text, tip = grid[stage][-1]
@@ -225,9 +243,10 @@ def render_panel_a():
     with st.container(key="card_grid"):
         st.subheader(f"최근 {GRID_DAYS}일 × 단계", anchor=False, help=GRID_TIP)
         cols = '<colgroup><col class="stage">' + "<col>" * len(days) + "</colgroup>"
-        head = "".join(grid_header(d, today) for d in days)
+        bases = [basis_text(상태.day_basis(d, src)) for d in days]
+        head = "".join(grid_header(d, today, current, b) for d, b in zip(days, bases))
         rows = [f'<tr><th class="stage" scope="row">{stage}</th>'
-                f'{"".join(grid_cell(no, stage, d, c) for d, c in zip(days, grid[stage]))}</tr>'
+                f'{"".join(grid_cell(no, stage, d, c, b) for d, c, b in zip(days, grid[stage], bases))}</tr>'
                 for no, stage in enumerate(상태.STAGES, start=1)]
         st.html(f'<div class="gridwrap"><table class="grid14">{cols}<thead><tr><th class="stage"></th>{head}</tr></thead>'
                 f'<tbody>{"".join(rows)}</tbody></table></div>{grid_legend()}')

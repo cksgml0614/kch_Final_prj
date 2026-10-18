@@ -1,8 +1,10 @@
 # 대시보드/파이프라인_상태.py — 패널 A(파이프라인 상태)의 출처 조회와 14일 × 단계 격자 복원(2026-10-18)
 # 출처: GitHub Actions(인증 없음, 새로고침당 1요청), 로컬 로그(PIPELINE_LOG_DIR), MLflow(sqlite 읽기 전용, MLFLOW_DB_PATH),
 #       운영 DB(model_predictions_realized·model_registry·daily_stock_prices·market_indicators, 읽기 전용).
-# 열(사이클 날짜) 규칙: 시각에서 12시간을 뺀 KST 날짜. 저녁 수집(Actions)과 다음 날 05:00 예측이 같은 열에 모인다
-#   (예: 10/17 22:58 Actions, 10/18 05:02 예측 → 10/17 열). 모델 버전(UTC 저장 시각)도 KST로 바꿔 같은 규칙을 쓴다.
+# 묶음(사이클) 규칙: 시각에서 12시간을 뺀 KST 날짜(cycle_day). 저녁 수집(Actions)·저녁 수동 실행과 다음 날 05:00 예측이
+#   한 사이클로 묶인다(경계 = 매일 12:00). 모델 버전(UTC 저장 시각)도 KST로 바꿔 같은 규칙을 쓴다.
+# 열 날짜(2026-10-18 변경): 그 사이클의 아침 05:00 실행 날짜 = cycle_day + 1일(column_day). 묶음 경계는 그대로 두고 이름만
+#   하루 뒤로 옮긴 것이다(예: 10/17 22:58 Actions, 10/18 05:02 예측 → 10/18 열). 사이클의 수집 대상 거래일은 cycle_day(열 날짜 - 1일).
 # 기록이 없는 칸은 새 상태를 만들지 않고 waiting + "기록 없음", 출처 조회가 실패한 칸은 skipped + "조회 실패".
 # 로그의 [collect]·[PRICE-ALIGN] 줄은 2026-10-17부터만 있다(그 전 날짜의 해당 단계는 "기록 없음").
 
@@ -42,6 +44,24 @@ def cycle_day(dt):
     입력 타입->반환 타입: (datetime) -> date
     """
     return (dt - CYCLE_SHIFT).date()
+
+
+def column_day(dt):
+    """
+    설명: KST 시각을 격자 열 날짜(그 사이클의 아침 실행 날짜 = 사이클 날짜 + 1일)로 바꾼다.
+    주의 사항: 묶음 경계는 cycle_day와 같다(매일 12:00).
+    입력 타입->반환 타입: (datetime) -> date
+    """
+    return cycle_day(dt) + timedelta(days=1)
+
+
+def cycle_of(column):
+    """
+    설명: 격자 열 날짜의 사이클 날짜(= 그 사이클의 수집 대상 거래일 후보, 열 날짜 - 1일).
+    주의 사항: 없음.
+    입력 타입->반환 타입: (date) -> date
+    """
+    return column - timedelta(days=1)
 
 
 def hm(dt):
@@ -370,12 +390,12 @@ def _cell_tuning(d, src):
 
 def build_grid(days, src):
     """
-    설명: 사이클 날짜 목록 × 8단계의 (상태, 글자, 설명) 격자를 {단계: [칸...]}으로 만든다.
-    주의 사항: 기록 없는 칸은 waiting "기록 없음", 출처 조회 실패 칸은 skipped "조회 실패".
+    설명: 열 날짜(아침 실행 날짜) 목록 × 8단계의 (상태, 글자, 설명) 격자를 {단계: [칸...]}으로 만든다.
+    주의 사항: 기록 없는 칸은 waiting "기록 없음", 출처 조회 실패 칸은 skipped "조회 실패". 칸 판정은 열의 사이클 날짜로 한다.
     입력 타입->반환 타입: (list[date], dict) -> dict
     """
     grid = {s: [] for s in STAGES}
-    for d in days:
+    for d in map(cycle_of, days):
         run, log = _day_run(d, src)
         v = _day_version(d, src, run, log)
         cells = [_cell_collect(d, src), _cell_align(d, src), _cell_train(run, log, src), _cell_gate(v, run, log, src),
@@ -387,15 +407,32 @@ def build_grid(days, src):
 
 def today_cycle(now=None):
     """
-    설명: 지금 시각의 사이클 날짜와 다음 05:00 실행 시각을 돌려준다.
-    주의 사항: 없음.
+    설명: 지금 시각이 속한 사이클의 열 날짜(아침 실행 날짜)와 다음 05:00 실행 시각을 돌려준다.
+    주의 사항: 12:00 이후에는 오늘 저녁 수집이 내일 아침 실행과 묶이므로 열 날짜가 내일이 된다.
     입력 타입->반환 타입: (datetime|None) -> (date, datetime)
     """
     now = now or datetime.now(KST)
     nxt = now.replace(hour=5, minute=0, second=0, microsecond=0)
     if nxt <= now:
         nxt += timedelta(days=1)
-    return cycle_day(now), nxt
+    return column_day(now), nxt
+
+
+def day_basis(column, src):
+    """
+    설명: 열 하나의 예측 기준일 → 대상일을 돌려준다(그 사이클 마지막 모델 버전의 마지막 기준일 예측 행, 없으면 MLflow 태그).
+    주의 사항: 알 수 없으면 (None, None). 대상일은 DB 행이 있을 때만 채운다.
+    입력 타입->반환 타입: (date, dict) -> (str|date|None, date|None)
+    """
+    c = cycle_of(column)
+    run, log = _day_run(c, src)
+    v = _day_version(c, src, run, log)
+    p = src["db"]["preds"].get(v) if v and src["db"] is not None else None
+    if p is not None:
+        return p["prediction_date"], p["target_date"]
+    if run is not None and run["version"] == v and pd.notna(run["prediction_date"]) and run["prediction_date"]:
+        return run["prediction_date"], None
+    return None, None
 
 
 def last_finished_daily_run(src):

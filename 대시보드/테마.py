@@ -114,6 +114,7 @@ CSS = f"""
 .grid14 thead th .wd {{ display: block; font-size: 11px; font-weight: 400; color: {TEXT_MUTED}; }}
 .grid14 thead th.weekend {{ color: {TEXT_MUTED}; font-weight: 400; }}
 .grid14 thead th.today {{ border-top-color: {TEXT}; background: {SUBTLE_BG}; border-radius: 0 0 6px 6px; }}
+.grid14 thead th.now {{ border-top: 2px dashed {TEXT_MUTED}; }}
 .grid14 th.stage {{ position: sticky; left: 0; z-index: 1; background: {CARD_BG}; text-align: left; font-weight: 500;
   color: {TEXT}; padding: 0 8px 0 0; box-shadow: 3px 0 0 {CARD_BG}; }}
 .grid14 tbody th.stage {{ border-bottom: 1px solid {BORDER}; }}
