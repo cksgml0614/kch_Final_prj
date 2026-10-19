@@ -32,10 +32,10 @@ function Read-ReferenceTaskSettings {
 
 function New-WeeklyTuningTaskParts {
     # 설명: 참고 설정으로 Weekly Tuning 작업의 동작·트리거·설정 객체를 만든다(등록은 하지 않음).
-    # 주의 사항: 트리거는 매주 일요일 05:30. 실행 제한 2시간(튜닝 약 20분 + 일일 실행 대기 최대 30분).
+    # 주의 사항: 트리거는 매주 일요일 05:30. 실행 제한 3시간(튜닝 12회 약 84분, 채택값이 있으면 약 93분 + 일일 실행 대기 최대 30분).
     # 입력 타입->반환 타입: (PSCustomObject) -> hashtable
     param($Reference)
-    $settingArgs = @{ ExecutionTimeLimit = (New-TimeSpan -Hours 2); MultipleInstances = 'IgnoreNew' }
+    $settingArgs = @{ ExecutionTimeLimit = (New-TimeSpan -Hours 3); MultipleInstances = 'IgnoreNew' }
     if ($Reference.WakeToRun) { $settingArgs.WakeToRun = $true }
     if ($Reference.StartWhenAvailable) { $settingArgs.StartWhenAvailable = $true }
     if (-not $Reference.DisallowStartIfOnBatteries) { $settingArgs.AllowStartIfOnBatteries = $true }
@@ -58,9 +58,9 @@ function Show-WeeklyTuningPlan {
     Write-Host "  실행: $BatPath (작업 폴더 $ProjectRoot)"
     Write-Host "  트리거: 매주 일요일 05:30"
     $s = $Parts.Settings
-    Write-Host ("  WakeToRun={0} StartWhenAvailable={1} DisallowStartIfOnBatteries={2} StopIfGoingOnBatteries={3} " +
-                "MultipleInstances={4} ExecutionTimeLimit={5}") -f $s.WakeToRun, $s.StartWhenAvailable,
-                $s.DisallowStartIfOnBatteries, $s.StopIfGoingOnBatteries, $s.MultipleInstances, $s.ExecutionTimeLimit
+    Write-Host (("  WakeToRun={0} StartWhenAvailable={1} DisallowStartIfOnBatteries={2} StopIfGoingOnBatteries={3} " +
+                 "MultipleInstances={4} ExecutionTimeLimit={5}") -f $s.WakeToRun, $s.StartWhenAvailable,
+                $s.DisallowStartIfOnBatteries, $s.StopIfGoingOnBatteries, $s.MultipleInstances, $s.ExecutionTimeLimit)
 }
 
 
