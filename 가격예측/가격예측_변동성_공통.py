@@ -1,5 +1,5 @@
 # 가격예측_변동성_공통.py — 하이브리드(GARCH σ 피처 + pooled LSTM) 변동성 예측 일일 파이프라인의 오케스트레이터와 설정.
-# 파이프라인 단계: 입력 점검(가격 정렬·지수 신선도) -> 피처·baseline -> 학습 -> 평가 -> 저장+예측 -> 실행 기록을 순서대로 부른다.
+# 파이프라인 단계: 입력 점검(가격 정렬·지수 신선도) -> 피처·baseline -> 시퀀스 -> [튜닝 값 읽기] -> 학습 -> 평가 -> 저장+예측 -> 실행 기록.
 # 주요 진입 함수: run_pooled_volatility_pipeline(가격예측_변동성_일일수집.py가 호출).
 # 배경: 결정기록.md의 "매일 전체 재학습, 학습 실패는 전체 실패·예측만 종목별 격리", "예측은 게이트와 무관하게 저장한다",
 #       "가격 정렬 점검", "시장지수 신선도 점검과 input_data_suspect"
@@ -13,6 +13,7 @@ import torch
 from constants import MIN_TRAIN_SEQUENCES
 from db_manager import get_db_connection
 from 가격예측 import store
+from 가격예측 import 하이퍼파라미터_튜닝 as tuning
 from 가격예측.baselines import compute_ticker_baselines
 from 가격예측.evaluate import evaluate_gate
 from 가격예측.momentum_feature import load_true_kospi
@@ -73,14 +74,13 @@ def compute_split_dates(ref_ticker, start_date, end_date, shared_cache, prices):
     return compute_global_split_dates(dates)
 
 
-def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, shared_cache=None,
-                             prices_by_ticker=None, garch_cache_dir=None, garch_read_only=False):
+def prepare_pooled_training_data(tickers, start_date, end_date, shared_cache=None, prices_by_ticker=None,
+                                 garch_cache_dir=None, garch_read_only=False):
     """
-    설명: 전 종목 baseline을 계산하고 하나의 pooled 데이터셋으로 LSTM을 학습한 뒤 게이트까지 판정한 결과 dict를 돌려준다.
-    주의 사항: 캐시 인자가 없으면 DB를 읽는다. GARCH 재적합 시 캐시 파일을 쓴다. train 시퀀스가 적은 종목은 경고만 낸다.
-    입력 타입->반환 타입: (list[str], str, str, TrainConfig, dict|None, dict|None, str|None, bool) -> dict
+    설명: 분할 경계·종목별 baseline·pooled 시퀀스(train/val/test)·train으로 맞춘 scaler를 만들어 dict로 돌려준다(학습 직전까지).
+    주의 사항: 일일 학습과 주간 튜닝이 같은 함수를 쓴다. 캐시 인자가 없으면 DB를 읽고, GARCH 재적합 시 캐시 파일을 쓴다.
+    입력 타입->반환 타입: (list[str], str, str, dict|None, dict|None, str|None, bool) -> dict
     """
-
     if shared_cache is None:
         shared_cache = load_shared_cache(start_date, end_date)
     if prices_by_ticker is None:
@@ -126,22 +126,52 @@ def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT
     scaler = FeatureScaler().fit(X_train)
     X_train_s = scaler.transform(X_train).astype(np.float32)
     X_val_s = scaler.transform(X_val).astype(np.float32)
+    return {"splits": splits, "feature_cols": feature_cols, "ticker_to_id": ticker_to_id,
+            "baselines_by_ticker": baselines_by_ticker, "train_end": train_end, "val_end": val_end,
+            "scaler": scaler, "X_train_s": X_train_s, "X_val_s": X_val_s,
+            "n_train_by_ticker": n_train_by_ticker}
+
+
+def train_daily_pooled_model(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, shared_cache=None,
+                             prices_by_ticker=None, garch_cache_dir=None, garch_read_only=False):
+    """
+    설명: 전 종목 baseline을 계산하고 하나의 pooled 데이터셋으로 LSTM을 학습한 뒤 게이트까지 판정한 결과 dict를 돌려준다.
+    주의 사항: 캐시 인자가 없으면 DB를 읽는다. GARCH 재적합 시 캐시 파일을 쓴다. train 시퀀스가 적은 종목은 경고만 낸다.
+    입력 타입->반환 타입: (list[str], str, str, TrainConfig, dict|None, dict|None, str|None, bool) -> dict
+    """
+    data = prepare_pooled_training_data(tickers, start_date, end_date, shared_cache=shared_cache,
+                                        prices_by_ticker=prices_by_ticker, garch_cache_dir=garch_cache_dir,
+                                        garch_read_only=garch_read_only)
+    return train_and_gate(data, len(tickers), train_config)
+
+
+def train_and_gate(data, num_stocks, train_config):
+    """
+    설명: prepare_pooled_training_data 결과로 train 학습(val로 early stopping) → val 게이트 판정까지 하는 일일 학습 경로.
+    주의 사항: 주간 튜닝의 최종 후보 게이트 판정도 이 함수를 그대로 쓴다(따로 구현하지 말 것). 시드는 train_config.seed로 고정된다.
+    입력 타입->반환 타입: (dict, int, TrainConfig) -> dict
+    """
+    splits, scaler = data["splits"], data["scaler"]
+    X_train_s, X_val_s = data["X_train_s"], data["X_val_s"]
+    _, y_train, tid_train, _, _ = splits["train"]
+    _, y_val, tid_val, _, _ = splits["val"]
+    baselines_by_ticker = data["baselines_by_ticker"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     result = train_model(
         X_train_s, y_train, tid_train, X_val_s, y_val, tid_val,
-        len(tickers), LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
+        num_stocks, LOOKBACK, train_config, device, label="pooled-volatility-hybrid",
     )
 
     gate = evaluate_gate(result["model"], result["val_loader"], device, baselines_by_ticker)
 
     return {
-        "model": result["model"], "scaler": scaler, "feature_cols": feature_cols,
-        "ticker_to_id": ticker_to_id, "device": device, "gate": gate,
+        "model": result["model"], "scaler": scaler, "feature_cols": data["feature_cols"],
+        "ticker_to_id": data["ticker_to_id"], "device": device, "gate": gate,
         "baselines_by_ticker": baselines_by_ticker,
-        "train_end": train_end, "val_end": val_end,
-        "n_train": len(X_train), "n_val": len(X_val),
-        "n_train_by_ticker": n_train_by_ticker,
+        "train_end": data["train_end"], "val_end": data["val_end"],
+        "n_train": len(X_train_s), "n_val": len(X_val_s),
+        "n_train_by_ticker": data["n_train_by_ticker"],
         "history": result["history"], "best_epoch": result["best_epoch"],
         "best_val_loss": result["best_val_loss"],
         "overfit_ratio_at_end": result["overfit_ratio_at_end"],
@@ -266,13 +296,13 @@ def check_price_dates_aligned(tickers, end_date, retries=PRICE_ALIGNMENT_RETRIES
     )
 
 
-def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=DEFAULT_TRAIN_CONFIG, sinks=None,
+def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=None, sinks=None,
                                    checkpoint_dir=None, garch_cache_dir=None, garch_read_only=False, log_dir=None,
-                                   version=None):
+                                   version=None, tuning_path=None):
     """
     설명: 입력 점검 → baseline·학습·게이트 → 체크포인트 → 종목별 예측·저장 → 실행 기록을 차례로 하고 {version, gate, predictions}를 돌려준다.
-    주의 사항: 기본 sinks는 운영 DB·MLflow에 쓴다(저장 없이 돌리려면 CollectSink·임시 checkpoint_dir·garch_read_only). 게이트 미통과여도 저장한다.
-    입력 타입->반환 타입: (list[str], str, str, TrainConfig, list|None, str|None, str|None, bool, str|None, str|None) -> dict
+    주의 사항: 기본 sinks는 운영 DB·MLflow에 쓴다. train_config를 안 주면 채택된 튜닝 값(tuning_path, 기본 checkpoints/tuning)을, 없으면 기본값을 쓴다.
+    입력 타입->반환 타입: (list[str], str, str, TrainConfig|None, list|None, str|None, str|None, bool, str|None, str|None, str|None) -> dict
     """
     if sinks is None:
         sinks = [store.DbSink(), store.MlflowSink()]
@@ -285,6 +315,10 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=D
     # 거시지표·KOSPI·종목 가격은 한 번만 읽어 학습과 예측이 같은 스냅숏을 쓴다.
     shared_cache = load_shared_cache(start_date, end_date)
     prices_by_ticker = load_price_cache(tickers, start_date, end_date)
+    # 튜닝 값: 직접 준 train_config가 우선. 없으면 채택된 주간 튜닝 값, 그것도 없거나 깨졌으면 기본값(실패하지 않음).
+    tuned_params_id = None
+    if train_config is None:
+        train_config, tuned_params_id = tuning.resolve_train_config(DEFAULT_TRAIN_CONFIG, tuning_path)
     train_out = train_daily_pooled_model(tickers, start_date, end_date, train_config=train_config, shared_cache=shared_cache,
                                          prices_by_ticker=prices_by_ticker, garch_cache_dir=garch_cache_dir,
                                          garch_read_only=garch_read_only)
@@ -302,6 +336,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=D
         "split_train_end": str(train_out["train_end"].date()),
         "split_val_end": str(train_out["val_end"].date()),
     }
+    if tuned_params_id is not None:
+        extra_meta["tuned_params_id"] = tuned_params_id
     version = store.save_checkpoint(
         model, scaler, feature_cols, model_kwargs, checkpoint_dir, version=version,
         model_class_name=MODEL_CLASS_NAME, extra_meta=extra_meta,
@@ -352,7 +388,7 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=D
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
     payload = store.build_run_payload(tickers, version, train_out, gate, results, model_kwargs,
-                                      input_data_suspect=input_data_suspect)
+                                      input_data_suspect=input_data_suspect, tuned_params_id=tuned_params_id)
     for sink in sinks:
         sink.log_run(payload)
     return {"version": version, "gate": gate, "predictions": results}
