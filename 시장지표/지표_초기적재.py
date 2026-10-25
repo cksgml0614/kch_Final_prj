@@ -1,8 +1,6 @@
-# 지표_초기적재.py
-# 지표_공통.py만 참조한다(지표_일일수집.py를 import하지 않음 — 2026-08-23 재작업,
-# 뉴스_공통 패턴과 통일). FDR/ECOS 두 로더 모두 애초에 "전체 기간 조회"가 초기적재 동작
-# 그 자체이므로(고정 시작일 상수 없음, 사람 확인), only_uninitialized=True로 호출해
-# 아직 한 번도 적재 안 된 지표만 대상으로 삼는다.
+# 지표_초기적재.py — market_indicators에 행이 하나도 없는 지표만 소스의 전체 기간으로 적재하는 CLI.
+# 파이프라인 단계: 수집(최초 1회, 수동). 진입: python -m 시장지표.지표_초기적재
+# 고정 시작일 없이 전체 기간을 받는다(only_uninitialized=True). 섹션·지표별 예외는 격리해 요약에 남기고 종료 코드는 0이다.
 
 from config import redact
 from db_manager import get_db_connection

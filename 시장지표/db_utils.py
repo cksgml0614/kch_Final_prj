@@ -1,11 +1,14 @@
-# db_utils.py
-# market_indicators / indicator_meta 적재 공통 유틸. G-2(FDR)·G-3(ECOS) 로더가 공유한다.
-# G-1 계약(적재 순서, published_date 명시, IS DISTINCT FROM upsert)을 한 곳에서 지킨다.
+# db_utils.py — indicator_meta·market_indicators에 쓰는 공용 함수. 지표_공통의 FDR·ECOS 로더가 함께 쓴다.
+# 파이프라인 단계: 수집(저장). 테이블 사용 계약(메타 먼저 적재, published_date 명시, 값이 다를 때만 갱신)을 이 파일에서만 지킨다.
+# 배경: 결정기록.md의 "개정값은 최신값만 유지하고 신규·개정 건수를 센다"
 
 
 def upsert_indicator_meta(cur, meta_dict):
-    """meta_dict: {indicator_code: {name, source, frequency, unit, note, ecos_stat_code?, ecos_item_code?}}
-    market_indicators 적재보다 먼저 호출해야 한다 (FK)."""
+    """
+    설명: {indicator_code: {name, source, frequency, unit?, ecos_stat_code?, ecos_item_code?, note?}}를 indicator_meta에 upsert한다.
+    주의 사항: market_indicators 적재보다 먼저 불러야 한다(FK). 기존 메타는 모든 컬럼을 덮어쓴다. 커밋은 호출자가 한다.
+    입력 타입->반환 타입: (psycopg.Cursor, dict) -> None
+    """
     query = """
         INSERT INTO indicator_meta (indicator_code, name, source, frequency, unit, ecos_stat_code, ecos_item_code, note)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -26,14 +29,21 @@ def upsert_indicator_meta(cur, meta_dict):
 
 
 def get_last_date(cur, indicator_code):
-    """DB에서 해당 지표의 가장 최신 date를 가져온다."""
+    """
+    설명: market_indicators에서 지표의 가장 최신 date를 돌려준다.
+    주의 사항: 행이 없으면 None. date는 기준일이다(published_date 아님).
+    입력 타입->반환 타입: (psycopg.Cursor, str) -> date|None
+    """
     cur.execute("SELECT MAX(date) FROM market_indicators WHERE indicator_code = %s", (indicator_code,))
     return cur.fetchone()[0]
 
 
 def upsert_market_indicators(cur, records):
-    """records: (indicator_code, date, value, published_date) 튜플 리스트.
-    G-1 계약: IS DISTINCT FROM + RETURNING으로 신규/개정 건수를 구분한다."""
+    """
+    설명: (indicator_code, date, value, published_date) 튜플을 upsert하고 (신규 건수, 개정 건수)를 돌려준다.
+    주의 사항: 값이 같은 기존 행은 건드리지 않고 세지 않는다. 값이 다르면 value와 published_date를 함께 바꾼다. 커밋은 호출자가 한다.
+    입력 타입->반환 타입: (psycopg.Cursor, list[tuple]) -> (int, int)
+    """
     query = """
         INSERT INTO market_indicators (indicator_code, date, value, published_date)
         VALUES (%s, %s, %s, %s)

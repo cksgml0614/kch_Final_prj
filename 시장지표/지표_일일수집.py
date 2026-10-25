@@ -1,15 +1,8 @@
-# 지표_일일수집.py
-# 지표_공통.py만 참조한다(지표_초기적재.py를 import하지 않음 — 2026-08-23 재작업,
-# 뉴스_공통 패턴과 통일). FDR+ECOS 지표를 증분 적재한다(only_uninitialized=False, 기본값).
-#
-# 2026-09-27: --force 모드 추가 — 이미 적재된 기간이라도 소스에서 다시 받아 값이 다르면
-# 덮어쓴다(지표_공통.force_refetch_indicator 참고). 인자 없이 실행하면 기존 증분 동작 그대로
-# (GitHub Actions daily_data_collection.yml은 인자 없이 호출).
-#   예) python -m 시장지표.지표_일일수집 --force --start 2026-09-17 --codes KOSPI KOSDAQ --dry-run
-#
-# 2026-10-03: 증분 적재가 모두 끝난 뒤 일별 지표 신선도를 점검해(지표_공통.check_daily_indicator_lag),
-# 적재 실패나 한도 이상 뒤처진 지표가 있으면 마지막에 exit 1로 끝낸다. 한 지표의 문제가 다른
-# 지표 저장을 막지 않도록 판정은 모든 upsert·commit 이후에만 한다.
+# 지표_일일수집.py — FDR·ECOS 지표 증분 적재 CLI(기본), 기간 지정 강제 재수집(--force).
+# 파이프라인 단계: 수집. 진입: python -m 시장지표.지표_일일수집 (Actions daily_data_collection.yml·daily_pipeline.bat은 인자 없이 호출).
+#   정정 예) python -m 시장지표.지표_일일수집 --force --start 2026-09-17 --codes KOSPI KOSDAQ --dry-run
+# 증분 모드는 모든 upsert·commit 뒤에 일별 지표 신선도를 점검하고, 적재 실패나 한도 초과가 있으면 exit 1로 끝난다.
+# 배경: 결정기록.md의 "일별 지표 신선도 점검과 종료 코드"
 
 import argparse
 import sys
@@ -24,6 +17,11 @@ from 시장지표.지표_공통 import (
 
 
 def _parse_args():
+    """
+    설명: CLI 인자를 읽는다. --start/--end/--codes/--dry-run은 --force와 함께만 허용하고, --force에는 --start가 필요하다.
+    주의 사항: 잘못된 조합은 argparse 오류(exit 2)로 끝난다.
+    입력 타입->반환 타입: () -> argparse.Namespace
+    """
     p = argparse.ArgumentParser(description="FDR+ECOS 지표 증분 적재(기본) / 기간 지정 강제 재수집(--force)")
     p.add_argument("--force", action="store_true", help="[--start, --end] 구간을 소스에서 다시 받아 덮어쓴다")
     p.add_argument("--start", type=date.fromisoformat, help="--force 시작일 YYYY-MM-DD(필수)")
@@ -40,6 +38,11 @@ def _parse_args():
 
 
 def run_force(args):
+    """
+    설명: 지정 지표·기간을 강제 재수집하고 요약을 출력한다. 소스에서 0건을 받은 지표는 경고한다.
+    주의 사항: 알 수 없는 코드가 있으면 시작 전에 SystemExit. 지표마다 커밋(dry-run이면 롤백). 종료 코드는 바꾸지 않는다.
+    입력 타입->반환 타입: (argparse.Namespace) -> None
+    """
     end = args.end or date.today()
     codes = args.codes or list(FDR_INDICATOR_MAP) + list(ECOS_INDICATOR_META)
     unknown = [c for c in codes if c not in FDR_INDICATOR_MAP and c not in ECOS_INDICATOR_META]
@@ -68,6 +71,11 @@ def run_force(args):
 
 
 def run_incremental():
+    """
+    설명: FDR·ECOS 섹션을 차례로 적재·커밋하고 요약과 일별 지표 신선도를 출력한다.
+    주의 사항: 섹션 전체 실패, 지표 적재 실패, lag 한도 초과가 하나라도 있으면 저장이 끝난 뒤 sys.exit(1). 경고 수준 lag는 종료 코드에 넣지 않는다.
+    입력 타입->반환 타입: () -> None
+    """
     with get_db_connection() as conn:
         if not conn:
             raise SystemExit("DB 연결 실패")
