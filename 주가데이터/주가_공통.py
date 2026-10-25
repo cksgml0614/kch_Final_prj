@@ -1,17 +1,22 @@
-# 주가_공통.py
-# 주가_초기적재.py / 주가_일일수집.py가 대등하게 참조하는 공용 로직(2026-08-23, 뉴스 트랙의
-# 뉴스_공통.py 패턴과 통일). 두 파일 모두 이 파일만 import하고 서로를 참조하지 않는다.
+# 주가_공통.py — 종목 일봉(OHLCV·등락률)을 FinanceDataReader에서 받아 daily_stock_prices에 넣는 공용 로직.
+# 파이프라인 단계: 수집. 주요 진입 함수: update_stock_data(증분·초기적재), force_refetch_stock(기간 강제 재수집).
+# 주가_초기적재·주가_일일수집·가격예측.종목_월간갱신이 이 파일만 import한다(두 수집 스크립트는 서로를 참조하지 않음).
+# 배경: 결정기록.md의 "증분 수집은 덮어쓰지 않고, 정정은 --force로만", "확정 컷오프 전 KST 오늘 행은 저장하지 않는다"
 
 import FinanceDataReader as fdr
 from datetime import timedelta
 from constants import ACTIVE_TICKERS, last_storable_date
 from db_manager import get_db_connection
 
-TICKERS = ACTIVE_TICKERS  # 종목 마스터는 constants.py로 중앙화(2026-08-30). 이름은 하위 호환 유지
+TICKERS = ACTIVE_TICKERS  # 종목 마스터는 constants.ACTIVE_TICKERS. 이 이름은 기존 import 호환용
 
 
 def get_last_date(cur, ticker):
-    """DB에서 해당 종목의 가장 최신 날짜를 가져옵니다."""
+    """
+    설명: daily_stock_prices에서 종목의 가장 최신 날짜를 돌려준다.
+    주의 사항: 행이 없으면 None. 호출자의 커서를 쓴다(커밋하지 않음).
+    입력 타입->반환 타입: (psycopg.Cursor, str) -> datetime.date|None
+    """
     query = "SELECT MAX(date) FROM daily_stock_prices WHERE ticker = %s"
     cur.execute(query, (ticker,))
     result = cur.fetchone()[0]
@@ -19,6 +24,11 @@ def get_last_date(cur, ticker):
 
 
 def needs_initial_load(ticker):
+    """
+    설명: 종목에 저장된 행이 하나도 없으면(초기적재 대상) True를 돌려준다.
+    주의 사항: DB 읽기. 접속 실패는 예외로 올라간다.
+    입력 타입->반환 타입: (str) -> bool
+    """
     with get_db_connection() as conn:
         if not conn:
             raise RuntimeError("DB 연결 실패")
@@ -28,8 +38,10 @@ def needs_initial_load(ticker):
 
 def update_stock_data(ticker, start_date_override=None):
     """
-    종목 1건 수집+적재. start_date_override가 주어지면(초기적재용) last_date 유무와 무관하게
-    그 날짜부터 수집한다. 없으면 기존 동작(증분: last_date+1, 최초 실행: 스킵)을 따른다.
+    설명: 종목 하나를 수집해 적재하고 결과 상태 문자열("완료 (N건)", "스킵 (...)", "실패 (...)")을 돌려준다.
+    주의 사항: start_date_override(초기적재)가 있으면 그 날짜부터, 없으면 DB 최신일+1부터 받는다. 행이 없는 종목은 증분에서 건너뛴다.
+    ON CONFLICT DO NOTHING이라 기존 행은 바꾸지 않는다. 컷오프 전 KST 오늘 행은 버린다.
+    입력 타입->반환 타입: (str, str|None) -> str
     """
     with get_db_connection() as conn:
         if not conn:
@@ -82,16 +94,19 @@ def update_stock_data(ticker, start_date_override=None):
             return f"완료 ({len(data_list)}건)"
 
 
-# ── 기간 지정 강제 재수집(2026-09-27) ────────────────────────────────────
-# update_stock_data()는 last_date+1부터만 받고 INSERT도 ON CONFLICT DO NOTHING이라, 이미 적재된
-# 날짜의 값이 소스에서 정정돼도 절대 반영되지 않는다. 오염/정정 대응용으로 [start, end]를 다시
-# 받아 값이 다른 행만 덮어쓰는 별도 경로를 둔다(기존 증분 경로는 그대로 — DO NOTHING 유지).
-# CLI: 주가_일일수집.py --force. dry_run=True면 변경 예정 내역만 출력.
+# ── 기간 지정 강제 재수집 ──────────────────────────────────────────────
+# 증분 경로가 덮어쓰지 않으므로, 소스에서 정정된 값은 이 경로(CLI: 주가_일일수집 --force)로만 반영된다.
 
 _PRICE_COLS = ("open", "high", "low", "close", "volume", "change_rate")
 
 
 def force_refetch_stock(cur, ticker, start, end, dry_run=False):
+    """
+    설명: [start, end]를 소스에서 다시 받아 DB에 없는 행은 넣고 값이 다른 행은 덮어쓴 뒤 건수 dict를 돌려준다.
+    주의 사항: 커밋은 호출자가 한다. dry_run이면 쓰지 않고 변경 예정만 출력. 소스에 없는 DB 행은 지우지 않고 경고만.
+    end는 저장 가능 마지막 날짜(컷오프)로 자른다.
+    입력 타입->반환 타입: (psycopg.Cursor, str, date, date, bool) -> dict
+    """
     end = min(end, last_storable_date())  # --force도 확정 전 KST 오늘 행은 쓰지 않는다
     df = fdr.DataReader(ticker, start.isoformat(), end.isoformat())
     records = []
@@ -110,6 +125,11 @@ def force_refetch_stock(cur, ticker, start, end, dry_run=False):
     existing = {row[0]: row[1:] for row in cur.fetchall()}
 
     def _differs(old, new):
+        """
+        설명: DB 행 값과 소스 행 값이 하나라도 다르면 True.
+        주의 사항: float로 바꿔 1e-9 넘게 다를 때만 다르다고 본다(NUMERIC·int 표현 차이 무시).
+        입력 타입->반환 타입: (tuple, tuple) -> bool
+        """
         return any(abs(float(o) - float(n)) > 1e-9 for o, n in zip(old, new))
 
     new_rows = [r for r in records if r[1] not in existing]

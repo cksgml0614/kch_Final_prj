@@ -1,7 +1,6 @@
-# 주가_초기적재.py
-# 주가_공통.py만 참조한다(주가_일일수집.py를 import하지 않음 — 2026-08-23 재작업,
-# 뉴스_공통 패턴과 통일). DB에 데이터가 전혀 없는 종목만 골라 STOCK_INITIAL_LOAD_START부터
-# 전체 적재한다.
+# 주가_초기적재.py — DB에 행이 하나도 없는 활성 종목만 STOCK_INITIAL_LOAD_START부터 전체 적재하는 CLI.
+# 파이프라인 단계: 수집(최초 1회, 수동). 진입: python -m 주가데이터.주가_초기적재
+# 이미 행이 있는 종목은 건너뛴다(그 뒤로는 주가_일일수집). 종목별 예외는 격리해 요약에 남기고 종료 코드는 0이다.
 
 from constants import STOCK_INITIAL_LOAD_START
 from 주가데이터.주가_공통 import TICKERS, needs_initial_load, update_stock_data

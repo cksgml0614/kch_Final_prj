@@ -1,4 +1,5 @@
-# config.py
+# config.py — 비밀값(DB 접속 문자열·ECOS API 키)을 환경변수(.env, Actions secrets)에서 읽는 설정과 출력용 비밀값 가리기(redact).
+# 코드에 비밀값을 직접 쓰지 않는다. 배경: 결정기록.md의 "DB는 Neon pooled 접속 하나만 쓴다", "비밀값은 출력 전에 가린다"
 import os
 from urllib.parse import quote, quote_plus
 
@@ -8,12 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    # DB는 클라우드(Neon) 하나만 쓴다. 2026-10-03에 로컬 Docker Postgres fallback과
-    # USE_CLOUD_DB 토글을 없앴다(로컬 DB 폐기, 덤프는 저장소 밖에 보관).
-    # NEON_DB_URL(pooled)만 쓴다 — db_manager.get_db_connection()이 요청마다 커넥션을 새로
-    # 열고 닫는 패턴이라 pooler가 필요하다. NEON_DB_URL_DIRECT(비-pooled)는 세션 단위 SET
-    # 문이 필요한 pg_dump/pg_restore 같은 마이그레이션 작업 전용이며 애플리케이션 코드에서는
-    # 쓰지 않는다.
+    # DB는 Neon 하나, pooled 접속(NEON_DB_URL)만 쓴다. NEON_DB_URL_DIRECT(비-pooled)는 pg_dump 등 수동 작업 전용.
     DB_URL = os.getenv("NEON_DB_URL")
 
     # API 설정
@@ -21,7 +17,11 @@ class Config:
 
 
 def redact(text):
-    """로그·상태 문자열에서 비밀값을 ***로 바꾼다(2026-10-11). 예외 메시지를 출력·저장하기 전에 쓴다."""
+    """
+    설명: 문자열(또는 예외)에서 ECOS 키·DB 접속 문자열과 그 URL 인코딩 변형을 ***로 바꿔 돌려준다.
+    주의 사항: 예외 메시지를 출력·저장하기 전에 쓴다. 긴 변형부터 치환한다. 비밀값이 비어 있으면 그 항목은 건너뛴다.
+    입력 타입->반환 타입: (object) -> str
+    """
     s = str(text)
     for secret in (Config.ECOS_API_KEY, Config.DB_URL):
         if not secret:

@@ -1,20 +1,8 @@
-# 주가_일일수집.py
-# 주가_공통.py만 참조한다(주가_초기적재.py를 import하지 않음 — 2026-08-23 재작업,
-# 뉴스_공통 패턴과 통일). 종목별 DB 최신 날짜 다음날부터 오늘까지 증분 수집한다.
-# 아직 데이터가 전혀 없는 종목(초기적재 필요)은 처리하지 않고 경고만 출력한다.
-#
-# 2026-09-27: --force 모드 추가 — 이미 적재된 기간이라도 소스에서 다시 받아 값이 다른 행을
-# 덮어쓴다(주가_공통.force_refetch_stock 참고). 인자 없이 실행하면 기존 증분 동작 그대로
-# (GitHub Actions daily_data_collection.yml은 인자 없이 호출).
-#   예) python -m 주가데이터.주가_일일수집 --force --start 2026-09-17 --tickers 005930 --dry-run
-#
-# 2026-10-05: 증분 모드 종료 코드. 예전에는 종목별 예외를 잡고 요약만 출력해 100종목이 전부 실패해도
-# exit 0이었다(Actions 단계가 초록불). 이제 모든 종목 처리·저장이 끝난 뒤 아래 기준으로 exit 1을 남긴다.
-#   - 실패 = 종목별 예외(DB 접속 실패 포함). "신규 데이터 없음"(휴장일 빈 결과 포함)·"이미 최신"은 성공.
-#   - 실패 종목은 1회 재시도한 뒤 판정한다.
-#   - ① 성공 0이면 실패, ② 실패 종목이 활성 종목의 10% 이상이면 실패.
-#   - 1~2종목 실패, 초기적재 스킵, 다른 종목보다 최신일이 뒤처진 종목은 경고만(거래정지·상장폐지 오탐 방지).
-# --force 경로는 사람이 수동으로 돌리는 정정용이라 이 기준을 적용하지 않는다(기존 요약 출력만).
+# 주가_일일수집.py — 활성 종목의 주가 일일 증분 수집 CLI(기본), 기간 지정 강제 재수집(--force).
+# 파이프라인 단계: 수집. 진입: python -m 주가데이터.주가_일일수집 (Actions daily_data_collection.yml·daily_pipeline.bat은 인자 없이 호출).
+#   정정 예) python -m 주가데이터.주가_일일수집 --force --start 2026-09-17 --tickers 005930 --dry-run
+# 증분 모드는 모든 종목 저장이 끝난 뒤 실패 기준에 걸리면 exit 1로 끝난다. --force에는 이 기준을 적용하지 않는다.
+# 배경: 결정기록.md의 "증분 수집의 실패 판정과 종료 코드", "증분 수집은 덮어쓰지 않고, 정정은 --force로만"
 
 import argparse
 import sys
@@ -29,6 +17,11 @@ RETRY_WAIT_SECONDS = 10   # 재시도 전 대기(일시 오류 완화)
 
 
 def _parse_args():
+    """
+    설명: CLI 인자를 읽는다. --start/--end/--tickers/--dry-run은 --force와 함께만 허용하고, --force에는 --start가 필요하다.
+    주의 사항: 잘못된 조합은 argparse 오류(exit 2)로 끝난다.
+    입력 타입->반환 타입: () -> argparse.Namespace
+    """
     p = argparse.ArgumentParser(description="주가 증분 적재(기본) / 기간 지정 강제 재수집(--force)")
     p.add_argument("--force", action="store_true", help="[--start, --end] 구간을 소스에서 다시 받아 덮어쓴다")
     p.add_argument("--start", type=date.fromisoformat, help="--force 시작일 YYYY-MM-DD(필수)")
@@ -44,6 +37,11 @@ def _parse_args():
 
 
 def run_force(args):
+    """
+    설명: 지정 종목·기간을 강제 재수집하고 종목별 변경·실패 요약을 출력한다.
+    주의 사항: 종목마다 커밋(dry-run이면 롤백). 종목별 예외는 격리해 요약에 실패로 남기고, 종료 코드는 바꾸지 않는다.
+    입력 타입->반환 타입: (argparse.Namespace) -> None
+    """
     end = args.end or date.today()
     tickers = args.tickers or TICKERS
     print(f"=== 강제 재수집 {'(dry-run) ' if args.dry_run else ''}{args.start} ~ {end}: {len(tickers)}종목 ===")
@@ -72,7 +70,11 @@ def run_force(args):
 
 
 def _update_one(ticker):
-    """종목 1건 증분 수집. 예외는 "실패 (...)" 상태 문자열로 바꿔 돌려준다(종목별 격리)."""
+    """
+    설명: 종목 하나를 증분 수집하고 상태 문자열을 돌려준다.
+    주의 사항: 예외는 출력 후 "실패 (...)" 문자열로 바꾼다(종목별 격리).
+    입력 타입->반환 타입: (str) -> str
+    """
     try:
         return update_stock_data(ticker)
     except Exception as e:
@@ -81,11 +83,20 @@ def _update_one(ticker):
 
 
 def _is_failure(status):
+    """
+    설명: 상태 문자열이 실패면 True.
+    주의 사항: "스킵 (...)"(신규 데이터 없음·이미 최신·초기적재 필요)은 실패가 아니다.
+    입력 타입->반환 타입: (str) -> bool
+    """
     return status.startswith("실패")
 
 
 def _warn_lagging_tickers(tickers):
-    """다른 종목보다 최신일이 뒤처진 종목을 경고만 한다(거래정지·상장폐지 종목은 매일 걸리므로 실패로 보지 않음)."""
+    """
+    설명: 종목별 최신일을 읽어 전체 최신일보다 뒤처진 종목을 경고로 출력한다.
+    주의 사항: 경고만(거래정지 종목은 매일 걸리므로 실패로 보지 않음). 조회 실패도 경고 후 넘어간다.
+    입력 타입->반환 타입: (list[str]) -> None
+    """
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -107,6 +118,11 @@ def _warn_lagging_tickers(tickers):
 
 
 def run_incremental():
+    """
+    설명: 활성 종목 전체를 증분 수집하고, 실패 종목은 RETRY_WAIT_SECONDS 뒤 1회 재시도한 다음 요약·경고를 출력한다.
+    주의 사항: 성공 0종목이거나 실패가 FAIL_RATIO_LIMIT 이상이면 저장이 다 끝난 뒤 sys.exit(1). 그보다 적은 실패는 경고만.
+    입력 타입->반환 타입: () -> None
+    """
     results = {ticker: _update_one(ticker) for ticker in TICKERS}
 
     first_failed = [t for t, s in results.items() if _is_failure(s)]

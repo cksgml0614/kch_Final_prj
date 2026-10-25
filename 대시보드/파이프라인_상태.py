@@ -348,7 +348,11 @@ def _cell_collect(d, src):
 
 
 def _collect_base(d, src):
-    """① 수집: Actions 결과 우선, 없으면 로컬 [collect] rc. Actions 실패여도 그날 데이터가 DB에 있으면 경고."""
+    """
+    설명: ① 수집 기본 판정. 그 사이클의 마지막 Actions run 결과를 먼저 보고, 없으면 마지막 로컬 [collect] rc를 본다.
+    주의 사항: 실패여도 그날 주가·지표 행이 DB에 있으면 경고. Actions는 최근 20개만 보므로 오래된 열은 로컬 기록에 기댄다.
+    입력 타입->반환 타입: (date, dict) -> (str, str, str)
+    """
     gh, logs, db = src["github"], src["logs"], src["db"]
     present = db is not None and (d in db["stock_dates"] or d in db["indicator_dates"])
     local = [r for r in (logs or []) if cycle_day(r["start"]) == d and r["stock_rc"] is not None]
@@ -389,7 +393,11 @@ def _cell_align(d, src):
 
 
 def _align_base(d, src):
-    """② 데이터 반영: 그 사이클 마지막 로그의 [PRICE-ALIGN] 줄."""
+    """
+    설명: ② 데이터 반영 기본 판정 — 그 사이클 마지막 로그의 [PRICE-ALIGN] 줄(전 종목 일치 성공, 이탈 경고, 그 밖은 실패).
+    주의 사항: 이 줄은 2026-10-17 로그부터만 있어 그 전 열은 기록 없음.
+    입력 타입->반환 타입: (date, dict) -> (str, str, str)
+    """
     if src["logs"] is None:
         return (*LOOKUP_FAILED, "로그 조회 실패")
     recs = [r for r in src["logs"] if r["price_align"] and _log_day(r, src) == d]
@@ -405,7 +413,11 @@ def _align_base(d, src):
 
 
 def _day_run(d, src):
-    """그 사이클의 마지막 MLflow run(운영·옛 운영 실험)과 마지막 로그."""
+    """
+    설명: 그 사이클의 마지막 MLflow run(운영·옛 운영 실험)과 마지막 일일 로그 기록을 돌려준다.
+    주의 사항: 튜닝 실험 run은 뺀다. 없거나 출처가 실패면 None.
+    입력 타입->반환 타입: (date, dict) -> (pd.Series|None, dict|None)
+    """
     run = None
     if src["mlflow"] is not None:
         runs = src["mlflow"][0]
@@ -418,7 +430,11 @@ def _day_run(d, src):
 
 
 def _day_version(d, src, run, log):
-    """그 사이클에 만들어진 마지막 모델 버전(run 태그·로그·DB 예측 행·registry 중 가장 늦은 것)."""
+    """
+    설명: 그 사이클에 만들어진 마지막 모델 버전(run 태그·로그·DB 예측 행·registry 중 가장 늦은 것)을 돌려준다.
+    주의 사항: 버전은 문자열 비교로 고른다(YYYYMMDD_HHMMSS라 시간 순서와 같다). 없으면 None.
+    입력 타입->반환 타입: (date, dict, pd.Series|None, dict|None) -> str|None
+    """
     cands = []
     if run is not None and run["version"]:
         cands.append(run["version"])
@@ -430,7 +446,11 @@ def _day_version(d, src, run, log):
 
 
 def _cell_train(run, log, src):
-    """③ 학습: MLflow run 상태, 없으면 로그의 학습 완료 줄."""
+    """
+    설명: ③ 학습 칸 — MLflow run 상태, 없으면 로그의 학습 완료·예측 실패 줄.
+    주의 사항: 성공 칸 글자는 run 시작 시각.
+    입력 타입->반환 타입: (pd.Series|None, dict|None, dict) -> (str, str, str)
+    """
     if run is not None:
         st_ = {"FINISHED": "success", "FAILED": "failure", "RUNNING": "running"}.get(run["status"], "warning")
         return st_, f"{hm(run['start'])}" if st_ == "success" else run["status"], f"MLflow run {run['experiment']}"
@@ -444,7 +464,11 @@ def _cell_train(run, log, src):
 
 
 def _cell_gate(v, run, log, src):
-    """④ 게이트: 그 버전 예측 행의 gate_passed, 없으면 MLflow 지표·로그."""
+    """
+    설명: ④ 게이트 칸 — 그 버전 마지막 기준일 예측 행의 gate_passed, 없으면 MLflow gate_passed 지표, 그다음 로그.
+    주의 사항: 예측 행은 전부 통과여야 통과.
+    입력 타입->반환 타입: (str|None, pd.Series|None, dict|None, dict) -> (str, str, str)
+    """
     db = src["db"]
     if v and db is not None and v in db["preds"]:
         p = db["preds"][v]
@@ -460,12 +484,21 @@ def _cell_gate(v, run, log, src):
 
 
 def _count_status(n):
-    """예측 저장 행 수 판정: 100이면 성공, 90 이상이면 경고, 미만이면 실패."""
+    """
+    설명: 예측 저장 행 수를 상태로 바꾼다 — N_TICKERS(100) 이상 성공, 90 이상 경고, 미만 실패.
+    주의 사항: 없음.
+    입력 타입->반환 타입: (int) -> str
+    """
     return "success" if n >= N_TICKERS else "warning" if n >= 90 else "failure"
 
 
 def _cell_save(v, run, log, src):
-    """⑤ 예측 저장: 그 버전 마지막 prediction_date의 행 수. 나중 실행이 같은 키를 덮어써 행이 줄었으면 실행 기록의 저장 수."""
+    """
+    설명: ⑤ 예측 저장 칸 — 그 버전 마지막 기준일의 예측 행 수로 판정한다.
+    주의 사항: 이후 실행이 같은 키를 덮어써 버전 전체 행이 실행 기록(MLflow·로그의 저장 수)보다 적으면, 실행 기록 수로 판정하고
+    "기록(덮어씀 N)"으로 쓴다(결정기록.md "⑤ 예측 저장의 덮어씀 판정", 사람 확인 대기).
+    입력 타입->반환 타입: (str|None, pd.Series|None, dict|None, dict) -> (str, str, str)
+    """
     recorded = None  # 그 버전 실행이 기록한 저장 성공 수(MLflow 지표 또는 로그)
     if run is not None and run["version"] == v and run["n_success"] is not None and not pd.isna(run["n_success"]):
         recorded = int(run["n_success"])
@@ -486,7 +519,11 @@ def _cell_save(v, run, log, src):
 
 
 def _cell_mlflow(run, log, src):
-    """⑥ MLflow: run 유무·상태, 없으면 로그의 건너뜀·실패 줄."""
+    """
+    설명: ⑥ MLflow 칸 — run 유무·상태, 없으면 로그의 [MLFLOW-SKIP](경고)·로깅 실패(실패) 줄.
+    주의 사항: 없음.
+    입력 타입->반환 타입: (pd.Series|None, dict|None, dict) -> (str, str, str)
+    """
     if run is not None:
         return ("success", f"{hm(run['start'])}", run["experiment"]) if run["status"] == "FINISHED" else \
             ("failure", run["status"], run["experiment"])
@@ -500,7 +537,11 @@ def _cell_mlflow(run, log, src):
 
 
 def _cell_registry(v, src):
-    """⑦ registry·실측: model_registry 등록과 실측 확정 여부."""
+    """
+    설명: ⑦ registry·실측 칸 — model_registry 등록 여부(미등록은 경고)와 그 버전 예측의 실측 확정 여부(미확정은 대기).
+    주의 사항: 예측 행이 이후 실행에 덮어써졌으면 "등록·덮어씀".
+    입력 타입->반환 타입: (str|None, dict) -> (str, str, str)
+    """
     db = src["db"]
     if db is None:
         return (*LOOKUP_FAILED, "DB 조회 실패")
@@ -529,8 +570,10 @@ TUNING_STATES = {
 
 def _cell_tuning(d, src):
     """
-    ⑧ 튜닝: 실험 주간_튜닝의 부모 run(태그 run_kind=tuning_parent)만 본다 — 시도별 중첩 run(tuning_trial)은 무시.
-    의존은 run_kind·state 태그와 run 시각·status뿐(지표 이름은 튜닝 브랜치에서 바뀔 수 있다). 부모 run이 없으면 기록 없음.
+    설명: ⑧ 튜닝 칸 — 실험 주간_튜닝의 그 사이클 마지막 부모 run(태그 run_kind=tuning_parent)의 status·state 태그로 판정한다.
+    주의 사항: 시도별 중첩 run(tuning_trial)은 보지 않는다. 의존은 run_kind·state 태그와 run 시각·status뿐(지표 이름에 기대지 않음) —
+    튜닝 코드가 이 태그 이름이나 state 값 4종을 바꾸면 TUNING_STATES도 함께 고친다. 부모 run이 없으면 기록 없음.
+    입력 타입->반환 타입: (date, dict) -> (str, str, str)
     """
     if src["mlflow"] is None:
         return (*LOOKUP_FAILED, "MLflow 조회 실패")

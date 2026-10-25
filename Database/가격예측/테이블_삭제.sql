@@ -1,6 +1,6 @@
--- model_predictions 테이블 자체를 삭제한다. 다른 테이블이 이를 FK로 참조하지 않으므로 CASCADE 불필요.
+-- model_predictions·model_registry 테이블 자체를 삭제한다. ⚠️ 운영 데이터가 사라진다 — 반드시 확인 후 실행.
+-- 두 테이블 모두 FK가 없어 순서 무관, CASCADE 불필요. 뷰(뷰_생성.sql)가 model_predictions에 의존하므로 뷰_삭제.sql을 먼저 실행한다.
 
 DROP TABLE IF EXISTS model_predictions;
 
--- model_registry(2026-10-11)는 다른 테이블과 FK가 없어 순서 무관.
 DROP TABLE IF EXISTS model_registry;

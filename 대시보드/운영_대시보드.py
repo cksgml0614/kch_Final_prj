@@ -1,12 +1,8 @@
-# 대시보드/운영_대시보드.py — 새 대시보드(2026-10-11 1단계 골격, 2026-10-18 2단계: 패널 A·B·C 실측 연결)
-# 실행(프로젝트 루트에서 — .streamlit/config.toml 테마가 적용된다):
-#   streamlit run 대시보드/운영_대시보드.py --server.port 8599
-# 순서: 패널 A(파이프라인 상태) → 레벨 피처 트랙 → 패널 B → 백테스트 분리 → 패널 C.
-# 규칙: 자동 새로고침(st.fragment run_every 등) 금지 — Neon 컴퓨트가 계속 깨어난다. 캐시 ttl 300 + 수동 새로고침만.
-# st.info 상자와 marker_color 직접 지정 금지, 모든 차트는 테마.show_chart()를 거친다. DB는 db_manager로만(데이터.py).
-# 외부 조회가 실패해도 앱은 멈추지 않고 그 자리에 "조회 실패" 칩을 그린다(원문은 콘솔에만 남는다).
-# 패널 A의 출처·사이클 날짜 규칙은 파이프라인_상태.py 머리 주석 참고. 백테스트 재생 파일은 대시보드/백테스트_재생.py가 만든다.
-# 화면 문구 원칙(2026-10-18 다듬기): 숫자를 잘못 읽지 않는 데 꼭 필요한 것만 한 줄로 두고, 정의·근거는 툴팁(ⓘ, title)으로 옮긴다.
+# 대시보드/운영_대시보드.py — 운영 대시보드 Streamlit 앱: 패널 A(파이프라인 상태) → B(오늘의 예측) → C(예측 대 실현 성능).
+# 실행(프로젝트 루트에서 — .streamlit/config.toml 테마가 적용된다): streamlit run 대시보드/운영_대시보드.py --server.port 8599
+# 규칙: 자동 새로고침 금지(캐시 ttl 300 + 새로고침 버튼만), st.info 상자·marker_color 직접 지정 금지(차트는 테마.show_chart),
+#   DB는 데이터.py로만. 출처 조회가 실패해도 앱은 멈추지 않고 그 자리에 "조회 실패" 칩을 그린다(원인은 콘솔에만).
+# 화면 문구: 숫자를 잘못 읽지 않는 데 꼭 필요한 것만 한 줄로 두고, 정의·근거는 툴팁(ⓘ, title)에 둔다. 배경: 결정기록.md
 
 import html
 import re
@@ -35,7 +31,11 @@ def lookup_failed(what):
 
 
 def md(d):
-    """날짜를 요일 없이 '10/16'으로(좁은 자리용)."""
+    """
+    설명: 날짜를 요일 없이 '10/16'으로 만든다(좁은 자리용).
+    주의 사항: None·NaT면 '-'.
+    입력 타입->반환 타입: (date|datetime|str|None) -> str
+    """
     return "-" if d is None or pd.isna(d) else f"{pd.Timestamp(d).month}/{pd.Timestamp(d).day}"
 
 
@@ -153,7 +153,11 @@ def grid_short(stage_no, status, text):
 
 
 def basis_text(basis):
-    """열의 기준일 문구: '예측 기준일 10/16(금) → 대상일 10/19(월)'. 모르면 빈 문자열."""
+    """
+    설명: 열의 기준일 문구('예측 기준일 10/16(금) → 대상일 10/19(월)')를 만든다.
+    주의 사항: 기준일을 모르면 빈 문자열, 대상일을 모르면 기준일만.
+    입력 타입->반환 타입: ((date|str|None, date|None)) -> str
+    """
     pdate, tdate = basis
     if pdate is None:
         return ""
@@ -199,14 +203,18 @@ def grid_header(day, current, basis="", holiday=None):
 
 
 # ⑧ 튜닝 칸: 파이프라인_상태.TUNING_STATES의 앞 단어 → 아이콘. 칸 글자는 부모 run 시각, 결과는 아이콘 모양으로 구분한다
-# (5글자·줄넘김 금지 칸이라 "채택 05:34"를 다 쓰면 1280 폭에서 넘친다 — 단어는 툴팁과 범례에 있다).
+# (칸은 5글자·줄넘김 금지라 "채택 05:34"를 다 쓰면 좁은 폭에서 넘친다 — 단어는 툴팁과 범례에 있다).
 TUNE_ICONS = {"채택": "tune-adopted", "유지": "tune-kept", "복귀": "tune-reverted", "기본": "tune-none"}
 TUNE_LEGEND = (("tune-adopted", "success", "채택", "새 값 채택"), ("tune-kept", "success", "유지", "현재 적용 값 유지"),
                ("tune-reverted", "warning", "복귀", "기본값으로 되돌림"), ("tune-none", "success", "기본", "채택값 없음, 기본값 유지"))
 
 
 def grid_legend():
-    """범례 한 줄: 상태 6종 + 기록 없음 점 + 덮어씀 표시 + ⑧ 튜닝 결과 4종."""
+    """
+    설명: 격자 범례 한 줄(상태 6종 + 기록 없음 점 + 덮어씀 표시 + ⑧ 튜닝 결과 4종) HTML을 만든다.
+    주의 사항: 없음.
+    입력 타입->반환 타입: () -> str
+    """
     items = [f'<span style="color:{s["fg"]}">{테마.icon(k)}<span style="color:{테마.TEXT_MUTED}">{s["label"]}</span></span>'
              for k, s in 테마.STATUS.items()]
     items.append('<span><span class="swatch"><span class="nodot"></span></span>기록 없음</span>')
@@ -389,7 +397,11 @@ def day_chips(g):
 
 
 def short_range(a, b):
-    """'2026-09-22', '2026-10-16' → '2026-09-22~10-16'(같은 해면 뒤쪽 연도 생략)."""
+    """
+    설명: 기간 문구를 만든다('2026-09-22', '2026-10-16' → '2026-09-22~10-16', 같은 해면 뒤쪽 연도 생략).
+    주의 사항: 입력은 'YYYY-MM-DD'로 문자열화되는 값이어야 한다.
+    입력 타입->반환 타입: (str|date, str|date) -> str
+    """
     a, b = str(a), str(b)
     return f"{a}~{b[5:]}" if a[:4] == b[:4] else f"{a}~{b}"
 

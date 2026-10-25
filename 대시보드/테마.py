@@ -1,9 +1,8 @@
-# 대시보드/테마.py — 새 대시보드의 디자인 토큰(2026-10-11, 사람 결정)
-# 밝은 테마 고정, 연회색 배경 + 흰 카드. 파랑은 데이터(막대·선)에만 쓰고 배경·제목·상태에는 쓰지 않는다.
-# 색 값은 참고 이미지(저장소 밖)에서 뽑은 실제 픽셀 값이다. 상태 글자색은 흰 바탕·칸 배경·페이지
-# 배경 모두에 대해 WCAG 대비 4.5 이상인 진한 변형이고, 연한 원색은 칸 배경과 큰 면에만 쓴다.
-# 차트는 모두 apply_layout()과 show_chart()를 거친다 — marker_color를 직접 지정하지 않는다.
-# 2026-10-18 다듬기: 타입 스케일(아래 FS_*)과 8px 간격, 상태 아이콘을 한 계열의 선 아이콘(CSS mask)으로 통일.
+# 대시보드/테마.py — 운영 대시보드의 디자인 토큰(색·타입 스케일·상태 6종·아이콘), CSS, HTML 조각, plotly 공통 레이아웃.
+# 밝은 테마 고정(연회색 배경 + 흰 카드). 파랑은 데이터(막대·선)에만 쓰고 배경·제목·상태에는 쓰지 않는다.
+# 상태 글자색은 흰 바탕·칸 배경·페이지 배경 모두에 WCAG 대비 4.5 이상인 진한 변형, 연한 원색은 칸 배경과 큰 면에만 쓴다.
+# 차트는 모두 show_chart()(apply_layout)를 거친다 — marker_color를 직접 지정하지 않는다.
+# 배경: 결정기록.md의 "밝은 테마 고정, 파랑은 데이터 전용"
 
 import html
 from urllib.parse import quote
@@ -68,6 +67,11 @@ _ICON_SVG = {
 
 
 def _icon_css():
+    """
+    설명: _ICON_SVG의 아이콘마다 .ico-<이름> CSS 규칙(SVG data URI를 mask-image로)을 만들어 한 문자열로 돌려준다.
+    주의 사항: 색은 mask라 background-color(= currentColor)를 따른다.
+    입력 타입->반환 타입: () -> str
+    """
     rules = []
     for k, body in _ICON_SVG.items():
         uri = "data:image/svg+xml," + quote(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">{body}</svg>')
@@ -164,16 +168,29 @@ CSS = f"""
 
 
 def inject_css():
+    """
+    설명: 페이지에 대시보드 CSS를 넣는다.
+    주의 사항: 페이지 맨 앞에서 한 번 부른다.
+    입력 타입->반환 타입: () -> None
+    """
     st.html(CSS)
 
 
 def icon(status):
-    """상태 아이콘 HTML(색은 감싼 요소의 글자색을 따른다)."""
+    """
+    설명: 상태(또는 tune-* 튜닝 결과) 아이콘 HTML을 돌려준다.
+    주의 사항: 색은 감싼 요소의 글자색을 따른다. 장식용이라 aria-hidden.
+    입력 타입->반환 타입: (str) -> str
+    """
     return f'<span class="ico ico-{status}" aria-hidden="true"></span>'
 
 
 def status_chip(status, text=None, title=None):
-    """상태를 색 + 아이콘 + 글자로 그리는 HTML 조각. text가 없으면 상태 이름을 쓴다. title은 마우스 올림 설명."""
+    """
+    설명: 상태를 색 + 아이콘 + 글자로 그리는 칩 HTML을 돌려준다.
+    주의 사항: status는 STATUS 6종 중 하나. text가 없으면 상태 이름을 쓰고, title은 마우스 올림 설명. 글자는 escape한다.
+    입력 타입->반환 타입: (str, str|None, str|None) -> str
+    """
     s = STATUS[status]
     cls = "status-chip" + {"skipped": " status-skipped", "failure": " status-failure"}.get(status, "")
     label = html.escape(text or s["label"])
@@ -182,12 +199,20 @@ def status_chip(status, text=None, title=None):
 
 
 def info(tip):
-    """접힌 설명: ⓘ에 마우스를 올리면 전문이 보인다."""
+    """
+    설명: 접힌 설명 ⓘ의 HTML을 돌려준다(마우스를 올리면 tip 전문이 보인다).
+    주의 사항: tip은 escape한다.
+    입력 타입->반환 타입: (str) -> str
+    """
     return f'<span class="info" title="{html.escape(tip)}">ⓘ</span>'
 
 
 def kpi_html(label, value, sub="", tip="", status=None):
-    """KPI 카드 내용. st.metric은 값을 한 줄로 자르므로(10/11 화면 확인) HTML로 그린다. tip은 보조 글자의 전문."""
+    """
+    설명: KPI 카드 내용(라벨·값·보조 글자, 선택적 상태 아이콘) HTML을 돌려준다.
+    주의 사항: st.metric은 긴 값을 잘라서 HTML로 그린다. 값·보조 글자는 한 줄로 말줄임되고 전문은 title(tip이 없으면 sub)에 둔다.
+    입력 타입->반환 타입: (str, str, str, str, str|None) -> str
+    """
     e = html.escape
     ico = f'<span style="color:{STATUS[status]["fg"]};display:inline-flex">{icon(status)}</span>' if status else ""
     return (f'<div class="kpi"><div class="kpi-label">{e(label)}</div>'
@@ -200,7 +225,7 @@ PLOTLY_LAYOUT = dict(
     font=dict(family=FONT, color=TEXT, size=FS_SMALL),
     paper_bgcolor=CARD_BG,
     plot_bgcolor=CARD_BG,
-    margin=dict(l=64, r=8, t=36, b=8),   # 왼쪽은 y축 제목·눈금 자리(8이면 잘림 — 2026-10-11 스크래치 렌더 확인)
+    margin=dict(l=64, r=8, t=36, b=8),   # 왼쪽은 y축 제목·눈금 자리(8이면 잘린다)
     xaxis=dict(gridcolor=GRID, linecolor=GRID, zeroline=False, automargin=True),
     yaxis=dict(gridcolor=GRID, linecolor=GRID, zeroline=False, automargin=True),
     legend=dict(orientation="h", y=1.08, x=0, bgcolor="rgba(0,0,0,0)"),
@@ -209,6 +234,11 @@ PLOTLY_LAYOUT = dict(
 
 
 def apply_layout(fig, **overrides):
+    """
+    설명: 그림에 PLOTLY_LAYOUT을 적용하고 overrides로 덮어쓴 뒤 같은 그림을 돌려준다.
+    주의 사항: fig를 직접 바꾼다.
+    입력 타입->반환 타입: (go.Figure, **object) -> go.Figure
+    """
     fig.update_layout(**PLOTLY_LAYOUT)
     if overrides:
         fig.update_layout(**overrides)
@@ -216,5 +246,9 @@ def apply_layout(fig, **overrides):
 
 
 def show_chart(fig, **overrides):
-    """공통 레이아웃을 적용해 그린다. theme=None으로 Streamlit 테마가 레이아웃을 덮어쓰지 않게 한다."""
+    """
+    설명: 공통 레이아웃을 적용해 차트를 그린다.
+    주의 사항: theme=None으로 Streamlit 테마가 레이아웃을 덮어쓰지 않게 한다.
+    입력 타입->반환 타입: (go.Figure, **object) -> None
+    """
     st.plotly_chart(apply_layout(fig, **overrides), theme=None, width="stretch")

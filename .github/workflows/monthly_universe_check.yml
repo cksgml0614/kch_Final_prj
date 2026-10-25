@@ -1,23 +1,8 @@
-# .github/workflows/monthly_universe_check.yml — 종목 유니버스 점검(dry-run 전용, 2026-09-20)
-#
-# ⚠️ --apply는 이 워크플로 어디에도 넣지 않는다. 종목_월간갱신.py가 스스로 "자동 적용은
-# 보류, 사람 검토 유지"라고 못박아둔 안전장치를 그대로 지킨다 — constants.py 반영(--apply)은
-# 사람이 로그를 보고 로컬에서 수동으로 실행한다.
-#
-# ⚠️ --dry-run도 DB에 쓴다: constants.py는 바꾸지 않지만, 신규 진입 후보의 train 시퀀스 수를 세기
-# 위해 ensure_price_data()가 후보 종목의 전체 주가를 Neon daily_stock_prices에 적재한다(CLAUDE.md
-# 알려진 이슈 "월간 유니버스 점검 --dry-run이 DB에 쓴다"). 그래서 아래 job을 비활성화해 두었다.
-#
-# daily_data_collection.yml과 동일하게 클라우드(Neon) DB + requirements-ci.txt를 그대로
-# 재사용한다(사람 지시) — 종목_월간갱신.py가 가격예측_변동성_공통.py를 import하면서 torch/
-# mlflow/arch까지 걸리는 사정은 requirements-ci.txt 상단 주석 참고. ECOS_API_KEY는 이
-# 스크립트가 안 쓰므로 시크릿으로 넘기지 않는다.
-#
-# 결과(신규 진입/이탈/보류 후보, 게이팅 통과 여부)는 스크립트의 print 출력이 그대로 Actions
-# 실행 로그에 남으므로 별도 아티팩트 저장은 하지 않는다.
-#
-# timeout-minutes: 15 — 실행 2회(2026-09-20 수동, 2026-10-01 스케줄)가 2.7~3.1분이었고, 신규 후보가 많으면
-# 초기적재로 길어질 수 있어 약 5배로 잡았다.
+# .github/workflows/monthly_universe_check.yml — 매월 1일 종목 유니버스 점검(가격예측.종목_월간갱신 --dry-run).
+# 결과(진입·이탈·보류 후보, 게이팅 통과 여부)는 실행 로그에만 남는다. 의존성은 requirements-ci.txt, 시크릿은 NEON_DB_URL만.
+# ⚠️ --apply는 넣지 않는다 — constants.py 반영은 사람이 로그를 보고 로컬에서 실행한다.
+# ⚠️ --dry-run도 후보 종목 주가를 Neon daily_stock_prices에 적재한다 — 그래서 job을 비활성(if: false)으로 두었다.
+# 배경: .github/결정기록.md
 
 name: 종목 유니버스 점검 (dry-run)
 
@@ -32,10 +17,10 @@ permissions:
 
 jobs:
   check:
-    # 2026-10-05 비활성화: --dry-run이 후보 종목 주가를 Neon에 적재하는 문제(CLAUDE.md 알려진 이슈) 수정 전까지
-    # 스케줄·수동 모두 비활성. 수정 후 제거.
+    # 예약·수동 실행 모두 비활성. --dry-run의 DB 적재를 고친 뒤 이 줄을 지운다.
     if: ${{ false }}
     runs-on: ubuntu-latest
+    # 실측 2.7~3.1분의 약 5배(신규 후보가 많으면 초기적재로 길어진다)
     timeout-minutes: 15
     steps:
       - name: 저장소 체크아웃
