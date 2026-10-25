@@ -960,8 +960,10 @@ kch_Final_prj/
 > 설정·입력 점검) · `dataset_builder.py` · `momentum_feature.py` · `split_dataset.py`(학습 frame·서빙 창) ·
 > `baselines.py`(GARCH·SMA20·Parkinson baseline, GARCH 캐시) · `결정기록.md`(운영 결정 16개) · `sequence_dataset.py` · `pooled_dataset.py` · `train_common.py`(TrainConfig·train_model) ·
 > `model.py`(PooledLSTMRegressor·MODEL_FAMILY) · `evaluate.py`(게이트) · `store.py`(체크포인트·registry·예측·MLflow·Sink) ·
-> `종목_월간갱신.py`. 위 상태 요약 0번 참고. (2026-10-18 기준 main에는 없고 미병합 브랜치에만 있는 것: `feature/weekly-tuning`의
-> `하이퍼파라미터_튜닝.py`·`주간_튜닝.py`·루트 `주간_튜닝.bat`·`주간_튜닝_작업등록.ps1`, `feature/dashboard-live`의 `대시보드/` 2·3단계 — 상태 요약 1·1-1번.)
+> `종목_월간갱신.py`. 위 상태 요약 0번 참고. 2026-10-25 main에는 그 뒤 `하이퍼파라미터_튜닝.py`·`주간_튜닝.py`·루트 `주간_튜닝.bat`·
+> `주간_튜닝_작업등록.ps1`(754f744), `대시보드/` 2·3단계(4c7155e), 전체 재학습(`train_common.train_fixed_epochs`·`가격예측_변동성_공통.
+> refit_on_all_data`, 61cabb2)이 더해졌다 — 상태 요약 1·1-1·1-2번. 폴더별 결정기록.md(주가데이터·시장지표·대시보드·루트·.github·Database)는
+> 미병합 `cleanup/comments-folders`에만 있다.
 
 > 2026-09-12: 위 트리의 `뉴스데이터/`, `감성분석/`, `라벨/`, `빅카인즈/`는 코드 의존성 검증 후
 > `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
@@ -1303,7 +1305,13 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   - ⚠️ 이 세션 셸처럼 콘솔 코드페이지가 65001인 창에서 bat을 실행하면 CP949로 저장된 한글 모듈명이 깨져 `No module named`로
     수집·예측이 시작도 못 한다(2026-10-17 재현, DB 쓰기 없음). 작업 스케줄러·일반 cmd 창은 시스템 OEM 949라 해당 없다.
     65001 창에서 시험할 때는 실행기에서만 `cmd /c "chcp 949 >nul && daily_pipeline.bat"`로 돌린다(bat 안에 chcp를 넣지 말 것).
-- ⚠️ **10/14 05:00 "Daily Pipeline" 실행 누락(2026-10-17 확인, 원인 미확정)** — 시스템 로그: 10/14 05:03:08 ACPI Wake Alarm
+- ⚠️ **05:00 정시 실행 미시작 — 10/14·21·23·24(2026-10-24 정리, 원인 미확정)** — 기상 타이머로 깨어난 시각이 05:03:09 이후인 날에
+  작업이 시작되지 않았고, 기상 후 무인 절전 120초(UNATTENDSLEEP)에 다시 절전(S3)했다. 10/21 대상 예측은 영구 결측(소급 예측 없음),
+  10/23 대상 예측은 12:32 실행이라 사후 계산이다(10/24는 09:46 실행). **조치(2026-10-24)**: AC 자동 절전 끔(`powercfg /change
+  standby-timeout-ac 0`, 10/25 확인: 현재 AC 설정 0), 작업 스케줄러 Operational 로그 켬(`wevtutil sl Microsoft-Windows-TaskScheduler/Operational
+  /e:true`, 10/25 확인: enabled true). **되돌리기**: `powercfg /change standby-timeout-ac <이전 분>`(이전 값은 이 문서에 기록돼 있지 않다 —
+  되돌리기 전에 확인), `wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:false`. 아래는 첫 사례(10/14) 기록이다.
+  - 10/14: 시스템 로그 05:03:08 ACPI Wake Alarm
   (작업 기상 타이머)으로 깨어났으나 05:05:14 "System Idle"로 2분 만에 다시 절전, 로그 파일 자체가 없다(bat 첫 echo 전).
   다른 날은 기상 직후 0초 내에 bat이 시작돼 끝날 때까지 깨어 있었다. 이후 07:01 전원 버튼 기상 → 07:26 사용자 전원 끄기
   (이 25분 동안 보충 실행 없음, 이유 미확인) → 17:51 부팅 → 17:58 보충 실행(pd 10/13, 우연히 KOSPI 10/13 적재 후라
@@ -1386,7 +1394,8 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   변형을 ***로 치환해 ECOS 경로 except 4곳에 적용. 키 재발급은 하지 않음(사람 결정). **확인하지 못한 곳**: GitHub Actions
   실행 로그(gh 미인증. Actions는 시크릿 원문을 자동 마스킹한다 — 인코딩 변형 마스킹 여부는 미확인), git unreachable
   객체, `C:\kch_backup\...\env.bak`(키 원본 보관 파일이라 열지 않음).
-- ⚠️ **model_registry에 새 version이 자동으로 등록되지 않는다(2026-10-11, 자동 등록 설계 대기)** — 2026-10-11에 체크포인트
+- ⚠️ **model_registry 자동 등록 — 2026-10-11 일괄 적재 뒤 자동 등록 적용(커밋 `eb8e10a`, 체크포인트 저장 직후 INSERT … ON CONFLICT DO NOTHING)** —
+  아래는 적용 전 상태 기록이다. 2026-10-11에 체크포인트
   meta 53개 + `20260914_132800`(inferred)로 54행을 일괄 적재했다(커밋 `851af65`, 마지막 version `20261011_035645`, 행 없는
   live 20개와 133952에 추정 note). 그 뒤 일일 실행이 만드는 version은 등록되지 않는다. 그래서 registry 조인으로 model_family를
   판정하는 쿼리는 새 행을 빠뜨린다 — LEFT JOIN 후 `r.model_version IS NULL`인 행을 따로 확인하고, 계열은 체크포인트
@@ -1452,8 +1461,13 @@ FK: `fk_market_indicators_meta` ON UPDATE CASCADE ON DELETE RESTRICT
   `is_early_warning`은 NULL로 정했다(2026-10-11 사람 결정, DDL·코드 미적용).
   자동 registry 등록(도입 시)은 source='live'로 고정이라, 백테스트 분리 때 source를 인자로 받게 함께 바꿔야 한다.
 
----
+- ⚠️ **전체 재학습·튜닝 도입 뒤 알려진 한계(2026-10-25)** — ① 채택된 튜닝값이 어느 날 게이트를 못 넘어도 기본값으로 자동 복귀하지 않는다
+  (gate_passed=false로 저장되고 trusted 뷰에서 빠질 뿐). ② 게이트(val ~2025-10)와 튜닝 폴드는 KOSPI 레벨 외삽 구간(최근 |z| 약 14)을 보지 못해
+  외삽에 약한 설정을 거르지 못한다(10/25 채택값이 그 사례, 상태 요약 1-1번). ③ 대시보드 패널 C의 재생 그룹(gate_model)과 운영 그룹(재학습
+  모델)은 서로 다른 모델을 잰다. ④ 재학습 모델 도입 뒤 예측 평균 수준이 약 +32% 이동한다(10/23 기준 2.23 → 3.05) — 10/26 전후 운영 예측을
+  한 구간으로 묶어 비교하지 말 것. ⑤ 서빙 모델 기준으로 test는 holdout이 아니고, 게이트는 서빙 모델이 아니라 레시피를 검증한다(1-2번).
 
+---
 ## 로드맵
 
 ### 주가/거시 트랙 (Task G) — ✅ 전체 완료
@@ -1679,8 +1693,9 @@ garch_sigma 0.35 / hl_range_ratio 0.33은 전체 기간판 수치로 보이며, 
 백필 스크립트(pre-cleanup 태그 시점의 `actual_volatility_백필.py`)가 정리 브랜치에서 삭제돼 종료한다. "prediction_date 다음 첫 실제 거래일"
 매칭은 `model_predictions_realized` 뷰가 이미 하고 있다(2026-10-11). `next_weekday()`(예측 시점의 target_date 근사)는 그대로다.
 
-### 하이퍼파라미터 튜닝 — 원칙(2026-10-11) → 주간 튜닝으로 구현(2026-10-18, 브랜치 `feature/weekly-tuning`, 미병합)
-구현·검증·리허설 결과와 미결 결정은 상태 요약 1-1번. 아래 10/11 원칙 중 "train 안 폴드로만 선택"·"폴드 사이 LOOKBACK 이상 퍼지"·
+### 하이퍼파라미터 튜닝 — 원칙(2026-10-11) → 주간 튜닝으로 구현·병합(754f744, 2026-10-24)
+⚠️ 아래 "train 안 폴드로만 선택(게이트 val 미사용)" 원칙은 2026-10-19 규칙(train+val 3폴드, `5a68347`)으로 대체됐다 — 사람 결정, 이유와 한계는
+상태 요약 1-1번과 `가격예측/결정기록.md` "주간 튜닝". 현재 상태·첫 실행 결과는 상태 요약 1-1번. 아래 10/11 원칙 중 "train 안 폴드로만 선택"·"폴드 사이 LOOKBACK 이상 퍼지"·
 "LOOKBACK은 튜닝 범위에서 뺀다"는 2차 규칙(`17d0e70`)에 반영됐다. 주기는 월간이 아니라 주 1회로 바뀌었고, 기록 키는
 `hyperparameter_ref` 대신 `tuned_params_id`(MLflow param·체크포인트 extra_meta, 채택값으로 돈 실행만)로 구현했다(model_registry에는 없음).
 - **튜닝 검증은 train 구간 안의 expanding-window 폴드로만 한다.** 게이트 val(현재 2024-10-21~2025-10-16, 실행마다
