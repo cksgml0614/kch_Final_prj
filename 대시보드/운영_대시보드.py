@@ -11,7 +11,6 @@
 import html
 import re
 import traceback
-from datetime import datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -167,7 +166,8 @@ def grid_cell(stage_no, stage, day, cell, basis=""):
     입력 타입->반환 타입: (int, str, date, tuple, str) -> str
     """
     status, text, tip = cell
-    head = f"{stage} · {데이터.fmt_day(day)} 실행" + (f" ({basis})" if basis else "")
+    head = (f"{stage} · {데이터.fmt_day(day)}분(실행 {데이터.fmt_day(상태.run_day(day))} 05:00)"
+            + (f" ({basis})" if basis else ""))
     if (status, text) == 상태.NO_RECORD:
         return (f'<td class="none" data-status="none" title="{esc(f"{head} · 기록 없음 — {tip}")}">'
                 '<span class="nodot"></span></td>')
@@ -182,18 +182,17 @@ def grid_cell(stage_no, stage, day, cell, basis=""):
             f'title="{esc(title)}"><span class="cell">{테마.icon(ico)}{label}</span></td>')
 
 
-def grid_header(day, today, current, basis="", holiday=None):
+def grid_header(day, current, basis="", holiday=None):
     """
-    설명: 열 머리(날짜와 요일 두 줄). 휴장 열은 흐리게, 오늘 열은 위 선 + 옅은 배경, 오늘보다 뒤인 진행 중 열은 점선 위 선.
-    주의 사항: 열 날짜 = 그 아침 05:00 실행 날짜. 12:00 이후에는 진행 중 사이클(오늘 저녁 수집 → 내일 05:00)이 내일 열이다.
-      휴장 열 = 수집 대상일(열 날짜 - 1일)이 휴장인 열(holiday = 근거 문구) — 일·월요일 열이고 토요일 열은 금요일분을 수집한다.
-    입력 타입->반환 타입: (date, date, date, str, str|None) -> str
+    설명: 열 머리(날짜와 요일 두 줄). 휴장 열은 흐리게, 현재 사이클 열은 위 선 + 옅은 배경.
+    주의 사항: 열 날짜 = 수집 대상일(거래일 후보). 그날 저녁 수집과 다음 날 05:00 실행이 한 열이다(경계 매일 12:00).
+      휴장 열 = 그 날짜가 휴장인 열(holiday = 근거 문구) — 토·일과 확인된 평일 공휴일.
+    입력 타입->반환 타입: (date, date, str, str|None) -> str
     """
-    flags = ["weekend" if holiday else "", "today" if day == today else "",
-             "now" if day == current and day != today else ""]
-    tip = (f"{데이터.fmt_day(day)} 05:00 실행 사이클(전날 12:00~당일 12:00)"
-           + (" · 진행 중(오늘 저녁 수집 → 내일 05:00 예측)" if "now" in flags else "")
-           + (f" · 수집 대상일 휴장({holiday}) — 새 거래일 없음" if holiday else "") + (f" · {basis}" if basis else ""))
+    flags = ["weekend" if holiday else "", "today" if day == current else ""]
+    tip = (f"{데이터.fmt_day(day)}분: 그날 저녁 수집 → {데이터.fmt_day(상태.run_day(day))} 05:00 실행"
+           + (" · 현재 사이클" if day == current else "")
+           + (f" · 휴장({holiday}) — 새 거래일 없음" if holiday else "") + (f" · {basis}" if basis else ""))
     return (f'<th class="{" ".join(f for f in flags if f)}" title="{esc(tip)}">{day.month}/{day.day}'
             f'<span class="wd">{데이터.WEEKDAYS[day.weekday()]}</span></th>')
 
@@ -217,14 +216,14 @@ def grid_legend():
     return '<div class="legend">' + "".join(items) + "</div>"
 
 
-CYCLE_TIP = ("열 날짜 = 그 아침 05:00 실행 날짜. 전날 12:00~당일 12:00 기록(전날 저녁 수집·수동 실행 포함)이 한 사이클이다. "
-             "12:00 이후에는 오늘 저녁 수집이 내일 아침 실행과 묶여 '현재 사이클'이 내일 날짜가 된다. "
+CYCLE_TIP = ("열 날짜 = 수집 대상일(거래일 후보). 그날 12:00~다음 날 12:00 기록(그날 저녁 수집·수동 실행과 다음 날 05:00 실행)이 "
+             "한 사이클이다. 12:00 전에는 어제 열이 현재 사이클이다. "
              "출처: GitHub Actions(최근 run 20개)·로컬 로그·MLflow·운영 DB.")
 GRID_TIP = ("칸에 마우스를 올리면 전문과 근거가 보인다. 기록 없음 = 출처에 그 날짜 기록이 없음, 조회 실패 = 출처를 읽지 못함. "
             "① 수집: GitHub Actions·로컬 수집 / ② 가격 정렬 점검 / ③⑥ MLflow run(없으면 로그) / ④ 게이트 / "
             "⑤ 그 버전 마지막 기준일의 예측 행 수(100 성공·90 이상 경고·미만 실패, 이후 재실행이 덮어썼으면 실행 기록의 저장 수) / "
             "⑦ 모델 등록·실측 / ⑧ 주간 튜닝(부모 run의 시작 시각, 아이콘 = 결과: 채택·유지·기본값으로 복귀·기본 유지). 시각은 그 단계가 끝난 시각(⑧은 시작 시각). "
-            "휴장 열(머리 흐림) = 수집 대상일(열 날짜 - 1일)이 토·일이거나, 평일 공휴일로 확인된 열(주가·KOSPI 행 없음 + 뒤 거래일 있음). "
+            "휴장 열(머리 흐림) = 그 날짜가 토·일이거나, 평일 공휴일로 확인된 열(주가·KOSPI 행 없음 + 뒤 거래일 있음). "
             "휴장 열에서 ①② 성공은 '휴장', 경고·실패는 '휴장' 경고 칸, ③~⑦은 실행이 없으면 '휴장', "
             "앞 실행이 이미 계산한 기준일을 다시 계산했으면 '재실행'(실패·경고 칸은 원래 판정 그대로).")
 
@@ -236,7 +235,6 @@ def render_panel_a():
     입력 타입->반환 타입: () -> None
     """
     current, next_run = 상태.today_cycle()
-    today = datetime.now(데이터.KST).date()
     days = 상태.days_back(current, GRID_DAYS)
     src = 상태.load_sources(상태.cycle_of(days[0]))
     failed = [k for k, v in src.items() if v is None]
@@ -247,7 +245,8 @@ def render_panel_a():
 
     grid = 상태.build_grid(days, src)
     with st.container(key="card_stepper"):
-        st.subheader(f"현재 사이클 — {데이터.fmt_day(current)} 05:00 실행분", anchor=False, help=CYCLE_TIP)
+        st.subheader(f"현재 사이클 — {데이터.fmt_day(current)}분 · {데이터.fmt_day(상태.run_day(current))} 05:00 실행",
+                     anchor=False, help=CYCLE_TIP)
         parts = []
         for i, stage in enumerate(상태.STAGES[:7]):
             status, text, tip = grid[stage][-1]
@@ -263,7 +262,7 @@ def render_panel_a():
         cols = '<colgroup><col class="stage">' + "<col>" * len(days) + "</colgroup>"
         bases = [basis_text(상태.day_basis(d, src)) for d in days]
         holidays = [상태.column_holiday(d, src) for d in days]
-        head = "".join(grid_header(d, today, current, b, h) for d, b, h in zip(days, bases, holidays))
+        head = "".join(grid_header(d, current, b, h) for d, b, h in zip(days, bases, holidays))
         rows = [f'<tr><th class="stage" scope="row">{stage}</th>'
                 f'{"".join(grid_cell(no, stage, d, c, b) for d, c, b in zip(days, grid[stage], bases))}</tr>'
                 for no, stage in enumerate(상태.STAGES, start=1)]
