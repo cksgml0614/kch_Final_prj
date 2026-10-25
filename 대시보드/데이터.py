@@ -1,7 +1,7 @@
-# 대시보드/데이터.py — 새 대시보드의 조회 함수(2026-10-18, 2단계: 실측 데이터 연결)
-# 규칙: DB는 db_manager로만 접속하고 연결마다 read_only로 연 뒤 rollback한다(쓰기 없음).
+# 대시보드/데이터.py — 운영 대시보드의 DB·파일 조회 함수(패널 B 최신 예측, 패널 C 운영 기록·백테스트 재생)와 RMSE 집계.
+# 규칙: DB는 db_manager로만 접속하고 연결마다 read_only로 연 뒤 rollback한다(쓰기 없음). NUMERIC은 SQL에서 float8로 읽는다.
 # 캐시는 st.cache_data(ttl=300)와 수동 새로고침만 쓴다(자동 새로고침 금지 — Neon 컴퓨트가 계속 깨어난다).
-# NUMERIC 컬럼은 SQL에서 float8로 바꿔 읽는다(Decimal 섞임 방지).
+# 배경: 결정기록.md의 "읽기 전용·수동 새로고침", "사전 예측 판정은 평가일 08:30"
 
 import json
 import os

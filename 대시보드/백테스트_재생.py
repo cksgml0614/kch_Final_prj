@@ -1,17 +1,8 @@
-# 대시보드/백테스트_재생.py — 현재 체크포인트로 최근 N거래일을 다시 예측해 로컬 파일에만 저장한다(2026-10-18, 수동 실행용).
+# 대시보드/백테스트_재생.py — 체크포인트 하나로 실측이 확정된 최근 N거래일을 운영 서빙 경로 그대로 다시 예측해 로컬 파일에만 저장하는 CLI(수동).
 # 실행(프로젝트 루트에서): python -m 대시보드.백테스트_재생 [--version 20261017_200618] [--days 15]
-# 출력: 대시보드/cache/backtest_replay.parquet, backtest_replay.meta.json (cache/.gitignore가 커밋을 막는다).
-# 규칙:
-# - DB에는 쓰지 않는다. model_predictions는 (ticker, target_date) UPSERT라 재생값을 쓰면 운영 행을 덮어쓴다.
-#   이 프로세스의 DB 연결은 모두 read_only로 열고(get_db_connection 교체), 끝에 rollback한다.
-# - 학습하지 않는다. 체크포인트(model.pt·scaler.npz·meta.json)와 운영 GARCH 캐시는 읽기만 한다(garch_read_only).
-# - 피처·baseline을 새로 구현하지 않는다. 서빙 창은 split_dataset.build_next_day_merged_window_volatility_hybrid,
-#   예측은 store.predict_and_save_for_ticker와 같은 순서(창 → float32 → scaler.transform → model), baseline 3종은
-#   baselines.compute_ticker_baselines의 next_day 값(운영이 저장하는 값과 같은 계산)을 쓴다.
-# - 실측은 model_predictions_realized 뷰의 SQL을 (ticker, prediction_date) 목록에 그대로 적용해 DB에서 계산한다.
-# - prediction_date마다 가격은 그날까지로 자른다. 지표 캐시는 published_date < 거래일 asof 조인이라 이후 공표분이
-#   붙지 않는다(누수 확인은 검증 스크립트가 날짜를 잘라 다시 불러 비교한다).
-# - 대상 날짜는 체크포인트 split_val_end보다 뒤(out-of-sample)인 날짜만 쓴다.
+# 출력: 대시보드/cache/backtest_replay.parquet·backtest_replay.meta.json(cache/.gitignore가 커밋을 막는다). 패널 C가 읽는다.
+# DB 쓰기·학습 없음, GARCH 캐시 읽기 전용. 서빙 창·예측 순서·baseline·실측 SQL은 운영 코드와 뷰를 그대로 쓴다(새로 구현하지 않음).
+# 배경: 결정기록.md의 "백테스트 재생은 DB에 쓰지 않는다", "재생은 운영 GARCH 캐시를 읽기만 한다"
 
 import argparse
 import json
