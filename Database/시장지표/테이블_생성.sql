@@ -1,7 +1,6 @@
--- indicator_meta + market_indicators 테이블 생성. 2026-08-23 기준 실제 운영 DB 스키마를
--- information_schema/pg_constraint/pg_indexes로 직접 조회해 작성 — Database/migrations/002가
--- 반영된 최종 상태다. FK 때문에 indicator_meta(부모)를 market_indicators(자식)보다 먼저 만든다
--- — 적재 순서 계약(indicator_meta upsert → market_indicators insert)과 동일한 순서.
+-- indicator_meta(부모) + market_indicators(자식) 테이블 생성 — 운영 DB의 지금 스키마.
+-- FK 때문에 indicator_meta를 먼저 만든다(적재 순서 계약 indicator_meta upsert → market_indicators insert와 같은 순서).
+-- 배경: Database/결정기록.md
 
 CREATE TABLE IF NOT EXISTS indicator_meta (
     indicator_code  VARCHAR(32) PRIMARY KEY,
