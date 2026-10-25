@@ -115,7 +115,7 @@ def latest_predictions():
 GROUP_PRE, GROUP_POST, GROUP_REPLAY = "운영(사전 예측)", "운영(사후 계산)", "백테스트 재생"
 PREDICTION_COLS = {"predicted_volatility": "하이브리드", "garch_baseline": "GARCH",
                    "sma20_baseline": "SMA20", "parkinson_sma20_baseline": "Parkinson"}
-MIN_ROWS_PER_DAY = 90  # 이보다 행이 적은 평가일은 일별 RMSE에서 뺀다("불완전")
+MIN_ROWS_PER_DAY = 90  # 이보다 행이 적은 평가일은 일별 값에서 뺀다("불완전")
 PRE_CUTOFF_HOUR, PRE_CUTOFF_MINUTE = 8, 30  # model_version(KST)이 평가일 08:30보다 이르면 사전 예측
 REPLAY_DIR = os.environ.get("BACKTEST_REPLAY_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache"))
 REPLAY_PARQUET = os.path.join(REPLAY_DIR, "backtest_replay.parquet")

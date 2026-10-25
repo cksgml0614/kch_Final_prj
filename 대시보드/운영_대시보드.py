@@ -368,15 +368,15 @@ with st.container(key="card_panel_b"):
 # ── 패널 C: 성능 ──
 def day_chips(g):
     """
-    설명: 운영 기록 평가일 하나(g = 그날 행들)의 상태 칩 HTML과 일별 RMSE 사용 여부를 돌려준다.
-    주의 사항: 행이 MIN_ROWS_PER_DAY 미만이면 "불완전"(일별 RMSE 제외), 버전이 둘 이상이면 "버전 혼재".
+    설명: 운영 기록 평가일 하나(g = 그날 행들)의 상태 칩 HTML과 일별 값 사용 여부를 돌려준다.
+    주의 사항: 행이 MIN_ROWS_PER_DAY 미만이면 "불완전"(일별 값 제외), 버전이 둘 이상이면 "버전 혼재".
     입력 타입->반환 타입: (pd.DataFrame) -> (str, bool)
     """
     chips, n = [], len(g)
     usable = n >= 데이터.MIN_ROWS_PER_DAY
     if not usable:
         chips.append(테마.status_chip("warning", f"불완전 {n}행",
-                                    f"{n}행({데이터.MIN_ROWS_PER_DAY} 미만) — 일별 RMSE에서 제외"))
+                                    f"{n}행({데이터.MIN_ROWS_PER_DAY} 미만) — 일별 값에서 제외"))
     nv = g["model_version"].nunique()
     if nv > 1:
         chips.append(테마.status_chip("warning", f"버전 혼재 {nv}개", ", ".join(sorted(g["model_version"].unique()))))
