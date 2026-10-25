@@ -12,6 +12,8 @@
 # - prediction_date마다 가격은 그날까지로 자른다. 지표 캐시는 published_date < 거래일 asof 조인이라 이후 공표분이
 #   붙지 않는다(누수 확인은 검증 스크립트가 날짜를 잘라 다시 불러 비교한다).
 # - 대상 날짜는 체크포인트 split_val_end보다 뒤(out-of-sample)인 날짜만 쓴다.
+# - 서빙 체크포인트가 전체 재학습 모델(meta serving_model=final_refit)이면 그 모델은 대상 날짜를 이미 학습했다. 그래서 같은 버전
+#   폴더의 gate_model/(train→val 게이트 모델)로 재생한다. gate_model/이 없으면 in-sample 재생을 하지 않고 멈춘다.
 
 import argparse
 import json
@@ -52,7 +54,7 @@ from 가격예측.baselines import GARCH_PARAM_CACHE_DIR, compute_ticker_baselin
 from 가격예측.model import PooledLSTMRegressor  # noqa: E402
 from 가격예측.sequence_dataset import FeatureScaler  # noqa: E402
 from 가격예측.split_dataset import build_next_day_merged_window_volatility_hybrid  # noqa: E402
-from 가격예측.store import next_weekday  # noqa: E402
+from 가격예측.store import GATE_MODEL_SUBDIR, SERVING_FINAL_REFIT, SERVING_GATE_MODEL, next_weekday  # noqa: E402
 from 가격예측.가격예측_변동성_공통 import CHECKPOINT_DIR, LOOKBACK, load_shared_cache  # noqa: E402
 from 시장지표.feature_loader import load_price_cache  # noqa: E402
 
@@ -85,8 +87,8 @@ LEFT JOIN LATERAL (
 
 def load_checkpoint(checkpoint_root, version, device):
     """
-    설명: 체크포인트 폴더에서 모델·scaler·meta를 읽어 평가 모드 모델과 함께 돌려준다.
-    주의 사항: 파일 읽기만. version이 None이면 latest.txt를 따른다.
+    설명: 체크포인트 폴더에서 재생에 쓸 모델·scaler·meta를 읽어 평가 모드 모델과 함께 돌려준다(replay_model: 실제로 읽은 모델).
+    주의 사항: 파일 읽기만. version이 None이면 latest.txt를 따른다. 전체 재학습 서빙 모델이면 gate_model/을 읽고, 없으면 FileNotFoundError.
     입력 타입->반환 타입: (str, str|None, torch.device) -> dict
     """
     if version is None:
@@ -95,11 +97,20 @@ def load_checkpoint(checkpoint_root, version, device):
     vdir = os.path.join(checkpoint_root, version)
     with open(os.path.join(vdir, "meta.json"), encoding="utf-8") as f:
         meta = json.load(f)
+    replay_model = meta.get("serving_model", SERVING_GATE_MODEL)
+    if replay_model == SERVING_FINAL_REFIT:
+        vdir = os.path.join(vdir, meta.get("gate_model_dir", GATE_MODEL_SUBDIR))
+        if not os.path.isfile(os.path.join(vdir, "meta.json")):
+            raise FileNotFoundError(f"{version}: 전체 재학습 모델인데 게이트 모델({vdir})이 없다 — in-sample 재생을 하지 않는다")
+        with open(os.path.join(vdir, "meta.json"), encoding="utf-8") as f:
+            meta = json.load(f)
+        replay_model = SERVING_GATE_MODEL
+        print(f"서빙 모델은 전체 재학습 모델이라 게이트 모델({vdir})로 재생한다")
     model = PooledLSTMRegressor(n_features=len(meta["feature_cols"]), **meta["model_kwargs"]).to(device)
     model.load_state_dict(torch.load(os.path.join(vdir, "model.pt"), map_location=device, weights_only=True))
     model.eval()
     scaler = FeatureScaler.load(os.path.join(vdir, "scaler.npz"))
-    return {"version": version, "meta": meta, "model": model, "scaler": scaler}
+    return {"version": version, "meta": meta, "model": model, "scaler": scaler, "replay_model": replay_model}
 
 
 def slice_prices(prices, start_date, end_date):
@@ -265,6 +276,7 @@ def main():
     out_meta = {
         "generated_at_kst": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
         "checkpoint_version": ckpt["version"],
+        "replay_model": ckpt["replay_model"],
         "split_train_end": meta["split_train_end"], "split_val_end": meta["split_val_end"],
         "prediction_dates": pdates,
         "eval_period": [str(confirmed["realized_date"].min()), str(confirmed["realized_date"].max())] if len(confirmed) else None,

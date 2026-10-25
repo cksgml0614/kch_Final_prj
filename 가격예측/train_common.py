@@ -1,6 +1,7 @@
-# train_common.py — 운영 pooled LSTM 변동성 모델의 학습 설정(TrainConfig)과 학습 루프(train_model).
-# 파이프라인 단계: 학습. 주요 진입 함수: train_model.
+# train_common.py — 운영 pooled LSTM 변동성 모델의 학습 설정(TrainConfig)과 학습 루프(train_model, train_fixed_epochs).
+# 파이프라인 단계: 학습. 주요 진입 함수: train_model(게이트용, val early stopping), train_fixed_epochs(전체 재학습용).
 # 흐름: 스모크 테스트(loss 유한성 확인) -> 본 학습(Adam+MSE, early stopping) -> best_state 복원.
+# 배경: 결정기록.md의 "게이트는 train→val 모델로 판정하고 서빙은 전체 재학습 모델로 한다"
 
 import random
 from dataclasses import dataclass
@@ -156,3 +157,33 @@ def train_model(X_train, y_train, tid_train, X_val, y_val, tid_val, num_stocks, 
         "val_loader": val_loader,
         "overfit_ratio_at_end": last_val_loss / last_train_loss if last_train_loss > 0 else float("inf"),
     }
+
+
+def train_fixed_epochs(X, y, tid, num_stocks, lookback, config, device, n_epochs, verbose=True, label=""):
+    """
+    설명: 검증 구간 없이 PooledLSTMRegressor를 정확히 n_epochs epoch 학습하고 마지막 가중치를 돌려준다(전체 재학습용).
+    주의 사항: 시드·모델 생성·DataLoader·optimizer는 train_model과 같은 순서다. epoch 손실이 NaN/Inf면 RuntimeError.
+    입력 타입->반환 타입: (np.ndarray x3, int, int, TrainConfig, torch.device, int, bool, str) -> dict
+    """
+    if n_epochs < 1:
+        raise ValueError(f"{label}: n_epochs는 1 이상이어야 한다({n_epochs})")
+    set_seed(config.seed)
+    model = PooledLSTMRegressor(X.shape[2], lookback, num_stocks, config.embedding_dim,
+                                hidden_size=config.hidden_size, num_layers=config.num_layers,
+                                dropout=config.dropout).to(device)
+    loader = make_pooled_loader(X, y, tid, config.batch_size, shuffle=True)
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+
+    prefix = f"[{label}] " if label else ""
+    if verbose:
+        print(f"{prefix}전체 재학습 ({n_epochs} epoch 고정, {len(X)}행)")
+    history = []
+    for epoch in range(1, n_epochs + 1):
+        train_loss = run_pooled_epoch(model, loader, criterion, optimizer, device, True)
+        history.append((epoch, train_loss))
+        if verbose:
+            print(f"{prefix}  epoch {epoch}: train_loss={train_loss:.6f}")
+        if not np.isfinite(train_loss):
+            raise RuntimeError(f"{label}: 전체 재학습 epoch {epoch}의 loss가 NaN/Inf")
+    return {"model": model, "history": history, "epochs": n_epochs}

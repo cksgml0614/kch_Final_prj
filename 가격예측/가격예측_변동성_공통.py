@@ -1,14 +1,18 @@
 # 가격예측_변동성_공통.py — 하이브리드(GARCH σ 피처 + pooled LSTM) 변동성 예측 일일 파이프라인의 오케스트레이터와 설정.
-# 파이프라인 단계: 입력 점검(가격 정렬·지수 신선도) -> 피처·baseline -> 시퀀스 -> [튜닝 값 읽기] -> 학습 -> 평가 -> 저장+예측 -> 실행 기록.
+# 파이프라인 단계: 입력 점검(가격 정렬·지수 신선도) -> 피처·baseline -> 시퀀스 -> [튜닝 값 읽기] -> 학습 -> 평가
+#   -> [전체 재학습] -> 저장+예측 -> 실행 기록.
 # 주요 진입 함수: run_pooled_volatility_pipeline(가격예측_변동성_일일수집.py가 호출).
 # 배경: 결정기록.md의 "매일 전체 재학습, 학습 실패는 전체 실패·예측만 종목별 격리", "예측은 게이트와 무관하게 저장한다",
-#       "가격 정렬 점검", "시장지수 신선도 점검과 input_data_suspect"
+#       "가격 정렬 점검", "시장지수 신선도 점검과 input_data_suspect", "게이트는 train→val 모델로 판정하고 서빙은 전체 재학습 모델로 한다"
 
 import os
 import time
+import traceback
 
 import numpy as np
 import torch
+
+from config import redact
 
 from constants import MIN_TRAIN_SEQUENCES
 from db_manager import get_db_connection
@@ -24,7 +28,7 @@ from 가격예측.split_dataset import (
     valid_feature_dates,
 )
 from 가격예측.model import MODEL_CLASS_NAME
-from 가격예측.train_common import TrainConfig, train_model
+from 가격예측.train_common import TrainConfig, train_fixed_epochs, train_model
 from 시장지표.feature_loader import load_indicator_cache, load_price_cache
 
 LOOKBACK = 20
@@ -36,6 +40,9 @@ _HERE = os.path.dirname(__file__)
 CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints", "pooled_volatility_hybrid")
 # 운영 경로 기본값. run_pooled_volatility_pipeline의 checkpoint_dir·garch_cache_dir·log_dir 인자로 바꿀 수 있다.
 LOG_DIR = os.path.join(_HERE, "logs")
+
+# 전체 재학습 스위치. 기본 켜짐, 환경변수 FINAL_REFIT=0이면 게이트 모델로 서빙한다(이 단계 추가 전과 같은 동작·기록).
+FINAL_REFIT_ENV = "FINAL_REFIT"
 
 
 def _model_kwargs(num_stocks, config):
@@ -179,6 +186,40 @@ def train_and_gate(data, num_stocks, train_config):
     }
 
 
+# ── 전체 재학습(서빙 모델) ────────────────────────────────────────────────────────
+
+def final_refit_enabled(flag=None):
+    """
+    설명: 전체 재학습을 할지 정한다. flag를 주면 그 값, 없으면 환경변수 FINAL_REFIT("0"이면 끔, 그 밖은 켬).
+    주의 사항: 끄면 게이트 모델이 서빙되고 체크포인트 meta·MLflow 기록이 이 단계 추가 전과 같다.
+    입력 타입->반환 타입: (bool|None) -> bool
+    """
+    if flag is not None:
+        return bool(flag)
+    return os.environ.get(FINAL_REFIT_ENV, "1") != "0"
+
+
+def refit_on_all_data(data, num_stocks, train_config, n_epochs, device):
+    """
+    설명: prepare_pooled_training_data의 train+val+test 시퀀스 전부로 scaler를 다시 맞추고 n_epochs epoch 재학습한 결과를 돌려준다.
+    주의 사항: 검증 구간이 없어 early stopping 대신 게이트 모델의 best epoch 수를 받는다. 이 모델은 test를 학습하므로 test 구간 평가는 in-sample이다.
+    입력 타입->반환 타입: (dict, int, TrainConfig, int, torch.device) -> dict
+    """
+    t0 = time.time()
+    parts = [data["splits"][s] for s in ("train", "val", "test")]
+    X_all = np.concatenate([p[0] for p in parts], axis=0)
+    y_all = np.concatenate([p[1] for p in parts], axis=0)
+    tid_all = np.concatenate([p[2] for p in parts], axis=0)
+    last_target_date = max(np.asarray(p[3]).astype("datetime64[D]").max() for p in parts)
+    scaler = FeatureScaler().fit(X_all)
+    X_all_s = scaler.transform(X_all).astype(np.float32)
+    result = train_fixed_epochs(X_all_s, y_all, tid_all, num_stocks, LOOKBACK, train_config, device, n_epochs,
+                                label="pooled-volatility-refit")
+    return {"model": result["model"], "scaler": scaler, "history": result["history"], "epochs": result["epochs"],
+            "n_rows": int(len(X_all)), "n_by_split": {s: int(len(p[0])) for s, p in zip(("train", "val", "test"), parts)},
+            "last_target_date": str(last_target_date), "elapsed_sec": round(time.time() - t0, 1)}
+
+
 # ── 입력 점검: 주가지수 신선도(경고만, 파이프라인은 멈추지 않음) ───────────────────────────
 INDEX_FRESHNESS_CODES = ("KOSPI", "KOSDAQ")
 
@@ -298,11 +339,12 @@ def check_price_dates_aligned(tickers, end_date, retries=PRICE_ALIGNMENT_RETRIES
 
 def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=None, sinks=None,
                                    checkpoint_dir=None, garch_cache_dir=None, garch_read_only=False, log_dir=None,
-                                   version=None, tuning_path=None):
+                                   version=None, tuning_path=None, final_refit=None):
     """
-    설명: 입력 점검 → baseline·학습·게이트 → 체크포인트 → 종목별 예측·저장 → 실행 기록을 차례로 하고 {version, gate, predictions}를 돌려준다.
-    주의 사항: 기본 sinks는 운영 DB·MLflow에 쓴다. train_config를 안 주면 채택된 튜닝 값(tuning_path, 기본 checkpoints/tuning)을, 없으면 기본값을 쓴다.
-    입력 타입->반환 타입: (list[str], str, str, TrainConfig|None, list|None, str|None, str|None, bool, str|None, str|None, str|None) -> dict
+    설명: 입력 점검 → baseline·학습·게이트 → 전체 재학습 → 체크포인트 → 종목별 예측·저장 → 실행 기록을 하고 {version, gate, predictions, serving_model}을 돌려준다.
+    주의 사항: 기본 sinks는 운영 DB·MLflow에 쓴다. train_config를 안 주면 채택된 튜닝 값(tuning_path, 기본 checkpoints/tuning)을, 없으면 기본값을 두 단계 모두에 쓴다.
+    final_refit(None이면 환경변수 FINAL_REFIT)이 켜지면 서빙은 재학습 모델, gate_passed는 게이트 모델 결과다. 재학습이 실패하면 [REFIT-FAIL] 후 게이트 모델로 서빙한다.
+    입력 타입->반환 타입: (list[str], str, str, TrainConfig|None, list|None, str|None, str|None, bool, str|None, str|None, str|None, bool|None) -> dict
     """
     if sinks is None:
         sinks = [store.DbSink(), store.MlflowSink()]
@@ -319,12 +361,15 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=N
     tuned_params_id = None
     if train_config is None:
         train_config, tuned_params_id = tuning.resolve_train_config(DEFAULT_TRAIN_CONFIG, tuning_path)
-    train_out = train_daily_pooled_model(tickers, start_date, end_date, train_config=train_config, shared_cache=shared_cache,
-                                         prices_by_ticker=prices_by_ticker, garch_cache_dir=garch_cache_dir,
-                                         garch_read_only=garch_read_only)
-    model, scaler, feature_cols = train_out["model"], train_out["scaler"], train_out["feature_cols"]
-    ticker_to_id, device, gate = train_out["ticker_to_id"], train_out["device"], train_out["gate"]
+    data = prepare_pooled_training_data(tickers, start_date, end_date, shared_cache=shared_cache,
+                                        prices_by_ticker=prices_by_ticker, garch_cache_dir=garch_cache_dir,
+                                        garch_read_only=garch_read_only)
+    train_out = train_and_gate(data, len(tickers), train_config)
+    feature_cols, ticker_to_id = train_out["feature_cols"], train_out["ticker_to_id"]
+    device, gate = train_out["device"], train_out["gate"]
     baselines_by_ticker = train_out["baselines_by_ticker"]
+    # 서빙 모델: 기본은 게이트 모델. 전체 재학습이 성공하면 재학습 모델로 바꾼다(gate_passed는 그대로 게이트 모델 결과).
+    model, scaler = train_out["model"], train_out["scaler"]
 
     model_kwargs = _model_kwargs(len(tickers), train_out["train_config"])
     extra_meta = {
@@ -338,6 +383,46 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=N
     }
     if tuned_params_id is not None:
         extra_meta["tuned_params_id"] = tuned_params_id
+
+    refit_summary = None
+    gate_ckpt = None
+    if final_refit_enabled(final_refit):
+        try:
+            refit = refit_on_all_data(data, len(tickers), train_out["train_config"], train_out["best_epoch"], device)
+        except Exception as e:
+            # 재학습은 서빙 모델을 바꾸는 부가 단계라, 실패하면 이미 게이트를 판정한 모델로 서빙한다(기록은 meta·MLflow에 남김).
+            print(traceback.format_exc())
+            error = redact(f"{type(e).__name__}: {e}")
+            print(f"[REFIT-FAIL] ⚠️ 전체 재학습 실패 — 게이트 모델(train→val)로 서빙한다: {error}")
+            refit_summary = {"serving_model": store.SERVING_GATE_MODEL, "error": error}
+            extra_meta["serving_model"] = store.SERVING_GATE_MODEL
+            extra_meta["final_refit"] = {"error": error}
+        else:
+            refit_summary = {"serving_model": store.SERVING_FINAL_REFIT, **{k: v for k, v in refit.items()
+                                                                           if k not in ("model", "scaler")}}
+            gate_ckpt = {"model": model, "scaler": scaler,
+                         "extra_meta": {**extra_meta, "serving_model": store.SERVING_GATE_MODEL,
+                                        "role": "gate_model"}}
+            model, scaler = refit["model"], refit["scaler"]
+            extra_meta["serving_model"] = store.SERVING_FINAL_REFIT
+            extra_meta["gate_model_dir"] = store.GATE_MODEL_SUBDIR
+            extra_meta["final_refit"] = {"epochs": refit["epochs"], "n_rows": refit["n_rows"],
+                                         "n_by_split": refit["n_by_split"],
+                                         "last_target_date": refit["last_target_date"],
+                                         "scaler_fit": "train+val+test", "elapsed_sec": refit["elapsed_sec"]}
+            print(f"[REFIT] 전체 재학습 완료 — {refit['n_rows']}행(train {refit['n_by_split']['train']} + "
+                  f"val {refit['n_by_split']['val']} + test {refit['n_by_split']['test']}, 마지막 target "
+                  f"{refit['last_target_date']}), {refit['epochs']} epoch, {refit['elapsed_sec']}초 — 서빙 모델 = 재학습 모델")
+
+    if gate_ckpt is not None:
+        # 게이트 모델은 서빙 버전 폴더 안 gate_model/에 보관한다(백테스트 재생이 out-of-sample 날짜를 이 모델로 다시 예측).
+        version = version or store.new_version()
+        gate_ckpt["extra_meta"]["serving_version"] = version
+        store.save_checkpoint(
+            gate_ckpt["model"], gate_ckpt["scaler"], feature_cols, model_kwargs, os.path.join(checkpoint_dir, version),
+            version=store.GATE_MODEL_SUBDIR, model_class_name=MODEL_CLASS_NAME, extra_meta=gate_ckpt["extra_meta"],
+            update_latest=False,
+        )
     version = store.save_checkpoint(
         model, scaler, feature_cols, model_kwargs, checkpoint_dir, version=version,
         model_class_name=MODEL_CLASS_NAME, extra_meta=extra_meta,
@@ -345,6 +430,8 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=N
     ckpt = {"version": version, "checkpoint_dir": checkpoint_dir, "model": model, "scaler": scaler,
             "feature_cols": feature_cols, "model_kwargs": model_kwargs, "model_class": MODEL_CLASS_NAME,
             "extra_meta": extra_meta}
+    if gate_ckpt is not None:
+        ckpt["gate_model"] = gate_ckpt
     for sink in sinks:
         sink.on_checkpoint(ckpt)
 
@@ -388,7 +475,9 @@ def run_pooled_volatility_pipeline(tickers, start_date, end_date, train_config=N
         print(f"⚠️ {n_failed}개 종목 예측 실패 — 가격예측/logs/ 에서 상세 로그를 확인하세요.")
 
     payload = store.build_run_payload(tickers, version, train_out, gate, results, model_kwargs,
-                                      input_data_suspect=input_data_suspect, tuned_params_id=tuned_params_id)
+                                      input_data_suspect=input_data_suspect, tuned_params_id=tuned_params_id,
+                                      refit=refit_summary)
     for sink in sinks:
         sink.log_run(payload)
-    return {"version": version, "gate": gate, "predictions": results}
+    serving_model = refit_summary["serving_model"] if refit_summary else store.SERVING_GATE_MODEL
+    return {"version": version, "gate": gate, "predictions": results, "serving_model": serving_model}
