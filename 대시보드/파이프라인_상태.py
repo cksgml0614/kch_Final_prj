@@ -6,6 +6,10 @@
 # 열 날짜(2026-10-25 사람 결정): 사이클 날짜 = 그 사이클의 수집 대상일(거래일 후보)이다(예: 10/23(금) 저녁 수집, 10/24(토) 05:00
 #   예측 → 10/23 열). 그래서 토·일 열이 휴장 열이다. 10/18~10/25에는 열 이름을 아침 05:00 실행 날짜(사이클 날짜 + 1일)로 썼는데,
 #   일·월요일 열이 휴장으로 보여 헷갈려 되돌렸다. 실행 날짜는 열 머리·칸 툴팁에 적는다.
+# 늦은 보충 실행(2026-10-25): 실행(MLflow run·로그·모델 버전)은 시각으로 사이클을 정하되, 실제로 처리한 예측 기준일이 그 사이클에서
+#   기대되는 거래일(사이클 날짜 이하 최신 주가일)보다 이르면 그 기준일 열로 옮긴다(run_column). 예: 10/14 18:04 실행은 10/13분을
+#   처리했으므로 10/13 열. 주말 재실행은 기준일 = 기대 거래일(금)이라 토·일 열에 남는다. ① 수집은 시각 그대로다.
+# 예정 열(2026-10-25): 격자 마지막 열은 현재 사이클 다음 날이다. 기록 없는 칸은 waiting "예정"(휴장이면 휴장).
 # 기록이 없는 칸은 새 상태를 만들지 않고 waiting + "기록 없음", 출처 조회가 실패한 칸은 skipped + "조회 실패".
 # 휴장 열(2026-10-25 개정, 처음 규칙은 2026-10-18): 열 날짜(수집 대상일)가 휴장이면 그 열 전체를 휴장으로 본다.
 #   휴장 = 토·일(요일로 바로) 또는 평일 공휴일(데이터로 증명: 주가·KOSPI 행 없음 + 뒤 거래일 주가 있음, holiday_reason).
@@ -230,10 +234,61 @@ def load_sources(since):
 
 # ── 격자 복원 ──────────────────────────────────────────────────────────────────────
 
-def _version_day(v):
-    """모델 버전(UTC 저장 시각)의 사이클 날짜. 형식이 다르면 None."""
+def _as_date(x):
+    """기준일 값(date·문자열·Timestamp, 섞인 태그 '2026-10-08,2026-10-12'는 가장 늦은 날)을 date로. 없으면 None."""
+    if x is None or (not isinstance(x, str) and pd.isna(x)) or x == "":
+        return None
+    if isinstance(x, str):
+        return max(pd.Timestamp(p.strip()).date() for p in x.split(",") if p.strip())
+    return pd.Timestamp(x).date()
+
+
+def _version_pd(v, src):
+    """모델 버전의 예측 기준일(DB 예측 행 → 같은 버전 MLflow 태그). 모르면 None."""
+    if not v:
+        return None
+    db = src["db"]
+    if db is not None and v in db["preds"]:
+        return _as_date(db["preds"][v]["prediction_date"])
+    if src["mlflow"] is not None and len(src["mlflow"][0]):
+        runs = src["mlflow"][0]
+        r = runs[runs["version"] == v]
+        if len(r):
+            return _as_date(r.iloc[-1]["prediction_date"])
+    return None
+
+
+def run_column(t, pdate, db):
+    """
+    설명: 실행 시각 t와 처리한 예측 기준일 pdate로 그 실행의 열(사이클 날짜)을 정한다.
+    주의 사항: 기본은 시각 - 12시간의 날짜. 기준일이 그 사이클의 기대 거래일(사이클 날짜 이하 최신 주가일)보다 이르면 늦은 보충
+      실행이므로 기준일 열로 옮긴다. 기준일이나 주가 날짜를 모르면 시각 그대로.
+    입력 타입->반환 타입: (datetime, date|None, dict|None) -> date
+    """
+    c = cycle_day(t)
+    if pdate is None or db is None:
+        return c
+    past = [x for x in db["stock_dates"] if x <= c]
+    return pdate if past and pdate < max(past) else c
+
+
+def _version_day(v, src):
+    """모델 버전(UTC 저장 시각)의 열 — 늦은 보충 실행이면 기준일 열(run_column). 형식이 다르면 None."""
     t = 데이터.version_kst(v)
-    return cycle_day(t) if t else None
+    return run_column(t, _version_pd(v, src), src["db"]) if t else None
+
+
+def _log_day(r, src):
+    """로그 파일의 열 — [PRICE-ALIGN] 공통 최신일(없으면 학습 버전의 기준일)로 run_column."""
+    m = re.search(r"공통 최신일 (\d{4}-\d{2}-\d{2})", r["price_align"] or "")
+    pdate = _as_date(m.group(1)) if m else _version_pd(r["train_version"], src)
+    return run_column(r["start"], pdate, src["db"])
+
+
+def _mlflow_day(row, src):
+    """MLflow 운영 run의 열 — 태그 prediction_date(없으면 버전의 기준일)로 run_column."""
+    pdate = _as_date(row["prediction_date"]) or _version_pd(row["version"], src)
+    return run_column(row["start"], pdate, src["db"])
 
 
 def non_trading_evidence(x, db):
@@ -337,7 +392,7 @@ def _align_base(d, src):
     """② 데이터 반영: 그 사이클 마지막 로그의 [PRICE-ALIGN] 줄."""
     if src["logs"] is None:
         return (*LOOKUP_FAILED, "로그 조회 실패")
-    recs = [r for r in src["logs"] if cycle_day(r["start"]) == d and r["price_align"]]
+    recs = [r for r in src["logs"] if r["price_align"] and _log_day(r, src) == d]
     if not recs:
         return (*NO_RECORD, "[PRICE-ALIGN] 줄 없음(2026-10-17 이전 로그에는 없다)")
     line = recs[-1]["price_align"]
@@ -355,9 +410,10 @@ def _day_run(d, src):
     if src["mlflow"] is not None:
         runs = src["mlflow"][0]
         if len(runs):
-            r = runs[(runs["experiment"] != EXP_TUNING) & (runs["start"].map(cycle_day) == d)].sort_values("start")
+            r = runs[runs["experiment"] != EXP_TUNING]
+            r = r[[_mlflow_day(x, src) == d for _, x in r.iterrows()]].sort_values("start")
             run = r.iloc[-1] if len(r) else None
-    logs = [r for r in (src["logs"] or []) if cycle_day(r["start"]) == d]
+    logs = [r for r in (src["logs"] or []) if _log_day(r, src) == d]
     return run, (logs[-1] if logs else None)
 
 
@@ -369,7 +425,7 @@ def _day_version(d, src, run, log):
     if log and log["train_version"]:
         cands.append(log["train_version"])
     if src["db"] is not None:
-        cands += [v for v in list(src["db"]["preds"]) + list(src["db"]["registry"]) if _version_day(v) == d]
+        cands += [v for v in list(src["db"]["preds"]) + list(src["db"]["registry"]) if _version_day(v, src) == d]
     return max(cands) if cands else None
 
 
@@ -563,11 +619,12 @@ def _holiday_run_cells(d, src, run, log, v, cells):
             else (status, text, f"{note} · {tip}") for status, text, tip in cells]
 
 
-def build_grid(days, src):
+def build_grid(days, src, upcoming=None):
     """
     설명: 열 날짜(수집 대상일) 목록 × 8단계의 (상태, 글자, 설명) 격자를 {단계: [칸...]}으로 만든다.
     주의 사항: 기록 없는 칸은 waiting "기록 없음", 출처 조회 실패 칸은 skipped "조회 실패". 칸 판정은 열의 사이클 날짜로 한다.
-    입력 타입->반환 타입: (list[date], dict) -> dict
+      upcoming(아직 시작 전인 다음 날 열)의 ①~⑦ 기록 없는 칸은 waiting "예정"이다(⑧ 주간 튜닝은 그대로).
+    입력 타입->반환 타입: (list[date], dict, date|None) -> dict
     """
     grid = {s: [] for s in STAGES}
     for d in map(cycle_of, days):
@@ -576,6 +633,9 @@ def build_grid(days, src):
         cells = [_cell_collect(d, src), _cell_align(d, src), _cell_train(run, log, src), _cell_gate(v, run, log, src),
                  _cell_save(v, run, log, src), _cell_mlflow(run, log, src), _cell_registry(v, src), _cell_tuning(d, src)]
         cells[2:7] = _holiday_run_cells(d, src, run, log, v, cells[2:7])
+        if d == upcoming:
+            plan = f"아직 시작 전 — {데이터.fmt_day(d)} 저녁 수집 → {데이터.fmt_day(run_day(d))} 05:00 실행 예정"
+            cells[:7] = [("waiting", "예정", plan) if (c[0], c[1]) == NO_RECORD else c for c in cells[:7]]  # ⑧ 튜닝은 주 1회
         for s, c in zip(STAGES, cells):
             grid[s].append(c)
     return grid

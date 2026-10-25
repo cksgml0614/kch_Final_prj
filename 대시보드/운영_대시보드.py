@@ -11,6 +11,7 @@
 import html
 import re
 import traceback
+from datetime import timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -138,7 +139,7 @@ def grid_short(stage_no, status, text):
             return str(rec), True, f"이후 재실행으로 덮어씀, 저장 {rec} / DB 남은 {rec - over}"
         if (m := re.match(r"^(\d+)행$", text)):
             return (m.group(1) if status == "success" else text), False, ""
-    if text.startswith("휴장") or text == "재실행":
+    if text.startswith("휴장") or text in ("재실행", "예정"):
         return text.split("·")[0], False, ""
     if stage_no == 7 and text in SHORT_WORDS:
         return SHORT_WORDS[text], False, ""
@@ -184,14 +185,14 @@ def grid_cell(stage_no, stage, day, cell, basis=""):
 
 def grid_header(day, current, basis="", holiday=None):
     """
-    설명: 열 머리(날짜와 요일 두 줄). 휴장 열은 흐리게, 현재 사이클 열은 위 선 + 옅은 배경.
+    설명: 열 머리(날짜와 요일 두 줄). 휴장 열은 흐리게, 현재 사이클 열은 위 선 + 옅은 배경, 다음 날(예정) 열은 점선 위 선.
     주의 사항: 열 날짜 = 수집 대상일(거래일 후보). 그날 저녁 수집과 다음 날 05:00 실행이 한 열이다(경계 매일 12:00).
       휴장 열 = 그 날짜가 휴장인 열(holiday = 근거 문구) — 토·일과 확인된 평일 공휴일.
     입력 타입->반환 타입: (date, date, str, str|None) -> str
     """
-    flags = ["weekend" if holiday else "", "today" if day == current else ""]
+    flags = ["weekend" if holiday else "", "today" if day == current else "", "now" if day > current else ""]
     tip = (f"{데이터.fmt_day(day)}분: 그날 저녁 수집 → {데이터.fmt_day(상태.run_day(day))} 05:00 실행"
-           + (" · 현재 사이클" if day == current else "")
+           + (" · 현재 사이클" if day == current else " · 예정(아직 시작 전)" if day > current else "")
            + (f" · 휴장({holiday}) — 새 거래일 없음" if holiday else "") + (f" · {basis}" if basis else ""))
     return (f'<th class="{" ".join(f for f in flags if f)}" title="{esc(tip)}">{day.month}/{day.day}'
             f'<span class="wd">{데이터.WEEKDAYS[day.weekday()]}</span></th>')
@@ -217,7 +218,8 @@ def grid_legend():
 
 
 CYCLE_TIP = ("열 날짜 = 수집 대상일(거래일 후보). 그날 12:00~다음 날 12:00 기록(그날 저녁 수집·수동 실행과 다음 날 05:00 실행)이 "
-             "한 사이클이다. 12:00 전에는 어제 열이 현재 사이클이다. "
+             "한 사이클이다. 12:00 전에는 어제 열이 현재 사이클이다. 정시를 놓친 보충 실행은 실제로 처리한 기준일의 열에 붙는다. "
+             "마지막 열은 다음 날(예정)이다. "
              "출처: GitHub Actions(최근 run 20개)·로컬 로그·MLflow·운영 DB.")
 GRID_TIP = ("칸에 마우스를 올리면 전문과 근거가 보인다. 기록 없음 = 출처에 그 날짜 기록이 없음, 조회 실패 = 출처를 읽지 못함. "
             "① 수집: GitHub Actions·로컬 수집 / ② 가격 정렬 점검 / ③⑥ MLflow run(없으면 로그) / ④ 게이트 / "
@@ -235,7 +237,8 @@ def render_panel_a():
     입력 타입->반환 타입: () -> None
     """
     current, next_run = 상태.today_cycle()
-    days = 상태.days_back(current, GRID_DAYS)
+    upcoming = current + timedelta(days=1)
+    days = 상태.days_back(upcoming, GRID_DAYS)  # 마지막 열 = 다음 날(예정)
     src = 상태.load_sources(상태.cycle_of(days[0]))
     failed = [k for k, v in src.items() if v is None]
 
@@ -243,13 +246,14 @@ def render_panel_a():
         with col, st.container(key=f"card_kpi_{i}"):
             st.html(card)
 
-    grid = 상태.build_grid(days, src)
+    grid = 상태.build_grid(days, src, upcoming)
+    cur = days.index(current)
     with st.container(key="card_stepper"):
         st.subheader(f"현재 사이클 — {데이터.fmt_day(current)}분 · {데이터.fmt_day(상태.run_day(current))} 05:00 실행",
                      anchor=False, help=CYCLE_TIP)
         parts = []
         for i, stage in enumerate(상태.STAGES[:7]):
-            status, text, tip = grid[stage][-1]
+            status, text, tip = grid[stage][cur]
             arrow = '<span class="arrow">→</span>' if i else ""
             parts.append(f"<span>{arrow}{stage[2:]} {테마.status_chip(status, text, tip)}</span>")
         parts.append(f'<span><span class="arrow">→</span><span class="sub">다음 실행 {데이터.fmt_day(next_run)} 05:00</span></span>')
@@ -258,7 +262,7 @@ def render_panel_a():
             st.html(f'<div class="sub">{테마.status_chip("skipped", "조회 실패")} {esc(", ".join(failed))}</div>')
 
     with st.container(key="card_grid"):
-        st.subheader(f"최근 {GRID_DAYS}일 × 단계", anchor=False, help=GRID_TIP)
+        st.subheader(f"최근 {GRID_DAYS - 1}일 + 다음 날 × 단계", anchor=False, help=GRID_TIP)
         cols = '<colgroup><col class="stage">' + "<col>" * len(days) + "</colgroup>"
         bases = [basis_text(상태.day_basis(d, src)) for d in days]
         holidays = [상태.column_holiday(d, src) for d in days]
