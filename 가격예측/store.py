@@ -33,6 +33,11 @@ MLFLOW_HTTP_LIMITS = {
     "MLFLOW_HTTP_REQUEST_TIMEOUT": "15",
 }
 
+# 서빙 모델 표시 값(체크포인트 meta serving_model, MLflow tag·param serving_model). 대시보드.백테스트_재생이 이 값을 본다.
+SERVING_FINAL_REFIT = "final_refit"   # train+val+test 전체 재학습 모델
+SERVING_GATE_MODEL = "gate_model"     # 게이트 판정에 쓴 train→val 모델(재학습 실패 시 서빙)
+GATE_MODEL_SUBDIR = "gate_model"      # 재학습 모델 버전 폴더 안에 게이트 모델을 보관하는 하위 폴더
+
 # model_registry 자동 등록 값. 끄려면 환경변수 MODEL_REGISTRY_AUTO=0.
 REGISTRY_SOURCE = "live"
 REGISTRY_GATE_DEFINITION = "tickermean"
@@ -41,15 +46,24 @@ REGISTRY_MISSING_SHOW = 10  # [REGISTRY-MISSING] 줄에 보여줄 최대 version
 
 # ── 모델 체크포인트 저장 ──────────────────────────────────────────────────────────
 
+def new_version():
+    """
+    설명: 체크포인트 버전 문자열(UTC 현재 시각 YYYYMMDD_HHMMSS)을 만든다.
+    주의 사항: model_predictions.model_version·model_registry와 같은 형식이다(형식을 바꾸지 말 것).
+    입력 타입->반환 타입: () -> str
+    """
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
 def save_checkpoint(model, scaler, feature_cols, model_kwargs, checkpoint_dir, version=None,
-                     extra_meta=None, model_class_name=None):
+                     extra_meta=None, model_class_name=None, update_latest=True):
     """
     설명: state_dict·scaler·meta.json을 새 버전 폴더(checkpoint_dir/<version>/)에 저장하고 latest.txt를 그 버전으로 바꾼다.
-    주의 사항: 파일 쓰기. version 생략 시 UTC 저장 시각(YYYYMMDD_HHMMSS). 이전 버전은 덮어쓰지 않는다.
-    입력 타입->반환 타입: (nn.Module, FeatureScaler, list[str], dict, str, str|None, dict|None, str|None) -> str
+    주의 사항: 파일 쓰기. version 생략 시 new_version(). 이전 버전은 덮어쓰지 않는다. update_latest=False면 latest.txt를 건드리지 않는다(게이트 모델 보관용).
+    입력 타입->반환 타입: (nn.Module, FeatureScaler, list[str], dict, str, str|None, dict|None, str|None, bool) -> str
     """
     if version is None:
-        version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        version = new_version()
     version_dir = os.path.join(checkpoint_dir, version)
     os.makedirs(version_dir, exist_ok=True)
 
@@ -68,8 +82,9 @@ def save_checkpoint(model, scaler, feature_cols, model_kwargs, checkpoint_dir, v
     with open(os.path.join(version_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    with open(os.path.join(checkpoint_dir, "latest.txt"), "w", encoding="utf-8") as f:
-        f.write(version)
+    if update_latest:
+        with open(os.path.join(checkpoint_dir, "latest.txt"), "w", encoding="utf-8") as f:
+            f.write(version)
 
     return version
 
@@ -308,11 +323,12 @@ def count_prediction_results(results):
 # ── 실행 기록(MLflow) ─────────────────────────────────────────────────────────────
 
 def build_run_payload(tickers, version, train_out, gate, prediction_results, model_kwargs, input_data_suspect=False,
-                      tuned_params_id=None):
+                      tuned_params_id=None, refit=None):
     """
     설명: MLflow에 남길 run 이름·태그·파라미터·손실 수열·지표를 dict로 만든다(run 이름 "pd<prediction_date>_v<version>").
     주의 사항: 태그·파라미터·지표 이름은 바꾸지 말 것. n_input_suspect는 0 또는 성공 종목 수. 채택된 튜닝 값으로 돈 실행만 param tuned_params_id를 더한다.
-    입력 타입->반환 타입: (list[str], str, dict, dict, dict, dict, bool, str|None) -> dict
+    refit(전체 재학습 결과 요약)이 있으면 서빙 모델 표시(tag·param serving_model)와 재학습 기록을 더한다. 없으면(FINAL_REFIT=0) 예전과 같다.
+    입력 타입->반환 타입: (list[str], str, dict, dict, dict, dict, bool, str|None, dict|None) -> dict
     """
     cfg = train_out["train_config"]
     pred_dates = sorted({v["prediction_date"] for v in prediction_results.values() if isinstance(v, dict)})
@@ -356,6 +372,18 @@ def build_run_payload(tickers, version, train_out, gate, prediction_results, mod
     }
     if tuned_params_id is not None:
         payload["params"]["tuned_params_id"] = tuned_params_id
+    if refit is not None:
+        payload["tags"]["serving_model"] = refit["serving_model"]
+        payload["params"]["serving_model"] = refit["serving_model"]
+        if refit["serving_model"] == SERVING_FINAL_REFIT:
+            payload["params"]["refit_epochs"] = refit["epochs"]
+            payload["params"]["refit_n_rows"] = refit["n_rows"]
+            payload["params"]["refit_last_target_date"] = refit["last_target_date"]
+            payload["steps"] += [("refit_train_loss", loss, epoch) for epoch, loss in refit["history"]]
+            payload["metrics"].append({"refit_elapsed_sec": refit["elapsed_sec"],
+                                       "refit_final_train_loss": refit["history"][-1][1]})
+        else:
+            payload["params"]["refit_error"] = refit["error"][:250]
     return payload
 
 
@@ -498,12 +526,13 @@ class CollectSink(Sink):
         self.experiment = experiment
         self.predictions, self.registry = [], []
         self.checkpoint = None
+        self.gate_checkpoint = None
         self.mlflow = None
 
     def on_checkpoint(self, ckpt):
         """
-        설명: version과 체크포인트 요약(state_dict 해시, scaler, 피처, model_kwargs, model_class, extra_meta)을 담는다.
-        주의 사항: 없음.
+        설명: version과 서빙 체크포인트 요약(state_dict 해시, scaler, 피처, model_kwargs, model_class, extra_meta)을 담는다.
+        주의 사항: 전체 재학습으로 게이트 모델을 따로 보관했으면 그 요약(state_hash·scaler)을 gate_checkpoint에 담는다.
         입력 타입->반환 타입: (dict) -> None
         """
         self.registry.append(ckpt["version"])
@@ -514,6 +543,14 @@ class CollectSink(Sink):
             "feature_cols": list(ckpt["feature_cols"]), "model_kwargs": dict(ckpt["model_kwargs"]),
             "model_class": ckpt["model_class"], "extra_meta": dict(ckpt["extra_meta"]),
         }
+        gate = ckpt.get("gate_model")
+        if gate is not None:
+            self.gate_checkpoint = {
+                "state_hash": state_dict_sha256(gate["model"]),
+                "scaler_mean": np.asarray(gate["scaler"].mean_).copy(),
+                "scaler_std": np.asarray(gate["scaler"].std_).copy(),
+                "extra_meta": dict(gate["extra_meta"]),
+            }
 
     def save_prediction(self, row):
         """
