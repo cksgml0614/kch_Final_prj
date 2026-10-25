@@ -10,12 +10,12 @@
 **현재 상태·일정(2026-10-25 기준)**
 | 항목 | 상태 |
 |---|---|
-| main | `61cabb2`(전체 데이터 재학습 머지, 아래 1-2번). 그 전에 대시보드 `4c7155e`(10/19)·주간 튜닝 `754f744`(10/24)·실험 폴더 삭제 `73ff1c3`(10/25)이 들어왔다. 운영 폴더 `C:\kch_Final_prj`는 10/25부터 main 체크아웃(그 전에는 주석 브랜치) |
+| main | 10/25 주석 브랜치 병합 `ce44963`(6번 20)·대시보드 휴장 표시 `006549e`·전체 데이터 재학습 머지 `61cabb2`(아래 1-2번). 그 전에 대시보드 `4c7155e`(10/19)·주간 튜닝 `754f744`(10/24)·실험 폴더 삭제 `73ff1c3`(10/25)이 들어왔다. 운영 폴더 `C:\kch_Final_prj`는 10/25부터 main 체크아웃(그 전에는 주석 브랜치) |
 | 운영 모델 | 서빙 = train+val+test 전체 재학습 모델, 게이트 = train→val 모델(1-2번). 튜닝값은 보류(`best_params.json.hold_20261025`) → 기본값으로 운영(1-1번) |
-| 미병합 브랜치 | `cleanup/comments-folders`(폴더별 주석·docstring 정리 6커밋, 코드 동작 변경 없음) — 합칠 때 `대시보드/백테스트_재생.py` 충돌 1건 |
+| 미병합 브랜치 | 없음 — `cleanup/comments-folders`는 10/25 `ce44963`로 병합 후 삭제(6번 20). 로컬 브랜치는 main 하나, worktree는 운영 폴더 하나 |
 | 10/26(월) 05:00 | **재학습이 운영에 처음 적용되는 실행 — 점검 대기**(6번 19) |
 | 11/1(일) 05:30 | 두 번째 주간 튜닝(Weekly Tuning). 같은 성격의 설정을 다시 채택할 수 있다(1-1번 한계) |
-| 이후 | 주석 브랜치 병합, 검증·정리 worktree 정리(6번 20·21) |
+| 이후 | 휴장일 학습 건너뛰기 여부(10/26 점검 뒤 결정). 주석 브랜치 병합·worktree 정리는 10/25 완료(6번 20·21) |
 
 **0. 코드 정리(2026-10-17, 브랜치 `cleanup/pipeline-stages` — 10/17 main 병합, 10/18 정리 3단계 추가 병합, 아래 "병합·검증")**
 - **기준점**: 정리 전 코드는 git 태그 `pre-cleanup`(커밋 `739e6ea`, main)에 있다. 지운 파일·함수는 `git show pre-cleanup:<경로>`로 본다.
@@ -55,8 +55,11 @@
   결과 문서 `결과_*.md` 10개(TaskC 섹터분산·TaskE 라벨링·TaskF 게이팅검증·TaskT 급변구간·TaskT 방향예측 폐기·TaskT 변동성예측 최종·
   변동성 조기경보 검증·실험 다일방향·파이프라인 실행순서 감사), `analysis/detect_stress_period.py`, `constants.STRESS_PERIOD_START/END`를
   지웠다. 이 문서 곳곳의 "상세: …md" 참조는 "pre-cleanup 태그 시점의 …"로 표시했고, 상세 수치·표는 `git show pre-cleanup:<파일명>`으로 본다.
-  이 문서에 적힌 요약·결론은 그대로 유효하다. ⚠️ `Database/가격예측/테이블_생성.sql` 주석(3·11행)의 결과 문서 참조는 Database SQL을
-  바꾸지 않는 원칙에 따라 그대로 남겼다. 판정기준 해시 3개 파일은 이 문서들을 참조하지 않는다.
+  이 문서에 적힌 요약·결론은 그대로 유효하다. ⚠️ **Database SQL 원칙(2026-10-25 정리, 사람 결정)**: `Database/{도메인}/*.sql`의
+  SQL 본문(스키마)은 정리·리팩터링에서 바꾸지 않는다 — 스키마 변경은 아래 "규칙"의 ALTER TABLE + `테이블_생성.sql` 반영 절차로만 한다.
+  주석 정리는 허용한다. 10/17 정리 때는 이 원칙을 주석까지 넓게 적용해 `Database/가격예측/테이블_생성.sql` 주석(옛 3·11행)의 결과 문서
+  참조를 남겼으나, 10/25 주석 브랜치 병합(`ce44963`)에서 그 주석을 정리하고 배경·마이그레이션 이력(ALTER 원문 포함)을
+  `Database/결정기록.md`로 옮겼다(SQL 본문은 주석 제외 비교로 동일 확인). 판정기준 해시 3개 파일은 이 문서들을 참조하지 않는다.
 - **병합·검증(2026-10-17~18)**:
   - 1차: `cleanup/pipeline-stages`를 10/17 병합 커밋 `a433ead`로 main에 합쳤다. 10/18(일) 05:00 무인 실행(a433ead)이 10/17 수동
     실행과 예측 100행·게이트·플래그·baseline·state_dict SHA256 `cec251d4…`까지 같았다. 입력 차이는 Actions가 넣은 USD_KRW
@@ -376,12 +379,17 @@ pooled+종목임베딩 방향 예측(09-06, 무작위 수준으로 재확인) �
     서빙 모델 = 재학습 모델`, `[registry] … 신규 등록`, 예측 100/100, MLflow tag `serving_model=final_refit`. 없어야 할 줄: `[REFIT-FAIL]`,
     `[TUNE] 채택값 사용`. 예상 변화: target 10/26 행 100개가 재학습 모델 값으로 덮어써지고(UPSERT) 평균 예측 약 2.23 → 3.05.
     체크포인트 버전 폴더에 `gate_model/`이 생겨야 한다.
-20. **주석 브랜치 병합**: `cleanup/comments-folders`(73ff1c3 기준 6커밋 — 주가데이터·시장지표·대시보드·루트·.github·Database 주석·docstring과
-    폴더별 결정기록.md, 코드 동작 변경 없음, bat·ps1은 건드리지 않음)를 main에 합친다. 합칠 때 `대시보드/백테스트_재생.py` 충돌 1건(주석 정리 vs
-    재학습의 gate_model 재생)을 해결해야 한다. 이 브랜치의 Database 주석 정리는 위 0번 "Database SQL을 바꾸지 않는 원칙"과 충돌하므로 병합 때 사람이 확인한다.
-21. **worktree 정리(푸시 뒤)**: 검증용 `C:\kch_g_pre`·`C:\kch_g_post`(detached)·`C:\kch_refit`(feature/final-refit, 머지됨), 정리 대기
-    `C:\kch_cleanup`·`C:\kch_tidy`·`C:\kch_baselines`(커밋 안 된 docstring 1줄, 버려도 됨)·`C:\kch_comments`·`C:\kch_dashboard`(머지됨)·`C:\kch_tuning`(머지됨)과
-    해당 브랜치. 사람이 지시할 때 지운다.
+20. ~~**주석 브랜치 병합**~~ — ✅ **2026-10-25 병합 커밋 `ce44963`**(main, 사람 지시). `cleanup/comments-folders`(73ff1c3 기준 6커밋 — 주가데이터·
+    시장지표·대시보드·루트·.github·Database 주석·docstring과 폴더별 결정기록.md 6개, bat·ps1은 건드리지 않음). Database 주석 정리도 포함했다(위 0번
+    "Database SQL 원칙" — 스키마 불변 기준, 주석 정리는 허용). 충돌 5곳(`대시보드/백테스트_재생.py` 1·`대시보드/파이프라인_상태.py` 4)은 main 쪽을
+    썼다 — 브랜치 쪽 주석이 10/25 대시보드 변경 전 규칙(열 = 실행일, 휴장은 ①②만)을 설명하고 있었다. 이어서 `대시보드/결정기록.md`를 10/25
+    규칙(열 = 거래일, 휴장 열, 늦은 보충 실행 열 보정, 다음 날 예정 열, 일별 하이브리드 ÷ 최선 baseline 비율)으로 고치고 "일별 RMSE에서 제외"
+    문구를 "일별 값에서 제외"로 바꿨다. 검증: 병합 전 main `006549e` 대비 코드·설정·SQL 24개가 주석·docstring 제외 AST(Python)·파싱 결과(yml)·
+    주석 제외 본문(SQL)으로 동일(의도한 칩 툴팁 문구 1곳 제외), `가격예측/` 바이트 동일, bat·ps1·requirements 변경 없음, pyflakes 0, AppTest
+    (정상·외부 실패) 예외 0·DB read_only. 브랜치는 병합 확인 후 삭제.
+21. ~~**worktree 정리**~~ — ✅ 2026-10-25 검증·정리 worktree 9개(`C:\kch_g_pre`·`kch_g_post`·`kch_refit`·`kch_cleanup`·`kch_tidy`·`kch_baselines`·
+    `kch_comments`·`kch_dashboard`·`kch_tuning`)와 병합된 로컬 브랜치(`cleanup-and-automation` 포함)를 지웠다(사람 지시, `kch_baselines`의 커밋 안 된
+    docstring 1줄은 버림). 태그(`pre-cleanup`·`pre-tidy-merge`)는 남아 있다.
 
 ---
 
@@ -963,7 +971,7 @@ kch_Final_prj/
 > `종목_월간갱신.py`. 위 상태 요약 0번 참고. 2026-10-25 main에는 그 뒤 `하이퍼파라미터_튜닝.py`·`주간_튜닝.py`·루트 `주간_튜닝.bat`·
 > `주간_튜닝_작업등록.ps1`(754f744), `대시보드/` 2·3단계(4c7155e), 전체 재학습(`train_common.train_fixed_epochs`·`가격예측_변동성_공통.
 > refit_on_all_data`, 61cabb2)이 더해졌다 — 상태 요약 1·1-1·1-2번. 폴더별 결정기록.md(주가데이터·시장지표·대시보드·루트·.github·Database)는
-> 미병합 `cleanup/comments-folders`에만 있다.
+> 2026-10-25 주석 브랜치 병합(`ce44963`)으로 main에 들어왔다(`가격예측/결정기록.md`와 같은 형식 — 지금 코드가 왜 그렇게 동작하는지).
 
 > 2026-09-12: 위 트리의 `뉴스데이터/`, `감성분석/`, `라벨/`, `빅카인즈/`는 코드 의존성 검증 후
 > `쓰래기통/`으로 이동(활성 파이프라인 참조 0건 확인, 실험 결론 자체는 위 기록대로 유지).
