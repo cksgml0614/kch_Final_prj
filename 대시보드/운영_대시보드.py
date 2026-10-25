@@ -139,8 +139,8 @@ def grid_short(stage_no, status, text):
             return str(rec), True, f"이후 재실행으로 덮어씀, 저장 {rec} / DB 남은 {rec - over}"
         if (m := re.match(r"^(\d+)행$", text)):
             return (m.group(1) if status == "success" else text), False, ""
-    if status == "skipped" and text == "휴장":
-        return "휴장", False, ""
+    if text.startswith("휴장") or text == "재실행":
+        return text.split("·")[0], False, ""
     if stage_no == 7 and text in SHORT_WORDS:
         return SHORT_WORDS[text], False, ""
     if (m := HHMM.search(text)):
@@ -182,16 +182,18 @@ def grid_cell(stage_no, stage, day, cell, basis=""):
             f'title="{esc(title)}"><span class="cell">{테마.icon(ico)}{label}</span></td>')
 
 
-def grid_header(day, today, current, basis=""):
+def grid_header(day, today, current, basis="", holiday=None):
     """
-    설명: 열 머리(날짜와 요일 두 줄). 주말은 흐리게, 오늘 열은 위 선 + 옅은 배경, 오늘보다 뒤인 진행 중 열은 점선 위 선.
+    설명: 열 머리(날짜와 요일 두 줄). 휴장 열은 흐리게, 오늘 열은 위 선 + 옅은 배경, 오늘보다 뒤인 진행 중 열은 점선 위 선.
     주의 사항: 열 날짜 = 그 아침 05:00 실행 날짜. 12:00 이후에는 진행 중 사이클(오늘 저녁 수집 → 내일 05:00)이 내일 열이다.
-    입력 타입->반환 타입: (date, date, date, str) -> str
+      휴장 열 = 수집 대상일(열 날짜 - 1일)이 휴장인 열(holiday = 근거 문구) — 일·월요일 열이고 토요일 열은 금요일분을 수집한다.
+    입력 타입->반환 타입: (date, date, date, str, str|None) -> str
     """
-    flags = ["weekend" if day.weekday() >= 5 else "", "today" if day == today else "",
+    flags = ["weekend" if holiday else "", "today" if day == today else "",
              "now" if day == current and day != today else ""]
     tip = (f"{데이터.fmt_day(day)} 05:00 실행 사이클(전날 12:00~당일 12:00)"
-           + (" · 진행 중(오늘 저녁 수집 → 내일 05:00 예측)" if "now" in flags else "") + (f" · {basis}" if basis else ""))
+           + (" · 진행 중(오늘 저녁 수집 → 내일 05:00 예측)" if "now" in flags else "")
+           + (f" · 수집 대상일 휴장({holiday}) — 새 거래일 없음" if holiday else "") + (f" · {basis}" if basis else ""))
     return (f'<th class="{" ".join(f for f in flags if f)}" title="{esc(tip)}">{day.month}/{day.day}'
             f'<span class="wd">{데이터.WEEKDAYS[day.weekday()]}</span></th>')
 
@@ -222,7 +224,9 @@ GRID_TIP = ("칸에 마우스를 올리면 전문과 근거가 보인다. 기록
             "① 수집: GitHub Actions·로컬 수집 / ② 가격 정렬 점검 / ③⑥ MLflow run(없으면 로그) / ④ 게이트 / "
             "⑤ 그 버전 마지막 기준일의 예측 행 수(100 성공·90 이상 경고·미만 실패, 이후 재실행이 덮어썼으면 실행 기록의 저장 수) / "
             "⑦ 모델 등록·실측 / ⑧ 주간 튜닝(부모 run의 시작 시각, 아이콘 = 결과: 채택·유지·기본값으로 복귀·기본 유지). 시각은 그 단계가 끝난 시각(⑧은 시작 시각). "
-            "건너뜀(휴장) = ①② 단계에서 수집 대상일이 휴장으로 확인되고(주가·KOSPI 행 없음 + 뒤 거래일 있음) 그 단계가 성공한 경우만.")
+            "휴장 열(머리 흐림) = 수집 대상일(열 날짜 - 1일)이 토·일이거나, 평일 공휴일로 확인된 열(주가·KOSPI 행 없음 + 뒤 거래일 있음). "
+            "휴장 열에서 ①② 성공은 '휴장', 경고·실패는 '휴장' 경고 칸, ③~⑦은 실행이 없으면 '휴장', "
+            "앞 실행이 이미 계산한 기준일을 다시 계산했으면 '재실행'(실패·경고 칸은 원래 판정 그대로).")
 
 
 def render_panel_a():
@@ -258,7 +262,8 @@ def render_panel_a():
         st.subheader(f"최근 {GRID_DAYS}일 × 단계", anchor=False, help=GRID_TIP)
         cols = '<colgroup><col class="stage">' + "<col>" * len(days) + "</colgroup>"
         bases = [basis_text(상태.day_basis(d, src)) for d in days]
-        head = "".join(grid_header(d, today, current, b) for d, b in zip(days, bases))
+        holidays = [상태.column_holiday(d, src) for d in days]
+        head = "".join(grid_header(d, today, current, b, h) for d, b, h in zip(days, bases, holidays))
         rows = [f'<tr><th class="stage" scope="row">{stage}</th>'
                 f'{"".join(grid_cell(no, stage, d, c, b) for d, c, b in zip(days, grid[stage], bases))}</tr>'
                 for no, stage in enumerate(상태.STAGES, start=1)]
@@ -407,10 +412,14 @@ def summary_table(rows, colors):
     return f'<div class="dwrap"><table class="dtable">{head}{"".join(body)}</table></div>'
 
 
-PANEL_C_TIP = ("RMSE는 배포 게이트와 같은 종목평균(종목별 RMSE의 평균). 하루치는 종목당 1행이라 평균 절대 오차와 같다. "
+PANEL_C_TIP = ("요약 표의 RMSE는 배포 게이트와 같은 종목평균(종목별 RMSE의 평균). 하루치는 종목당 1행이라 평균 절대 오차와 같아서 "
+               "일별 그래프·표는 평균 절대 오차로 쓰고, 그 크기는 그날 시장 변동이 클수록 커지므로 날짜끼리는 "
+               "'하이브리드 ÷ 최선 baseline' 비율로 비교한다(1 미만 = 하이브리드가 baseline 셋을 모두 이김). "
                "운영 기록만 집계하고 시험 실행·과거 백테스트 실행은 뺐다. "
                "사전 예측 = 모델 버전 시각(KST)이 평가일 08:30보다 이른 행, 나머지는 사후 계산.")
-OPS_TIP = ("평가일 = 예측 기준일 뒤 첫 거래일. 90행 미만인 날은 '불완전'으로 일별 RMSE에서 뺀다. "
+OPS_TIP = ("평가일 = 예측 기준일 뒤 첫 거래일. 90행 미만인 날은 '불완전'으로 일별 값에서 뺀다. "
+           "숫자 = 평균 절대 오차(종목 100개의 |예측 - 실현| 평균, 낮을수록 좋음, 그날 가장 낮은 값 굵게). "
+           "실현 평균 = 그날 실현 변동성 평균(오차 크기의 기준), ÷최선 = 하이브리드 ÷ baseline 셋 중 최저(1 미만이면 모델 우세). "
            "칩: 사전/사후, 게이트, 입력 상태(신뢰 조건 = 게이트 통과 · 입력 정상).")
 
 
@@ -464,28 +473,39 @@ def render_panel_c():
     if summary:
         st.html(summary_table(summary, [color_of.get(r["그룹"], 테마.BORDER) for r in summary]))
 
-    # 일별 RMSE: 재생 4계열 선 + 운영 하이브리드 점(90행 이상인 평가일만)
+    # 일별 비교: 하이브리드 ÷ 최선 baseline(평균 절대 오차 비율). 재생은 선, 운영은 점(90행 이상인 평가일만)
     fig = go.Figure()
+    hover = ("%{x}<br>하이브리드 ÷ %{customdata[1]} = %{y:.2f}<br>평균 절대 오차 하이브리드 %{customdata[0]:.3f} · "
+             "%{customdata[1]} %{customdata[2]:.3f}<br>실현 평균 %{customdata[3]:.2f} · 평균 오차 %{customdata[4]:+.2f}"
+             "(+ 과대)<extra></extra>")
+
+    def custom(c):
+        return [c["하이브리드"], c["최선 baseline"], c["최선 값"], c["실현 평균"], c["평균 오차"]]
+
     if rep_conf is not None and len(rep_conf):
-        for col, label in 데이터.PREDICTION_COLS.items():
-            days = sorted(rep_conf["realized_date"].unique())
-            vals = [데이터.tickermean_rmse(rep_conf[rep_conf["realized_date"] == d], col) for d in days]
-            fig.add_trace(go.Scatter(x=days, y=vals, mode="lines+markers", name=f"재생 {label}"))
+        days = sorted(rep_conf["realized_date"].unique())
+        cmp_ = [데이터.daily_compare(rep_conf[rep_conf["realized_date"] == d]) for d in days]
+        fig.add_trace(go.Scatter(x=days, y=[c["비율"] for c in cmp_], mode="lines+markers", name="재생 하이브리드",
+                                 customdata=[custom(c) for c in cmp_], hovertemplate=hover))
     op_days = []
     if ops is not None:
         conf = ops[ops["realized_status"] == "confirmed"]
         for d, g in conf.groupby("realized_date"):
             chips, usable = day_chips(g)
             op_days.append((d, g, chips, usable))
-        pts = [(d, 데이터.tickermean_rmse(g, "predicted_volatility"), bool((g["group"] == 데이터.GROUP_PRE).all()))
+        pts = [(d, 데이터.daily_compare(g), bool((g["group"] == 데이터.GROUP_PRE).all()))
                for d, g, _, usable in op_days if usable]
         if pts:
             fig.add_trace(go.Scatter(
-                x=[p[0] for p in pts], y=[p[1] for p in pts], mode="markers", name="운영 하이브리드 (● 사전 · ✕ 사후·혼재)",
+                x=[p[0] for p in pts], y=[p[1]["비율"] for p in pts], mode="markers",
+                name="운영 하이브리드 (● 사전 · ✕ 사후·혼재)",
                 marker=dict(size=11, symbol=["circle" if p[2] else "x" for p in pts]),
-                hovertemplate="%{x}<br>RMSE %{y:.4f}<extra></extra>"))
-    st.html('<div class="h4">일별 종목평균 RMSE</div>')
-    테마.show_chart(fig, height=360, yaxis_title="RMSE", xaxis_title="평가일")
+                customdata=[custom(p[1]) for p in pts], hovertemplate=hover))
+    fig.update_traces(showlegend=True)  # 계열이 하나여도 범례(● 사전 · ✕ 사후)를 보인다
+    fig.add_hline(y=1, line=dict(dash="dot", color=테마.TEXT_MUTED, width=1))
+    st.html('<div class="h4">일별 하이브리드 ÷ 최선 baseline <span class="sub">평균 절대 오차 비율 · '
+            '점선 1 아래 = 그날 baseline 셋을 모두 이김</span></div>')
+    테마.show_chart(fig, height=360, yaxis_title="하이브리드 ÷ 최선 baseline", xaxis_title="평가일")
 
     # 산점도: 그룹별 예측(하이브리드) 대 실현
     sc, hi = go.Figure(), 0.0
@@ -504,21 +524,28 @@ def render_panel_c():
     if ops is None:
         return
     models = list(데이터.PREDICTION_COLS.values())
-    head = ("<tr><th>평가일</th><th>예측 기준일</th><th class='r'>행</th><th>상태</th>"
-            + "".join(f"<th class='r'>{m}</th>" for m in models) + "</tr>")
+    head = ("<tr><th>평가일</th><th>예측 기준일</th><th class='r'>행</th><th>상태</th><th class='r'>실현 평균</th>"
+            + "".join(f"<th class='r'>{m}</th>" for m in models) + "<th class='r'>÷최선</th></tr>")
     body = []
     for t, g in ops[ops["realized_status"] != "confirmed"].groupby("target_date"):
         body.append(f'<tr><td>{데이터.fmt_day(t)}</td><td>{데이터.fmt_day(g["prediction_date"].iloc[0])}</td>'
                     f'<td class="r">{len(g)}</td><td>{테마.status_chip("waiting", "실측 대기")}</td>'
-                    + "<td class='r'>-</td>" * len(models) + "</tr>")
+                    + "<td class='r'>-</td>" * (len(models) + 2) + "</tr>")
     for d, g, chips, usable in sorted(op_days, key=lambda x: x[0], reverse=True):
-        vals = 데이터.rmse_row(g) if usable else {}
-        cells = "".join(f"<td class='r'>{vals[k]:.4f}</td>" if usable else "<td class='r'>-</td>" for k in models)
+        if usable:
+            c = 데이터.daily_compare(g)
+            low = min(c[k] for k in models)
+            cells = (f"<td class='r'>{c['실현 평균']:.2f}</td>"
+                     + "".join(f"<td class='r'>{'<b>' if c[k] == low else ''}{c[k]:.3f}{'</b>' if c[k] == low else ''}</td>"
+                               for k in models)
+                     + f"<td class='r' title='하이브리드 ÷ {c['최선 baseline']}'>{c['비율']:.2f}</td>")
+        else:
+            cells = "<td class='r'>-</td>" * (len(models) + 2)
         pds = ", ".join(데이터.fmt_day(x) for x in sorted(g["prediction_date"].unique()))
         body.append(f'<tr><td>{데이터.fmt_day(d)}</td><td>{pds}</td><td class="r">{len(g)}</td>'
                     f'<td>{chips}</td>{cells}</tr>')
     dates = ops[ops["realized_status"] == "confirmed"]["realized_date"]
-    st.html(f'<div class="h4">평가일별 운영 기록 <span class="sub num">평가일 {dates.nunique()}개 · '
+    st.html(f'<div class="h4">평가일별 운영 기록 <span class="sub num">평균 절대 오차 · 평가일 {dates.nunique()}개 · '
             f'{dates.min()} ~ {dates.max()}</span> {테마.info(OPS_TIP)}</div>')
     st.html(f'<div class="dwrap"><table class="dtable compact">{head}{"".join(body)}</table></div>')
 
