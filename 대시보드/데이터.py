@@ -192,3 +192,26 @@ def rmse_row(df):
     입력 타입->반환 타입: (pd.DataFrame) -> dict
     """
     return {label: tickermean_rmse(df, col) for col, label in PREDICTION_COLS.items()}
+
+
+BASELINE_LABELS = ("GARCH", "SMA20", "Parkinson")
+
+
+def daily_compare(g):
+    """
+    설명: 평가일 하루치(g)의 비교 값을 dict로 돌려준다 — 계열별 평균 절대 오차(라벨 키), 실현 평균, 예측 평균, 평균 오차
+      (예측 - 실현, +면 과대), 최선 baseline 라벨과 값, 하이브리드 ÷ 최선 baseline(1 미만 = 하이브리드가 셋 다 이김).
+    주의 사항: 실측이 없는 행은 뺀다. 하루치는 종목당 1행이라 평균 절대 오차 = 종목평균 RMSE(tickermean_rmse)와 같다.
+      절대 오차는 그날 시장이 크게 움직일수록 커지므로(실현 평균과 같이 움직인다) 날짜끼리는 비율로 비교한다.
+    입력 타입->반환 타입: (pd.DataFrame) -> dict
+    """
+    d = g.dropna(subset=["realized_volatility"])
+    out = {label: float((d[col] - d["realized_volatility"]).abs().mean()) if d[col].notna().any() else float("nan")
+           for col, label in PREDICTION_COLS.items()}
+    base = {k: out[k] for k in BASELINE_LABELS if pd.notna(out[k])}
+    best = min(base, key=base.get) if base else None
+    out.update({"실현 평균": float(d["realized_volatility"].mean()), "예측 평균": float(d["predicted_volatility"].mean()),
+                "평균 오차": float((d["predicted_volatility"] - d["realized_volatility"]).mean()),
+                "최선 baseline": best, "최선 값": base.get(best, float("nan")),
+                "비율": out["하이브리드"] / base[best] if best and base[best] else float("nan")})
+    return out
